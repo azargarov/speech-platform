@@ -1,0 +1,19 @@
+# Architecture
+
+Gateway → STT worker; Gateway → TTS worker. Workers have no calls or imports between them. Each process is independently buildable and configurable. Shared Python code contains HTTP/configuration mechanics only; each worker can be deployed without starting the other. One worker image supports separate entry points.
+
+Gateway owns public versioned contracts, authentication, validation and routing. Provider implementation, models and lifecycle belong to workers. Public model/voice IDs are platform aliases; future configuration maps aliases to provider models. Public types do not reference faster-whisper or any engine.
+
+In M01 GET /healthz, GET /readyz and GET /metrics exist. Gateway readiness is an injected interface; the foundation implementation returns false. Worker readiness is false because no provider is installed. M02/M03 will make worker readiness depend on successful model loading, capacity and draining state; M04 will make gateway readiness depend on authentication configuration, routing initialization and required worker readiness. Liveness must remain independent of downstream model health.
+
+Go uses explicit constructor arguments, local configuration values and an HTTP transport helper. The Python shared transport is a small module, not an inference framework. No mutable application globals. Go propagates signal context to bounded server shutdown. Future requests must propagate request context to downstream HTTP and cancel providers on disconnect/deadline. M01 does not claim inference cancellation is implemented.
+
+Streaming is reserved in contracts and capability metadata. A future ADR must define framing, backpressure, disconnect propagation and auth before streaming activation; current stream=true requests are contractually rejected once routing exists. No streaming transport in M01.
+
+Runtime state: process alive → provider loading → ready → draining; provider errors remove readiness without killing liveness. M01 stops at process alive. Skeleton request limits and deadlines are configured. Request bodies are never processed or persisted. No transcripts or request payloads are logged. Worker start events and gateway logs are structured JSON. Prometheus metric names planned: speech_requests_total, speech_request_duration_seconds, speech_inflight_requests, speech_provider_ready. GET /metrics exposes the Prometheus speech_ready gauge; request instrumentation will accompany actual routing.
+
+Deployment uses one internal Compose network and three services. The gateway alone publishes a configurable loopback port. Internal networking blocks runtime outbound access; builds require registry/package access. Models must be provisioned offline into read-only storage in M02/M03. Existing host stacks remain independent. CPU/memory limits are skeleton defaults, not inference sizing recommendations.
+
+Configuration is strict YAML with unknown/duplicate fields rejected. Required fields have no implicit application defaults. Sample values are deployment data. Config changes require restart. Secrets must eventually be read from mounted secret files, never committed. auth_mode is validated configuration intent only; neither mode enables inference in M01.
+
+Structure deviations: services/worker contains shared transport; three OpenAPI documents separate public and private boundaries; scripts contains GPU-free acceptance checks. No benchmark source was fabricated when remote access failed.

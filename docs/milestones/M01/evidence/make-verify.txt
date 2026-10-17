@@ -1,0 +1,29 @@
+go vet ./...
+.venv/bin/python -m ruff check services scripts
+All checks passed!
+.venv/bin/python -m ruff format --check services scripts
+5 files already formatted
+go run ./cmd/gateway --config configs/gateway.yaml --check-config
+.venv/bin/python -m services.stt.main --config configs/stt.yaml --check-config
+.venv/bin/python -m services.tts.main --config configs/tts.yaml --check-config
+docker compose -f deployments/compose/compose.yaml config --quiet
+docker compose -f deployments/compose/compose.yaml config --format json | .venv/bin/python scripts/check_compose.py
+go test -race ./...
+?   	speech-platform/cmd/gateway	[no test files]
+ok  	speech-platform/internal/config	1.011s
+ok  	speech-platform/internal/gateway	(cached)
+?   	speech-platform/internal/transport	[no test files]
+.venv/bin/python -m unittest discover -s scripts -p 'test_*.py' -v
+test_compose_isolation (test_acceptance.Acceptance.test_compose_isolation) ... ok
+test_no_deployment_addresses_or_worker_coupling (test_acceptance.Acceptance.test_no_deployment_addresses_or_worker_coupling) ... ok
+test_openapi (test_acceptance.Acceptance.test_openapi) ... ok
+test_private_audio_excluded (test_acceptance.Acceptance.test_private_audio_excluded) ... ok
+test_worker_config (test_acceptance.Acceptance.test_worker_config) ... ok
+test_worker_http (test_acceptance.Acceptance.test_worker_http) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 1.118s
+
+OK
+go build ./...
+.venv/bin/python -c 'import ast,pathlib; [ast.parse(p.read_text()) for p in pathlib.Path("services").rglob("*.py")]'

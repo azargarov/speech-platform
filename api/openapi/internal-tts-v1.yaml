@@ -1,0 +1,227 @@
+openapi: 3.0.3
+info:
+  title: TTS internal worker API
+  version: 1.0.0
+  description: Private protocol, reserved in M01. No inference handler installed.
+    Gateway translates platform aliases using configuration; internal provider selection
+    never leaks into public API. Only gateway may reach worker network. Connection
+    close cancels job; gateway propagates remaining deadline in X-Request-Timeout-Ms.
+    Providers must check cancellation during inference. No STT-to-TTS calls. No runtime
+    downloads.
+paths:
+  /internal/v1/speech:
+    post:
+      operationId: internalTTS
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - text
+              - voice
+              properties:
+                text:
+                  type: string
+                  minLength: 1
+                  maxLength: 10000
+                voice:
+                  type: string
+                language:
+                  type: string
+                  default: auto
+                  description: BCP-47 tag or auto. Auto uses provider text detection
+                    when supported; otherwise returns 400.
+                format:
+                  type: string
+                  enum:
+                  - wav
+                  - mp3
+                  - opus
+                  default: wav
+                stream:
+                  type: boolean
+                  enum:
+                  - false
+                  default: false
+      responses:
+        '200':
+          description: Complete audio; Content-Type matches requested format. Unsupported
+            formats return 400. WAV is PCM16; Opus uses Ogg container. Sample rate
+            is provider-selected and encoded in the audio header.
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+            audio/ogg:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Invalid request or unsupported option
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Unknown platform model or voice
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Configured request size limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415':
+          description: Unsupported audio media type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Audio cannot be decoded or language cannot be detected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Capacity exhausted; Retry-After may be provided
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Provider not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '504':
+          description: Request deadline exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - in: header
+        name: X-Request-Timeout-Ms
+        required: true
+        schema:
+          type: integer
+          minimum: 1
+  /healthz:
+    get:
+      responses:
+        '200':
+          description: Process alive
+  /readyz:
+    get:
+      responses:
+        '200':
+          description: Model loaded and able to accept work
+        '503':
+          description: Loading, failed, draining or M01 provider absent
+components:
+  schemas:
+    Error:
+      type: object
+      required:
+      - code
+      - message
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+    Transcription:
+      type: object
+      required:
+      - text
+      - language
+      properties:
+        text:
+          type: string
+        language:
+          type: string
+        segments:
+          type: array
+          description: Present only when supported and requested. Seconds relative
+            to input start.
+          items:
+            type: object
+            required:
+            - start
+            - end
+            - text
+            properties:
+              start:
+                type: number
+                minimum: 0
+              end:
+                type: number
+                minimum: 0
+              text:
+                type: string
+    Model:
+      type: object
+      required:
+      - id
+      - languages
+      - timestamps
+      - streaming
+      properties:
+        id:
+          type: string
+          description: Stable platform alias, never engine-specific.
+        languages:
+          type: array
+          items:
+            type: string
+        timestamps:
+          type: boolean
+        streaming:
+          type: boolean
+    Voice:
+      type: object
+      required:
+      - id
+      - languages
+      - streaming
+      properties:
+        id:
+          type: string
+        languages:
+          type: array
+          items:
+            type: string
+        streaming:
+          type: boolean

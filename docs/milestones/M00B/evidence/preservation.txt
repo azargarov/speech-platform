@@ -1,0 +1,4 @@
+OBSERVED: SHA-256 comparison to a local pre-edit manifest.
+Changed pre-existing files: Makefile, PLANS.md (authorized governance integration/status).
+All other pre-existing files unchanged, including application sources, private audio, contracts, deployment, CI and M01 records.
+Manifest excludes .git, .venv, .ruff_cache and __pycache__; ephemeral manifest is not a repository baseline.

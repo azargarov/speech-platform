@@ -1,0 +1,42 @@
+go vet ./...
+.venv/bin/python -m ruff check services scripts
+All checks passed!
+.venv/bin/python -m ruff format --check services scripts
+7 files already formatted
+go run ./cmd/gateway --config configs/gateway.yaml --check-config
+.venv/bin/python -m services.stt.main --config configs/stt.yaml --check-config
+.venv/bin/python -m services.tts.main --config configs/tts.yaml --check-config
+docker compose -f deployments/compose/compose.yaml config --quiet
+docker compose -f deployments/compose/compose.yaml config --format json | .venv/bin/python scripts/check_compose.py
+go test -race ./...
+?   	speech-platform/cmd/gateway	[no test files]
+ok  	speech-platform/internal/config	(cached)
+ok  	speech-platform/internal/gateway	(cached)
+?   	speech-platform/internal/transport	[no test files]
+.venv/bin/python -m unittest discover -s scripts -p 'test_*.py' -v
+test_compose_isolation (test_acceptance.Acceptance.test_compose_isolation) ... ok
+test_no_deployment_addresses_or_worker_coupling (test_acceptance.Acceptance.test_no_deployment_addresses_or_worker_coupling) ... ok
+test_openapi (test_acceptance.Acceptance.test_openapi) ... ok
+test_private_audio_excluded (test_acceptance.Acceptance.test_private_audio_excluded) ... ok
+test_worker_config (test_acceptance.Acceptance.test_worker_config) ... ok
+test_worker_http (test_acceptance.Acceptance.test_worker_http) ... ok
+test_broken_reference (test_governance.GovernanceValidation.test_broken_reference) ... ok
+test_valid_and_invalid_skill_inputs (test_governance.GovernanceValidation.test_valid_and_invalid_skill_inputs) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 1.126s
+
+OK
+go build ./...
+.venv/bin/python -c 'import ast,pathlib; [ast.parse(p.read_text()) for p in pathlib.Path("services").rglob("*.py")]'
+.venv/bin/python scripts/validate_governance.py
+PASS: seven skill structures/frontmatter and governance local references
+Scope: structural checks only; does not prove semantic consistency or Codex discovery
+.venv/bin/python -m unittest discover -s scripts -p 'test_governance.py' -v
+test_broken_reference (test_governance.GovernanceValidation.test_broken_reference) ... ok
+test_valid_and_invalid_skill_inputs (test_governance.GovernanceValidation.test_valid_and_invalid_skill_inputs) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.004s
+
+OK

@@ -1,0 +1,320 @@
+openapi: 3.0.3
+info:
+  title: Speech Platform public API
+  version: 1.0.0
+  description: Design contract; no /v1 routes are implemented in M01. Bearer authentication
+    is required for all public operations in M04. Default total request limit 25 MiB;
+    TTS text ceiling 10000 characters. Deployment limits and deadlines are configured
+    and may be stricter; clients handle 413 and 504. Default deadline 60 seconds;
+    upload read deadline 30 seconds. Client disconnect cancels gateway context and
+    downstream work. Deadline exhaustion returns 504 where connection remains writable.
+    Streaming is reserved, not implemented; capability flags remain false until supported.
+    Timestamps are optional; unsupported requests return 400. Errors never contain
+    audio or transcript payloads.
+security:
+- bearerAuth: []
+paths:
+  /v1/stt/transcriptions:
+    post:
+      operationId: transcribe
+      summary: Transcribe audio (contract only in M01)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - audio
+              properties:
+                audio:
+                  type: string
+                  format: binary
+                  description: WAV PCM16, FLAC, MP3, Ogg/Opus or M4A/AAC. Default
+                    25 MiB total request limit; deployment may lower it.
+                language:
+                  type: string
+                  default: auto
+                  description: BCP-47 tag, or auto for automatic detection. Unsupported
+                    languages return 400.
+                model:
+                  type: string
+                  description: Optional platform alias; configured default when absent.
+                timestamps:
+                  type: boolean
+                  default: false
+                stream:
+                  type: boolean
+                  enum:
+                  - false
+                  default: false
+                  description: Streaming reserved; true is rejected in M01-M04.
+            encoding:
+              audio:
+                contentType: audio/wav, audio/flac, audio/mpeg, audio/ogg, audio/mp4
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transcription'
+        '400': &id001
+          description: Invalid request or unsupported option
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401': &id002
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403': &id003
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404': &id004
+          description: Unknown platform model or voice
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413': &id005
+          description: Configured request size limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415': &id006
+          description: Unsupported audio media type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422': &id007
+          description: Audio cannot be decoded or language cannot be detected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429': &id008
+          description: Capacity exhausted; Retry-After may be provided
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500': &id009
+          description: Internal failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503': &id010
+          description: Provider not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '504': &id011
+          description: Request deadline exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/tts/speech:
+    post:
+      operationId: synthesize
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - text
+              - voice
+              properties:
+                text:
+                  type: string
+                  minLength: 1
+                  maxLength: 10000
+                voice:
+                  type: string
+                language:
+                  type: string
+                  default: auto
+                  description: BCP-47 tag or auto. Auto uses provider text detection
+                    when supported; otherwise returns 400.
+                format:
+                  type: string
+                  enum:
+                  - wav
+                  - mp3
+                  - opus
+                  default: wav
+                stream:
+                  type: boolean
+                  enum:
+                  - false
+                  default: false
+      responses:
+        '200':
+          description: Complete audio; Content-Type matches requested format. Unsupported
+            formats return 400. WAV is PCM16; Opus uses Ogg container. Sample rate
+            is provider-selected and encoded in the audio header.
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+            audio/ogg:
+              schema:
+                type: string
+                format: binary
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '413': *id005
+        '415': *id006
+        '422': *id007
+        '429': *id008
+        '500': *id009
+        '503': *id010
+        '504': *id011
+  /v1/stt/models:
+    get:
+      operationId: listModels
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Model'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '413': *id005
+        '415': *id006
+        '422': *id007
+        '429': *id008
+        '500': *id009
+        '503': *id010
+        '504': *id011
+  /v1/tts/voices:
+    get:
+      operationId: listVoices
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Voice'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '404': *id004
+        '413': *id005
+        '415': *id006
+        '422': *id007
+        '429': *id008
+        '500': *id009
+        '503': *id010
+        '504': *id011
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    Error:
+      type: object
+      required:
+      - code
+      - message
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+    Transcription:
+      type: object
+      required:
+      - text
+      - language
+      properties:
+        text:
+          type: string
+        language:
+          type: string
+        segments:
+          type: array
+          description: Present only when supported and requested. Seconds relative
+            to input start.
+          items:
+            type: object
+            required:
+            - start
+            - end
+            - text
+            properties:
+              start:
+                type: number
+                minimum: 0
+              end:
+                type: number
+                minimum: 0
+              text:
+                type: string
+    Model:
+      type: object
+      required:
+      - id
+      - languages
+      - timestamps
+      - streaming
+      properties:
+        id:
+          type: string
+          description: Stable platform alias, never engine-specific.
+        languages:
+          type: array
+          items:
+            type: string
+        timestamps:
+          type: boolean
+        streaming:
+          type: boolean
+    Voice:
+      type: object
+      required:
+      - id
+      - languages
+      - streaming
+      properties:
+        id:
+          type: string
+        languages:
+          type: array
+          items:
+            type: string
+        streaming:
+          type: boolean

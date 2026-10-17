@@ -1,0 +1,18 @@
+name: verify
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  foundation:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.2'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: make bootstrap
+      - run: make verify
+      - run: docker compose -f deployments/compose/compose.yaml build

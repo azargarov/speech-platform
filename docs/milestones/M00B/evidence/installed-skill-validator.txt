@@ -1,0 +1,21 @@
+$ .venv/bin/python <installed-skill-creator>/scripts/quick_validate.py .codex/skills/api-contracts
+Skill is valid!
+exit_status=0
+$ .venv/bin/python <installed-skill-creator>/scripts/quick_validate.py .codex/skills/architecture-design
+Skill is valid!
+exit_status=0
+$ .venv/bin/python <installed-skill-creator>/scripts/quick_validate.py .codex/skills/clean-code
+Skill is valid!
+exit_status=0
+$ .venv/bin/python <installed-skill-creator>/scripts/quick_validate.py .codex/skills/deployment-operations
+Skill is valid!
+exit_status=0
+$ .venv/bin/python <installed-skill-creator>/scripts/quick_validate.py .codex/skills/milestone-management
+Skill is valid!
+exit_status=0
+$ .venv/bin/python <installed-skill-creator>/scripts/quick_validate.py .codex/skills/security-privacy
+Skill is valid!
+exit_status=0
+$ .venv/bin/python <installed-skill-creator>/scripts/quick_validate.py .codex/skills/testing-validation
+Skill is valid!
+exit_status=0
