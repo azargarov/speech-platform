@@ -43,6 +43,10 @@ class SpeechFailure(Exception):
         self.retain_resources = retain_resources
 
 
+class FatalBackendFailure(SpeechFailure):
+    """Backend failure requiring the supervised child to be fault-latched."""
+
+
 _PUBLIC_MESSAGES = {
     FailureCode.INVALID_INPUT: "request is invalid",
     FailureCode.UNSUPPORTED_OPTION: "requested option is unsupported",
@@ -172,6 +176,7 @@ class DeviceRequirements:
     allowed_kinds: frozenset[str]
     required_features: frozenset[str] = frozenset()
     estimated_peak_memory_bytes: int | None = None
+    required_features_by_kind: tuple[tuple[str, frozenset[str]], ...] = ()
 
 
 class OperationContext:

@@ -61,6 +61,29 @@ def application_data(**overrides):
     return data
 
 
+def faster_whisper_data():
+    data = application_data()
+    data["schema_version"] = 3
+    data["backend"] = {
+        "id": "faster-whisper",
+        "options": {
+            "cpu_threads": 2,
+            "compute_type_cpu": "int8",
+            "compute_type_cuda": "float16",
+            "beam_size": 1,
+        },
+    }
+    data["models"][0]["artifacts"]["faster-whisper"] = data["models"][0][
+        "artifacts"
+    ].pop("fake")
+    data["audio_limits"] = {
+        "sample_rate_hz": 16000,
+        "max_duration_seconds": 60,
+        "max_decoded_audio_bytes": 4_000_000,
+    }
+    return data
+
+
 class ConfigValidation(unittest.TestCase):
     def load_data(self, data):
         with tempfile.TemporaryDirectory() as directory:
@@ -139,6 +162,53 @@ class ConfigValidation(unittest.TestCase):
 
         config = load_config(Path("configs/stt.yaml"), "stt")
         self.assertEqual(config["kind"], "stt")
+
+    def test_cpu_deployment_example_places_manifest_outside_artifact_root(self):
+        deployment = load_deployment_config("configs/stt-deployment-cpu.example.yaml")
+        artifact = deployment.artifact_roots["smoke-small"]
+        self.assertNotIn(artifact.manifest, artifact.directory.parents)
+        self.assertNotEqual(artifact.manifest, artifact.directory)
+
+    def test_faster_whisper_v3_configuration_and_cuda_deployment_policy(self):
+        config = self.load_data(faster_whisper_data())
+        self.assertEqual(config.backend_id, "faster-whisper")
+        self.assertEqual(dict(config.backend_options)["compute_type_cuda"], "float16")
+        self.assertEqual(config.audio_limits.sample_rate_hz, 16000)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "deployment.yaml"
+            path.write_text(
+                yaml.safe_dump(
+                    {
+                        "schema_version": 2,
+                        "artifacts": {
+                            "primary": {
+                                "directory": "/models/tiny",
+                                "manifest": "/models/tiny/manifest.yaml",
+                            }
+                        },
+                        "device_access": {
+                            "cuda_device_index": 0,
+                            "minimum_free_gpu_bytes_before_load": 1024,
+                        },
+                    }
+                )
+            )
+            deployment = load_deployment_config(path)
+            self.assertEqual(deployment.cuda_device_index, 0)
+            self.assertEqual(deployment.minimum_free_gpu_bytes_before_load, 1024)
+
+    def test_faster_whisper_configuration_rejects_unknown_precision_and_limits(self):
+        for mutate in (
+            lambda d: d["backend"]["options"].update(extra=True),
+            lambda d: d["backend"]["options"].update(compute_type_cuda="auto"),
+            lambda d: d["backend"]["options"].update(compute_type_cpu="float16"),
+            lambda d: d["audio_limits"].update(max_decoded_audio_bytes=0),
+            lambda d: d["device_policy"].update(mode="cuda", preference=["cpu"]),
+        ):
+            invalid = faster_whisper_data()
+            mutate(invalid)
+            with self.assertRaises(ValueError):
+                self.load_data(invalid)
 
     def test_unregistered_backend_fails_closed_at_composition(self):
         with self.assertRaises(SpeechFailure) as caught:

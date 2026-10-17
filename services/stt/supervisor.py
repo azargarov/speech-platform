@@ -12,6 +12,7 @@ import uuid
 
 from services.stt.domain import (
     FailureCode,
+    FatalBackendFailure,
     ModelIdentity,
     ModelMetadata,
     ModelSelection,
@@ -260,6 +261,13 @@ class InferenceSupervisor:
                 if context.cancelled():
                     raise self._cancel_failure(context)
                 code = FailureCode(response["code"])
+                if response.get("fatal", False):
+                    confirmed = self._fatal_child_fault("fatal backend failure")
+                    raise SpeechFailure(
+                        code,
+                        response.get("diagnostic"),
+                        retain_resources=not confirmed,
+                    )
                 raise SpeechFailure(code, response.get("diagnostic"))
             if context.cancelled():
                 raise self._cancel_failure(context)
@@ -372,13 +380,14 @@ class InferenceSupervisor:
         kind = response.get("type")
         if kind == "failure":
             if (
-                set(response) - {"type", "code", "diagnostic"}
+                set(response) - {"type", "code", "diagnostic", "fatal"}
                 or not isinstance(response.get("code"), str)
                 or response["code"] not in FailureCode._value2member_map_
                 or (
                     "diagnostic" in response
                     and not isinstance(response["diagnostic"], str)
                 )
+                or ("fatal" in response and type(response["fatal"]) is not bool)
             ):
                 raise IPCProtocolError("invalid failure response")
             return
@@ -610,6 +619,7 @@ def _child_main(
                     "type": "failure",
                     "code": exc.code.value,
                     "diagnostic": exc.diagnostic,
+                    "fatal": isinstance(exc, FatalBackendFailure),
                 }
             except Exception as exc:
                 response = {

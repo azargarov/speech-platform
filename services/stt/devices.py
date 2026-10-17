@@ -18,10 +18,12 @@ def select_device(
     for kind in permitted:
         if kind not in requirements.allowed_kinds:
             continue
+        kind_features = dict(requirements.required_features_by_kind).get(
+            kind, frozenset()
+        )
         for device in available:
-            if device.kind != kind or not requirements.required_features.issubset(
-                device.features
-            ):
+            required = requirements.required_features | kind_features
+            if device.kind != kind or not required.issubset(device.features):
                 continue
             estimate = requirements.estimated_peak_memory_bytes
             if kind == "cuda" and estimate is not None:

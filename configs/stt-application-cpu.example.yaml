@@ -1,0 +1,46 @@
+# Provision a licensed, immutable converted model and replace the marked identities.
+# Place real local config under ignored private/; this template is intentionally invalid.
+schema_version: 3
+default_model: smoke-small
+backend:
+  id: faster-whisper
+  options:
+    cpu_threads: 4
+    compute_type_cpu: int8
+    compute_type_cuda: float16
+    beam_size: 1
+models:
+  - alias: smoke-small
+    family: whisper
+    immutable_revision: REPLACE_WITH_40_OR_64_HEX_SOURCE_REVISION
+    artifacts:
+      faster-whisper:
+        ref: smoke-small
+        manifest_sha256: REPLACE_WITH_CANONICAL_MANIFEST_SHA256
+        format: ctranslate2-whisper
+device_policy:
+  mode: cpu
+  preference: [cpu]
+audio_limits:
+  sample_rate_hz: 16000
+  max_duration_seconds: 120
+  max_decoded_audio_bytes: 67108864
+admission:
+  max_active: 1
+  max_queued: 2
+  max_queued_audio_bytes: 52428800
+  max_retained_audio_bytes: 67108864
+  max_uploads: 2
+  max_upload_bytes: 52428800
+  max_request_bytes: 26214400
+  max_result_bytes: 1048576
+  max_ipc_message_bytes: 36704256
+  queue_wait_timeout_seconds: 10
+  request_timeout_seconds: 60
+lifecycle:
+  model_load_timeout_seconds: 120
+  cooperative_cancel_grace_seconds: 0.2
+  process_exit_timeout_seconds: 2
+  shutdown_drain_timeout_seconds: 10
+recovery:
+  policy: manual

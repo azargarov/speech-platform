@@ -1,6 +1,6 @@
 # M02 STT architecture design
 
-Status: accepted architecture baseline. At design closeout no M02 implementation had started; M02-A was subsequently authorized, implemented, locally verified and user-accepted as PASS on 2026-10-17. M01 remains PASS. Overall M02 remains incomplete; M02-B is the next approval gate and has not started. See [M02 plan](../milestones/M02/plan.md) and ADRs [0006](../adr/0006-stt-alias-ownership.md), [0007](../adr/0007-stt-execution-lifecycle.md), [0008](../adr/0008-stt-artifacts-devices-configuration.md) and accepted [0009](../adr/0009-worker-network-reachability.md).
+Status: accepted architecture baseline. M02-A and M02-B are PASS following user validation on 2026-10-17. M01 remains PASS; overall M02 is incomplete and M02-C is the next approval gate, not started. See [M02 plan](../milestones/M02/plan.md) and ADRs [0006](../adr/0006-stt-alias-ownership.md), [0007](../adr/0007-stt-execution-lifecycle.md), [0008](../adr/0008-stt-artifacts-devices-configuration.md) and accepted [0009](../adr/0009-worker-network-reachability.md).
 
 ## Evidence and assumptions
 

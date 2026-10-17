@@ -1,6 +1,6 @@
-# M02-A user validation — PASS
+# M02-A and M02-B user validation — PASS; M02-C pending
 
-User validation and explicit M02-A closeout approval received 2026-10-17. M02-A is PASS. Overall M02 remains incomplete. M02-B has not started and requires separate approval.
+User validation and explicit closeout approvals for M02-A and M02-B were received 2026-10-17. Both phases are PASS. Overall M02 remains incomplete. M02-C is the next approval gate and has not started.
 
 ## Validation evidence
 
@@ -30,4 +30,14 @@ From the repository root:
 5. Confirm limits are understood: there is no production inference adapter or internal HTTP transcription route in this phase; real engine loading, audio decoding, CUDA/GPU behavior, artifact immutability under concurrent mutation, and deployment remain unverified.
 6. User validation and explicit M02-A acceptance were recorded 2026-10-17; no further validation is pending for phase A.
 
-M02-A validation does not authorize deployment or M02-B. M02-B requires separate explicit approval.
+M02-A validation did not itself authorize deployment or M02-B; separate M02-B implementation authorization was later provided. M02-B does not authorize M02-C or deployment.
+
+## M02-B CPU user-validation — PASS
+
+The user authorized retrieval of the pinned public model and use of `private/audio/russian.m4a`, a recording created for STT testing, and accepted the CPU validation on 2026-10-17. This approval marks M02-B PASS; it does not authorize M02-C.
+
+OBSERVED: the pinned Systran/faster-whisper-tiny revision, MIT model-card license, artifact hashes, dependency versions, CPU options, private HTTP result, language detection, timestamps, health/readiness, unknown-alias error, subprocess cleanup, timings and memory observation are recorded in [verification](verification.md). The CPU integration passed twice with Hugging Face/Transformers offline flags. Audio SHA-256 was identical before and after. Model files, configs, benchmark output and audio remain under ignored `private/`; no audio or transcript was uploaded, printed, or added to repository files.
+
+Two blocking validation defects were found and corrected before successful inference: the adapter required a file absent from this upstream model, and the deployment example placed the manifest inside the artifact root. The CPU Make target also lacked a project-root import path; it now sets `PYTHONPATH=.`. A regression test covers the manifest placement and the adapter fixture matches the actual upstream file set.
+
+NOT ESTABLISHED: cold-cache startup, representative throughput/capacity, worker-isolated memory, real disconnect cancellation during inference, CUDA/GPU behavior, deployment and target-host coexistence. M02-C still requires separate authorization and must not start automatically.

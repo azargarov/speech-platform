@@ -2,8 +2,7 @@ openapi: 3.0.3
 info:
   title: STT internal worker API
   version: 1.0.0
-  description: Private worker protocol, reserved in M01; no inference handler is
-    installed yet. STT resolves stable platform aliases to its configured model registry;
+  description: Private worker protocol. STT resolves stable platform aliases to its configured model registry;
     the Gateway forwards aliases unchanged. Provider identity remains internal. Access
     is limited to the STT-private worker network, with Gateway as the intended caller;
     network segmentation is not caller authentication. ADR 0009 defines the Compose
@@ -18,7 +17,7 @@ paths:
   /internal/v1/transcriptions:
     post:
       operationId: internalSTT
-      summary: Transcribe audio (contract only in M01)
+      summary: Transcribe audio
       x-maxRequestSizeBytes: 26214400
       requestBody:
         required: true
@@ -56,7 +55,7 @@ paths:
                   enum:
                   - false
                   default: false
-                  description: Streaming reserved; true is rejected in M01-M04.
+                  description: Streaming is reserved; true is rejected in M02-B.
             encoding:
               audio:
                 contentType: audio/wav, audio/flac, audio/mpeg, audio/ogg, audio/mp4

@@ -1,0 +1,18 @@
+services:
+  stt:
+    build:
+      context: ../..
+      dockerfile: deployments/compose/worker-stt-cpu.Dockerfile
+    command:
+      - services.stt.main
+      - --config
+      - /config/stt.yaml
+      - --application-config
+      - /config/stt-application.yaml
+      - --deployment-config
+      - /config/stt-deployment.yaml
+    volumes:
+      - ../../configs/stt.yaml:/config/stt.yaml:ro
+      - ${STT_APPLICATION_CONFIG:?set a local versioned STT application config}:/config/stt-application.yaml:ro
+      - ${STT_DEPLOYMENT_CONFIG:?set a local STT deployment config}:/config/stt-deployment.yaml:ro
+      - ${STT_MODEL_ROOT:?set a local read-only model artifact root}:/models:ro

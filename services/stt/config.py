@@ -66,6 +66,13 @@ class LifecycleConfig:
 
 
 @dataclass(frozen=True)
+class AudioLimits:
+    sample_rate_hz: int
+    max_duration_seconds: float
+    max_decoded_audio_bytes: int
+
+
+@dataclass(frozen=True)
 class ApplicationConfig:
     backend_id: str
     default_model: str
@@ -74,6 +81,8 @@ class ApplicationConfig:
     device_preference: tuple[str, ...]
     admission: AdmissionConfig
     lifecycle: LifecycleConfig
+    backend_options: tuple[tuple[str, object], ...] = ()
+    audio_limits: AudioLimits | None = None
 
     def catalog(self) -> dict[str, ModelSelection]:
         return {
@@ -96,6 +105,8 @@ class ArtifactRoot:
 @dataclass(frozen=True)
 class DeploymentConfig:
     artifact_roots: dict[str, ArtifactRoot]
+    cuda_device_index: int = 0
+    minimum_free_gpu_bytes_before_load: int | None = None
 
 
 def _artifact_identity(model: ModelConfig):
@@ -140,27 +151,73 @@ def _text(value, name, maximum=256):
 
 def load_application_config(path: str | Path) -> ApplicationConfig:
     data = _read_yaml(path)
-    _fields(
-        data,
-        {
-            "schema_version",
-            "default_model",
-            "backend",
-            "models",
-            "device_policy",
-            "admission",
-            "lifecycle",
-            "recovery",
-        },
-        "application configuration",
-    )
-    if data["schema_version"] != 2 or type(data["schema_version"]) is not int:
-        raise ValueError("application schema_version must be 2")
+    version = data.get("schema_version")
+    if type(version) is not int or version not in {2, 3}:
+        raise ValueError("application schema_version must be 2 or 3")
+    fields = {
+        "schema_version",
+        "default_model",
+        "backend",
+        "models",
+        "device_policy",
+        "admission",
+        "lifecycle",
+        "recovery",
+    }
+    if version == 3:
+        fields.add("audio_limits")
+    _fields(data, fields, "application configuration")
     backend = data["backend"]
     _fields(backend, {"id", "options"}, "backend")
     backend_id = _text(backend["id"], "backend.id", 64)
-    if backend["options"] != {}:
-        raise ValueError("backend options are not implemented in M02-A")
+    raw_backend_options = backend["options"]
+    if version == 2 and raw_backend_options != {}:
+        raise ValueError("backend options are not implemented in schema version 2")
+    backend_options = ()
+    if version == 3:
+        if backend_id != "faster-whisper":
+            raise ValueError("schema version 3 currently supports faster-whisper only")
+        _fields(
+            raw_backend_options,
+            {"cpu_threads", "compute_type_cpu", "compute_type_cuda", "beam_size"},
+            "faster-whisper options",
+        )
+        compute_types = {"float32", "float16", "int8", "int8_float16", "int8_float32"}
+        _integer(raw_backend_options["cpu_threads"], "cpu_threads", 1, 256)
+        cpu_type = _text(
+            raw_backend_options["compute_type_cpu"], "compute_type_cpu", 32
+        )
+        cuda_type = _text(
+            raw_backend_options["compute_type_cuda"], "compute_type_cuda", 32
+        )
+        if cpu_type not in compute_types or cuda_type not in compute_types:
+            raise ValueError("unsupported compute type")
+        if cpu_type in {"float16", "int8_float16"}:
+            raise ValueError("CPU compute type is incompatible with CPU policy")
+        if (
+            _integer(raw_backend_options["beam_size"], "beam_size", 1, 10)
+            != raw_backend_options["beam_size"]
+        ):
+            raise ValueError("invalid beam_size")
+        backend_options = tuple(sorted(raw_backend_options.items()))
+        audio = data["audio_limits"]
+        _fields(
+            audio,
+            {"sample_rate_hz", "max_duration_seconds", "max_decoded_audio_bytes"},
+            "audio_limits",
+        )
+        audio_limits = AudioLimits(
+            _integer(audio["sample_rate_hz"], "sample_rate_hz", 8000, 48000),
+            _number(audio["max_duration_seconds"], "max_duration_seconds", 0.1, 3600),
+            _integer(
+                audio["max_decoded_audio_bytes"],
+                "max_decoded_audio_bytes",
+                4096,
+                2**31 - 1,
+            ),
+        )
+    else:
+        audio_limits = None
 
     raw_models = data["models"]
     if not isinstance(raw_models, list) or not raw_models:
@@ -346,14 +403,20 @@ def load_application_config(path: str | Path) -> ApplicationConfig:
         tuple(preference),
         admission_config,
         lifecycle_config,
+        backend_options,
+        audio_limits,
     )
 
 
 def load_deployment_config(path: str | Path) -> DeploymentConfig:
     data = _read_yaml(path)
-    _fields(data, {"schema_version", "artifacts"}, "deployment configuration")
-    if data["schema_version"] != 1 or type(data["schema_version"]) is not int:
-        raise ValueError("deployment schema_version must be 1")
+    version = data.get("schema_version")
+    if type(version) is not int or version not in {1, 2}:
+        raise ValueError("deployment schema_version must be 1 or 2")
+    expected_fields = {"schema_version", "artifacts"}
+    if version == 2:
+        expected_fields.add("device_access")
+    _fields(data, expected_fields, "deployment configuration")
     raw_artifacts = data["artifacts"]
     if not isinstance(raw_artifacts, dict):
         raise ValueError("artifacts must be a mapping")
@@ -365,7 +428,24 @@ def load_deployment_config(path: str | Path) -> DeploymentConfig:
         artifacts[_text(key, "artifact reference", 128)] = ArtifactRoot(
             directory, manifest
         )
-    return DeploymentConfig(artifacts)
+    if version == 1:
+        return DeploymentConfig(artifacts)
+    access = data["device_access"]
+    _fields(
+        access,
+        {"cuda_device_index", "minimum_free_gpu_bytes_before_load"},
+        "device_access",
+    )
+    return DeploymentConfig(
+        artifacts,
+        _integer(access["cuda_device_index"], "cuda_device_index", 0, 1024),
+        _integer(
+            access["minimum_free_gpu_bytes_before_load"],
+            "minimum_free_gpu_bytes_before_load",
+            1,
+            2**50,
+        ),
+    )
 
 
 def resolve_backend(backend_id: str, registry: dict[str, object]):

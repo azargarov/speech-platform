@@ -157,13 +157,14 @@ class STTApplication:
                 raise SpeechFailure(
                     FailureCode.INVALID_INPUT, "language must be a BCP-47 tag"
                 )
-            if metadata.languages and request.language.lower() not in {
+            language_code = request.language.lower().split("-", 1)[0]
+            if metadata.languages and language_code not in {
                 item.lower() for item in metadata.languages
             }:
                 raise SpeechFailure(
                     FailureCode.UNSUPPORTED_OPTION, "requested language is unavailable"
                 )
-            language = request.language
+            language = language_code
         if request.timestamps and not metadata.segment_timestamps:
             raise SpeechFailure(
                 FailureCode.UNSUPPORTED_OPTION, "segment timestamps are unavailable"
@@ -347,6 +348,7 @@ def create_application(
         requirements.allowed_kinds & backend_capabilities.device_kinds,
         requirements.required_features,
         requirements.estimated_peak_memory_bytes,
+        requirements.required_features_by_kind,
     )
     device = select_device(
         config.device_mode, config.device_preference, requirements, available

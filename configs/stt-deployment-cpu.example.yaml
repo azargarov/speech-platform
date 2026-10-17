@@ -1,0 +1,8 @@
+# Use read-only mounts populated by an offline artifact provisioning process.
+# Replace model directory as needed and place the real config under private/ locally.
+schema_version: 1
+artifacts:
+  smoke-small:
+    directory: /models/smoke-small
+    # Keep the manifest outside the artifact root; its digest covers all files there.
+    manifest: /models/smoke-small-manifest.yaml

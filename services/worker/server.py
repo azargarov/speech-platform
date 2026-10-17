@@ -172,9 +172,23 @@ def main(kind):
     if args.check_config:
         return
     if application_config is not None and deployment_config is not None:
-        raise ValueError(
-            "no production inference backend is registered in M02-A; refusing to start"
+        if kind != "stt":
+            parser.error("inference configuration is supported only by the STT worker")
+        import asyncio
+
+        from services.stt.http_server import serve
+        from services.stt.service import DeferredSTTApplication
+
+        application = DeferredSTTApplication(application_config, deployment_config)
+        asyncio.run(
+            serve(
+                application,
+                config["listen_host"],
+                config["listen_port"],
+                config["socket_timeout_seconds"],
+            )
         )
+        return
     server = ThreadingHTTPServer(
         (config["listen_host"], config["listen_port"]), handler(config)
     )

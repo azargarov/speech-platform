@@ -1,6 +1,6 @@
 # M02 STT inference plan
 
-Status: M02-A is PASS following user validation and explicit closeout approval on 2026-10-17. Overall M02 remains incomplete. M02-B is NEXT, has not started, and requires separate user approval. No service startup or deployment was authorized. The accepted architecture is documented in [m02-stt-design.md](../../architecture/m02-stt-design.md) and its network boundary in [ADR 0009](../../adr/0009-worker-network-reachability.md).
+Status: M02-A and M02-B are PASS following user validation and explicit closeout approval on 2026-10-17. Overall M02 remains incomplete. M02-C is the next approval gate, has not started and requires separate authorization. No target service deployment or remote access was performed. The accepted architecture is documented in [m02-stt-design.md](../../architecture/m02-stt-design.md) and its network boundary in [ADR 0009](../../adr/0009-worker-network-reachability.md).
 
 ## Scope
 
@@ -26,19 +26,19 @@ User validation: completed 2026-10-17. User approved M02-A validation after the 
 
 ### M02-B — faster-whisper CPU/CUDA adapter and private STT operation
 
-Entry gate: M02-A is implemented, verified and explicitly user-accepted; separate approval for M02-B. Exit gate: CPU adapter acceptance and verification pass, user reviews evidence and explicitly accepts B before C is proposed.
+Entry gate: M02-A is implemented, verified and explicitly user-accepted; separate approval for M02-B was received. Exit gate: CPU artifact smoke evidence and verification are recorded and the user explicitly accepts B before C begins. **Status: PASS.** User accepted M02-B CPU validation on 2026-10-17.
 
-Add one adapter and its locked dependency/image profile; bounded audio decode; immutable artifact loading; actual effective capability reporting; internal transcription route; timestamps; CPU-only profile; explicit CUDA profile; structured metrics/errors. Provision models offline. Do not add Gateway public routing or any other adapter.
+Add one adapter and its locked dependency/image profile; bounded audio decode; immutable artifact loading; effective capability reporting; internal transcription route; timestamps; CPU-only profile; explicit CUDA profile; structured metrics/errors. Provision models offline. Do not add Gateway public routing or any other adapter.
 
-Acceptance: adapter contract suite passes on CPU; a pinned licensed small artifact runs an offline CPU smoke test with correct result schema/language and segment bounds; supported/unsupported timestamp and language behaviors map to existing internal errors; manifest is verified before load; invalid precision/device combinations fail closed; CPU profile does not import NVIDIA packages; CUDA configuration rejects missing/incompatible device without CPU fallback; cancellation tests exercise real adapter checkpoints and the supervised process boundary; no audio/transcript persistence or payload logging; generated OpenAPI remains engine-neutral; offline runtime test confirms no model downloads.
+Acceptance: adapter contract suite passes on CPU; a pinned licensed small artifact runs an offline CPU smoke test with correct result schema/language and segment bounds; supported/unsupported timestamp and language behaviors map to existing internal errors; manifest is verified before load; invalid precision/device combinations fail closed; CPU profile does not import NVIDIA packages; CUDA configuration rejects missing/incompatible device without CPU fallback; cancellation tests exercise adapter checkpoints and supervised process boundary; no audio/transcript persistence or payload logging; internal OpenAPI remains engine-neutral; local runtime is configured to use local artifacts only. The pinned tiny CPU smoke has passed; see the validation record and remaining NOT ESTABLISHED items in [verification](verification.md).
 
-Verification commands: `make verify PYTHON=.venv/bin/python`; `make stt-cpu-integration PYTHON=.venv/bin/python` (planned target, using a provisioned immutable test artifact); `make compose-check PYTHON=.venv/bin/python`; `git diff --check`. No GPU is required for CI. CUDA runtime checks remain NOT ESTABLISHED until M02-C. The Compose check verifies rendered static topology only; it does not start containers.
+Verification commands: `make verify PYTHON=.venv/bin/python`; `make stt-cpu-integration PYTHON=.venv/bin/python` with `STT_APPLICATION_CONFIG`, `STT_DEPLOYMENT_CONFIG` and `STT_SMOKE_AUDIO` pointed to local provisioned files; `make compose-check PYTHON=.venv/bin/python`; `git diff --check`. No GPU is required for CPU CI. CUDA runtime checks remain NOT ESTABLISHED. The Compose check verifies rendered static topology only; it does not start containers.
 
-User validation: review the private worker protocol and generated configuration; run CPU integration with documented artifact provenance; verify audio cleanup and logs; explicitly accept M02-B. No target deployment.
+User validation: completed 2026-10-17. User accepted pinned-model CPU HTTP smoke evidence, artifact provenance/digests, logs/privacy, cleanup and limitations. No target deployment.
 
 ### M02-C — Authorized `llm` GPU validation and closeout
 
-Entry gate: M02-B is implemented, verified and explicitly user-accepted; separate explicit authorization for target-host access and deployment. Exit gate: all host evidence and rollback review pass and the user explicitly approves M02 closeout.
+Entry gate: M02-B is implemented, verified and explicitly user-accepted; separate explicit authorization for target-host access and deployment is still required. **NEXT APPROVAL GATE; NOT STARTED.** Exit gate: all host evidence and rollback review pass and the user explicitly approves M02 closeout.
 
 Prepare a dedicated deployment profile/runbook and rollback. Only after separate host/deployment authorization, validate the exact `large-v3-turbo` artifact and image/library pins on CUDA, measure resource use, and test cancellation/shutdown/recovery while leaving Ollama/Dify untouched.
 

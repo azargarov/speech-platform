@@ -1,0 +1,10 @@
+# Candidate configuration only. Validate the CUDA runtime and headroom on the target.
+# Place the deployed config under ignored private/ locally.
+schema_version: 2
+artifacts:
+  smoke-small:
+    directory: /models/smoke-small
+    manifest: /models/smoke-small/manifest.yaml
+device_access:
+  cuda_device_index: 0
+  minimum_free_gpu_bytes_before_load: REPLACE_WITH_REVIEWED_MEMORY_REQUIREMENT
