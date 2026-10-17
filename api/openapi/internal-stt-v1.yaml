@@ -2,12 +2,18 @@ openapi: 3.0.3
 info:
   title: STT internal worker API
   version: 1.0.0
-  description: Private protocol, reserved in M01. No inference handler installed.
-    Gateway translates platform aliases using configuration; internal provider selection
-    never leaks into public API. Only gateway may reach worker network. Connection
-    close cancels job; gateway propagates remaining deadline in X-Request-Timeout-Ms.
-    Providers must check cancellation during inference. No STT-to-TTS calls. No runtime
-    downloads.
+  description: Private worker protocol, reserved in M01; no inference handler is
+    installed yet. STT resolves stable platform aliases to its configured model registry;
+    the Gateway forwards aliases unchanged. Provider identity remains internal. Access
+    is limited to the STT-private worker network, with Gateway as the intended caller;
+    network segmentation is not caller authentication. ADR 0009 defines the Compose
+    topology. The Gateway sends remaining request budget in X-Request-Timeout-Ms.
+    Client disconnect or deadline cancels queued work and
+    requests cancellation of active work. STT attempts cooperative cancellation, then
+    terminates its supervised inference subprocess after a configured grace. Capacity
+    remains held until completion or confirmed child exit. Cancellation can finish after
+    the HTTP connection closes; immediate GPU cleanup is not guaranteed. No STT-to-TTS
+    calls or runtime model downloads.
 paths:
   /internal/v1/transcriptions:
     post:
@@ -40,7 +46,8 @@ paths:
                   type: string
                   minLength: 1
                   maxLength: 128
-                  description: Optional platform alias; configured default when absent.
+                  description: Optional stable platform alias resolved by STT; configured
+                    default when absent. This value is never a backend model identifier.
                 timestamps:
                   type: boolean
                   default: false
@@ -132,7 +139,7 @@ paths:
         '200':
           description: Model loaded and able to accept work
         '503':
-          description: Loading, failed, draining or M01 provider absent
+          description: Loading, fault-latched, draining or model unavailable
           content:
             application/json:
               schema:

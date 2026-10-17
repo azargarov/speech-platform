@@ -6,8 +6,10 @@ info:
     is required for all public operations in M04. Default total request limit 25 MiB;
     TTS text ceiling 10000 characters. Deployment limits and deadlines are configured
     and may be stricter; clients handle 413 and 504. Default deadline 60 seconds;
-    upload read deadline 30 seconds. Client disconnect cancels gateway context and
-    downstream work. Deadline exhaustion returns 504 where connection remains writable.
+    upload read deadline 30 seconds. Client disconnect cancels the Gateway context and
+    requests downstream cancellation; resource cleanup may finish asynchronously, and
+    no result is returned to a disconnected client. Deadline exhaustion returns 504
+    where the connection remains writable.
     Streaming is reserved, not implemented; capability flags remain false until supported.
     Timestamps are optional; unsupported requests return 400. Errors never contain
     audio or transcript payloads.

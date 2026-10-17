@@ -141,7 +141,14 @@ class Acceptance(unittest.TestCase):
         compose = yaml.safe_load(
             (ROOT / "deployments/compose/compose.yaml").read_text()
         )
-        self.assertTrue(compose["networks"]["speech"]["internal"])
+        self.assertEqual(set(compose["networks"]), {"stt_private", "tts_private"})
+        self.assertTrue(all(n["internal"] for n in compose["networks"].values()))
+        self.assertEqual(
+            set(compose["services"]["gateway"]["networks"]),
+            {"stt_private", "tts_private"},
+        )
+        self.assertEqual(set(compose["services"]["stt"]["networks"]), {"stt_private"})
+        self.assertEqual(set(compose["services"]["tts"]["networks"]), {"tts_private"})
         for name, service in compose["services"].items():
             self.assertTrue(service["read_only"])
             self.assertEqual(service["cap_drop"], ["ALL"])

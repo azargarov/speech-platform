@@ -7,7 +7,10 @@ from scripts.check_compose import validate
 
 def rendered(port=8080, bind="127.0.0.1"):
     return {
-        "networks": {"speech": {"internal": True}},
+        "networks": {
+            "stt_private": {"internal": True},
+            "tts_private": {"internal": True},
+        },
         "services": {
             "gateway": {
                 "environment": {"SPEECH_LISTEN_PORT": str(port)},
@@ -19,15 +22,15 @@ def rendered(port=8080, bind="127.0.0.1"):
                 "mem_limit": "134217728",
                 "cpus": 1,
                 "pids_limit": 128,
-                "networks": {"speech": None},
+                "networks": {"stt_private": None, "tts_private": None},
             },
-            "stt": worker(),
-            "tts": worker(),
+            "stt": worker("stt_private"),
+            "tts": worker("tts_private"),
         },
     }
 
 
-def worker():
+def worker(network):
     return {
         "read_only": True,
         "user": "65532:65532",
@@ -36,7 +39,7 @@ def worker():
         "mem_limit": "268435456",
         "cpus": 1,
         "pids_limit": 128,
-        "networks": {"speech": None},
+        "networks": {network: None},
     }
 
 
@@ -67,6 +70,24 @@ class ComposeConfig(unittest.TestCase):
             {"host_ip": "127.0.0.1", "published": "8081", "target": 8081}
         ]
         with self.assertRaisesRegex(ValueError, "private and independent"):
+            validate(config, 8080, "127.0.0.1")
+
+    def test_workers_must_not_share_network(self):
+        config = rendered()
+        config["services"]["tts"]["networks"] = {"stt_private": None}
+        with self.assertRaisesRegex(ValueError, "TTS must connect only"):
+            validate(config, 8080, "127.0.0.1")
+
+    def test_gateway_must_connect_to_each_private_network(self):
+        config = rendered()
+        config["services"]["gateway"]["networks"] = {"stt_private": None}
+        with self.assertRaisesRegex(ValueError, "Gateway must connect"):
+            validate(config, 8080, "127.0.0.1")
+
+    def test_worker_networks_must_be_internal(self):
+        config = rendered()
+        config["networks"]["tts_private"]["internal"] = False
+        with self.assertRaisesRegex(ValueError, "networks must be internal"):
             validate(config, 8080, "127.0.0.1")
 
 

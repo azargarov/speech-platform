@@ -9,7 +9,7 @@ services:
       - "${SPEECH_BIND_IP:-127.0.0.1}:${SPEECH_PORT:-8080}:${SPEECH_LISTEN_PORT:-8080}"
     volumes:
       - ../../configs/gateway.yaml:/config/gateway.yaml:ro
-    networks: [speech]
+    networks: [stt_private, tts_private]
     environment:
       SPEECH_LISTEN_PORT: "${SPEECH_LISTEN_PORT:-8080}"
     read_only: true
@@ -26,7 +26,7 @@ services:
     command: ["services.stt.main", "--config", "/config/stt.yaml"]
     volumes:
       - ../../configs/stt.yaml:/config/stt.yaml:ro
-    networks: [speech]
+    networks: [stt_private]
     read_only: true
     user: "65532:65532"
     cap_drop: [ALL]
@@ -43,7 +43,7 @@ services:
     command: ["services.tts.main", "--config", "/config/tts.yaml"]
     volumes:
       - ../../configs/tts.yaml:/config/tts.yaml:ro
-    networks: [speech]
+    networks: [tts_private]
     read_only: true
     user: "65532:65532"
     cap_drop: [ALL]
@@ -54,5 +54,7 @@ services:
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
 networks:
-  speech:
+  stt_private:
+    internal: true
+  tts_private:
     internal: true

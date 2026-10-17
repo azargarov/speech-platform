@@ -18,10 +18,20 @@ def validate(config, expected_port, expected_bind):
         raise ValueError("Gateway bind address must be an IP address") from exc
 
     networks = config["networks"]
-    if not networks["speech"]["internal"]:
-        raise ValueError("speech network must be internal")
+    if set(networks) != {"stt_private", "tts_private"}:
+        raise ValueError("only the STT-private and TTS-private networks are allowed")
+    if any(not network["internal"] for network in networks.values()):
+        raise ValueError("worker networks must be internal")
     services = config["services"]
+    if set(services) != {"gateway", "stt", "tts"}:
+        raise ValueError("unexpected Compose service set")
     gateway = services["gateway"]
+    if set(gateway["networks"]) != {"stt_private", "tts_private"}:
+        raise ValueError("Gateway must connect to both private worker networks")
+    if set(services["stt"]["networks"]) != {"stt_private"}:
+        raise ValueError("STT must connect only to the STT-private network")
+    if set(services["tts"]["networks"]) != {"tts_private"}:
+        raise ValueError("TTS must connect only to the TTS-private network")
     if gateway["environment"].get("SPEECH_LISTEN_PORT") != str(expected_port):
         raise ValueError(
             "Compose Gateway listen port does not match effective configuration"
@@ -46,10 +56,8 @@ def validate(config, expected_port, expected_bind):
             raise ValueError(f"{name} must enable no-new-privileges")
         if int(service["mem_limit"]) <= 0 or float(service["cpus"]) <= 0:
             raise ValueError(f"{name} must have positive resource limits")
-        if service["pids_limit"] <= 0 or set(service["networks"]) != {"speech"}:
-            raise ValueError(
-                f"{name} must have a positive process limit on speech network"
-            )
+        if service["pids_limit"] <= 0:
+            raise ValueError(f"{name} must have a positive process limit")
         if name != "gateway" and (service.get("ports") or service.get("depends_on")):
             raise ValueError(f"{name} must remain private and independent")
 
