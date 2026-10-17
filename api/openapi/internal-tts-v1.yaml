@@ -12,6 +12,7 @@ paths:
   /internal/v1/speech:
     post:
       operationId: internalTTS
+      x-maxRequestSizeBytes: 26214400
       requestBody:
         required: true
         content:
@@ -29,9 +30,13 @@ paths:
                   maxLength: 10000
                 voice:
                   type: string
+                  minLength: 1
+                  maxLength: 128
                 language:
                   type: string
                   default: auto
+                  minLength: 1
+                  maxLength: 64
                   description: BCP-47 tag or auto. Auto uses provider text detection
                     when supported; otherwise returns 400.
                 format:
@@ -66,18 +71,6 @@ paths:
                 format: binary
         '400':
           description: Invalid request or unsupported option
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '401':
-          description: Missing or invalid bearer token
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '403':
-          description: Forbidden
           content:
             application/json:
               schema:
@@ -149,6 +142,10 @@ paths:
           description: Model loaded and able to accept work
         '503':
           description: Loading, failed, draining or M01 provider absent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 components:
   schemas:
     Error:
@@ -160,8 +157,11 @@ components:
       properties:
         code:
           type: string
+          minLength: 1
+          maxLength: 64
         message:
           type: string
+          minLength: 1
     Transcription:
       type: object
       required:

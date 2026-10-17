@@ -13,6 +13,7 @@ paths:
     post:
       operationId: internalSTT
       summary: Transcribe audio (contract only in M01)
+      x-maxRequestSizeBytes: 26214400
       requestBody:
         required: true
         content:
@@ -31,10 +32,14 @@ paths:
                 language:
                   type: string
                   default: auto
+                  minLength: 1
+                  maxLength: 64
                   description: BCP-47 tag, or auto for automatic detection. Unsupported
                     languages return 400.
                 model:
                   type: string
+                  minLength: 1
+                  maxLength: 128
                   description: Optional platform alias; configured default when absent.
                 timestamps:
                   type: boolean
@@ -57,18 +62,6 @@ paths:
                 $ref: '#/components/schemas/Transcription'
         '400':
           description: Invalid request or unsupported option
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '401':
-          description: Missing or invalid bearer token
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '403':
-          description: Forbidden
           content:
             application/json:
               schema:
@@ -140,6 +133,10 @@ paths:
           description: Model loaded and able to accept work
         '503':
           description: Loading, failed, draining or M01 provider absent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 components:
   schemas:
     Error:
@@ -151,8 +148,11 @@ components:
       properties:
         code:
           type: string
+          minLength: 1
+          maxLength: 64
         message:
           type: string
+          minLength: 1
     Transcription:
       type: object
       required:

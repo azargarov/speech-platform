@@ -6,17 +6,19 @@ services:
       dockerfile: deployments/compose/gateway.Dockerfile
     command: ["--config", "/config/gateway.yaml"]
     ports:
-      - "${SPEECH_BIND_IP:-127.0.0.1}:${SPEECH_PORT:-8080}:8080"
+      - "${SPEECH_BIND_IP:-127.0.0.1}:${SPEECH_PORT:-8080}:${SPEECH_LISTEN_PORT:-8080}"
     volumes:
       - ../../configs/gateway.yaml:/config/gateway.yaml:ro
     networks: [speech]
+    environment:
+      SPEECH_LISTEN_PORT: "${SPEECH_LISTEN_PORT:-8080}"
     read_only: true
     user: "65532:65532"
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     mem_limit: ${GATEWAY_MEMORY:-128m}
     cpus: ${GATEWAY_CPUS:-1.0}
-    pids_limit: 128
+    pids_limit: ${GATEWAY_PIDS:-128}
   stt:
     build:
       context: ../..
@@ -31,11 +33,9 @@ services:
     security_opt: [no-new-privileges:true]
     mem_limit: ${STT_MEMORY:-256m}
     cpus: ${STT_CPUS:-1.0}
-    pids_limit: 128
+    pids_limit: ${STT_PIDS:-128}
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
-      HF_HUB_OFFLINE: "1"
-      TRANSFORMERS_OFFLINE: "1"
   tts:
     build:
       context: ../..
@@ -50,11 +50,9 @@ services:
     security_opt: [no-new-privileges:true]
     mem_limit: ${TTS_MEMORY:-256m}
     cpus: ${TTS_CPUS:-1.0}
-    pids_limit: 128
+    pids_limit: ${TTS_PIDS:-128}
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
-      HF_HUB_OFFLINE: "1"
-      TRANSFORMERS_OFFLINE: "1"
 networks:
   speech:
     internal: true

@@ -1,6 +1,6 @@
 # Speech Platform
 
-Application-agnostic, self-hosted STT and TTS foundation. M01 is implemented for review; user validation is pending. Inference is unavailable. No `/v1` or internal inference handlers are installed. M02/M03 implement providers; M04 implements authentication enforcement and complete routing.
+Application-agnostic, self-hosted STT and TTS foundation. M01 is complete as a foundation and architecture milestone. Inference is unavailable. No `/v1` or internal inference handlers are installed. M02/M03 implement providers; M04 implements authentication enforcement and complete routing. Runtime deployment and GPU passthrough have not been validated.
 
 ## Development
 

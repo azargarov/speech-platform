@@ -27,14 +27,28 @@ class Acceptance(unittest.TestCase):
             path = ROOT / f"configs/{kind}.yaml"
             valid = yaml.safe_load(path.read_text())
             self.assertEqual(load_config(path, kind), valid)
+            for host in ("localhost", "worker.internal", "192.0.2.10"):
+                with tempfile.TemporaryDirectory() as directory:
+                    candidate = {**valid, "listen_host": host}
+                    host_config = Path(directory) / "host.yaml"
+                    host_config.write_text(yaml.safe_dump(candidate))
+                    self.assertEqual(load_config(host_config, kind), candidate)
             invalid = [
                 {**valid, "extra": 1},
                 {},
                 {**valid, "listen_port": 0},
                 {**valid, "listen_port": 65536},
-                {**valid, "max_request_bytes": -1},
-                {**valid, "request_timeout_seconds": True},
-                {**valid, "model_path": "relative"},
+                {**valid, "socket_timeout_seconds": True},
+                {**valid, "socket_timeout_seconds": 0},
+                {**valid, "socket_timeout_seconds": 86401},
+                {**valid, "poll_interval_seconds": True},
+                {**valid, "poll_interval_seconds": 0},
+                {**valid, "poll_interval_seconds": 61},
+                {**valid, "listen_host": "http://localhost"},
+                {**valid, "listen_host": "bad host"},
+                {**valid, "listen_host": "bad_host"},
+                {**valid, "listen_host": "256.0.0.1"},
+                {**valid, "listen_host": "::1"},
                 {**valid, "kind": "other"},
             ]
             for data in invalid:
@@ -43,9 +57,17 @@ class Acceptance(unittest.TestCase):
                     bad.write_text(yaml.safe_dump(data))
                     with self.assertRaises(ValueError):
                         load_config(bad, kind)
+            for port in (1, 65535):
+                boundary = {**valid, "listen_port": port}
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "boundary.yaml"
+                    path.write_text(yaml.safe_dump(boundary))
+                    self.assertEqual(load_config(path, kind), boundary)
             with tempfile.TemporaryDirectory() as directory:
                 bad = Path(directory) / "duplicate.yaml"
-                bad.write_text(path.read_text() + "listen_port: 1\n")
+                bad.write_text(
+                    (ROOT / f"configs/{kind}.yaml").read_text() + "listen_port: 1\n"
+                )
                 with self.assertRaises(ValueError):
                     load_config(bad, kind)
 
@@ -79,6 +101,41 @@ class Acceptance(unittest.TestCase):
     def test_openapi(self):
         for path in (ROOT / "api/openapi").glob("*.yaml"):
             validate(yaml.safe_load(path.read_text()))
+        public = yaml.safe_load((ROOT / "api/openapi/public-v1.yaml").read_text())
+        transcribe = public["paths"]["/v1/stt/transcriptions"]["post"]
+        self.assertEqual(transcribe["x-maxRequestSizeBytes"], 26214400)
+        self.assertEqual(
+            yaml.safe_load((ROOT / "configs/gateway.yaml").read_text())[
+                "max_request_bytes"
+            ],
+            transcribe["x-maxRequestSizeBytes"],
+        )
+        self.assertIn("413", transcribe["responses"])
+        for operation in (
+            public["paths"]["/v1/stt/models"]["get"],
+            public["paths"]["/v1/tts/voices"]["get"],
+        ):
+            self.assertEqual(
+                set(operation["responses"]), {"200", "401", "403", "500", "503"}
+            )
+        tts = public["paths"]["/v1/tts/speech"]["post"]
+        self.assertEqual(
+            tts["requestBody"]["content"]["application/json"]["schema"]["properties"][
+                "text"
+            ]["maxLength"],
+            10000,
+        )
+        for name in ("internal-stt-v1.yaml", "internal-tts-v1.yaml"):
+            internal = yaml.safe_load((ROOT / "api/openapi" / name).read_text())
+            operation = next(iter(internal["paths"].values()))["post"]
+            self.assertEqual(operation["x-maxRequestSizeBytes"], 26214400)
+            self.assertNotIn("401", operation["responses"])
+            self.assertNotIn("403", operation["responses"])
+            not_ready = internal["paths"]["/readyz"]["get"]["responses"]["503"]
+            self.assertEqual(
+                not_ready["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/Error",
+            )
 
     def test_compose_isolation(self):
         compose = yaml.safe_load(

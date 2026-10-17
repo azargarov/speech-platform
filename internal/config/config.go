@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"gopkg.in/yaml.v3"
 	"io"
-	"net/url"
+	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -19,10 +20,9 @@ type Config struct {
 	WriteTimeout    string `yaml:"write_timeout"`
 	IdleTimeout     string `yaml:"idle_timeout"`
 	ShutdownTimeout string `yaml:"shutdown_timeout"`
-	STTURL          string `yaml:"stt_url"`
-	TTSURL          string `yaml:"tts_url"`
-	AuthMode        string `yaml:"auth_mode"`
 }
+
+const PublicMaxRequestBytes int64 = 25 * 1024 * 1024
 
 func Load(path string) (Config, error) {
 	var c Config
@@ -40,11 +40,18 @@ func Load(path string) (Config, error) {
 	if e = d.Decode(&extra); e != io.EOF {
 		return c, fmt.Errorf("expected exactly one YAML document")
 	}
+	if value, ok := os.LookupEnv("SPEECH_LISTEN_PORT"); ok && value != "" {
+		port, err := strconv.Atoi(value)
+		if err != nil {
+			return c, fmt.Errorf("SPEECH_LISTEN_PORT must be an integer")
+		}
+		c.ListenPort = port
+	}
 	return c, c.Validate()
 }
 func (c Config) Validate() error {
-	if c.ListenHost == "" || c.ListenPort < 1 || c.ListenPort > 65535 || c.MaxRequestBytes < 1 || c.MaxHeaderBytes < 1 {
-		return fmt.Errorf("listen_host, valid listen_port and positive max_request_bytes required")
+	if !validHost(c.ListenHost) || c.ListenPort < 1 || c.ListenPort > 65535 || c.MaxRequestBytes < 1 || c.MaxRequestBytes > PublicMaxRequestBytes || c.MaxHeaderBytes < 1 {
+		return fmt.Errorf("listen_host must be a hostname or IP; listen_port and max_header_bytes must be positive; max_request_bytes must be in 1..%d", PublicMaxRequestBytes)
 	}
 	for _, v := range []string{c.ReadTimeout, c.WriteTimeout, c.IdleTimeout, c.ShutdownTimeout} {
 		d, e := time.ParseDuration(v)
@@ -52,20 +59,34 @@ func (c Config) Validate() error {
 			return fmt.Errorf("all timeouts must be positive durations")
 		}
 	}
-	for _, v := range []string{c.STTURL, c.TTSURL} {
-		u, e := url.Parse(v)
-		if e != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
-			return fmt.Errorf("worker URL must be an HTTP origin")
+	return nil
+}
+
+func validHost(host string) bool {
+	if host == "" || strings.TrimSpace(host) != host || strings.ContainsAny(host, "/?#@") {
+		return false
+	}
+	if strings.Contains(host, ":") {
+		return net.ParseIP(host) != nil
+	}
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	if strings.Trim(host, "0123456789.") == "" {
+		return false
+	}
+	if len(host) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(strings.TrimSuffix(host, "."), ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
 		}
-		if p := u.Port(); p != "" {
-			n, e := strconv.Atoi(p)
-			if e != nil || n < 1 || n > 65535 {
-				return fmt.Errorf("invalid worker port")
+		for _, r := range label {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+				return false
 			}
 		}
 	}
-	if c.AuthMode != "disabled" && c.AuthMode != "bearer" {
-		return fmt.Errorf("auth_mode must be disabled or bearer")
-	}
-	return nil
+	return true
 }

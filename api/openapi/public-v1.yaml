@@ -18,6 +18,7 @@ paths:
     post:
       operationId: transcribe
       summary: Transcribe audio (contract only in M01)
+      x-maxRequestSizeBytes: 26214400
       requestBody:
         required: true
         content:
@@ -36,10 +37,14 @@ paths:
                 language:
                   type: string
                   default: auto
+                  minLength: 1
+                  maxLength: 64
                   description: BCP-47 tag, or auto for automatic detection. Unsupported
                     languages return 400.
                 model:
                   type: string
+                  minLength: 1
+                  maxLength: 128
                   description: Optional platform alias; configured default when absent.
                 timestamps:
                   type: boolean
@@ -129,6 +134,7 @@ paths:
   /v1/tts/speech:
     post:
       operationId: synthesize
+      x-maxRequestSizeBytes: 26214400
       requestBody:
         required: true
         content:
@@ -146,9 +152,13 @@ paths:
                   maxLength: 10000
                 voice:
                   type: string
+                  minLength: 1
+                  maxLength: 128
                 language:
                   type: string
                   default: auto
+                  minLength: 1
+                  maxLength: 64
                   description: BCP-47 tag or auto. Auto uses provider text detection
                     when supported; otherwise returns 400.
                 format:
@@ -204,17 +214,10 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Model'
-        '400': *id001
         '401': *id002
         '403': *id003
-        '404': *id004
-        '413': *id005
-        '415': *id006
-        '422': *id007
-        '429': *id008
         '500': *id009
         '503': *id010
-        '504': *id011
   /v1/tts/voices:
     get:
       operationId: listVoices
@@ -227,17 +230,10 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Voice'
-        '400': *id001
         '401': *id002
         '403': *id003
-        '404': *id004
-        '413': *id005
-        '415': *id006
-        '422': *id007
-        '429': *id008
         '500': *id009
         '503': *id010
-        '504': *id011
 components:
   securitySchemes:
     bearerAuth:
@@ -253,6 +249,8 @@ components:
       properties:
         code:
           type: string
+          minLength: 1
+          maxLength: 64
         message:
           type: string
     Transcription:
@@ -294,6 +292,8 @@ components:
       properties:
         id:
           type: string
+          minLength: 1
+          maxLength: 128
           description: Stable platform alias, never engine-specific.
         languages:
           type: array
@@ -312,6 +312,8 @@ components:
       properties:
         id:
           type: string
+          minLength: 1
+          maxLength: 128
         languages:
           type: array
           items:

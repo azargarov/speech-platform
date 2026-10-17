@@ -1,29 +1,38 @@
-# User validation — PENDING
+# M01 user validation — PASS
 
-From the repository root:
+OBSERVED (user-reported): local validation passed, and the user completed the read-only host inspection. No containers or services were modified. M01 acceptance passed within the approved scope; this did not include deployment or GPU passthrough testing.
+
+## Local validation
+
+From the repository root, run:
 
 ```sh
-python3 -m venv .venv
-make bootstrap PYTHON=.venv/bin/python
+make governance-check PYTHON=.venv/bin/python
 make verify PYTHON=.venv/bin/python
-docker compose -f deployments/compose/compose.yaml build
-docker compose -f deployments/compose/compose.yaml up -d
-curl -i http://127.0.0.1:8080/healthz
-curl -i http://127.0.0.1:8080/readyz
-curl -i -X POST http://127.0.0.1:8080/v1/stt/transcriptions
-curl -i -X POST http://127.0.0.1:8080/v1/tts/speech
-docker compose -f deployments/compose/compose.yaml ps
-docker compose -f deployments/compose/compose.yaml down
+SPEECH_LISTEN_PORT=8765 SPEECH_BIND_IP=127.0.0.2 make compose-check PYTHON=.venv/bin/python
+SPEECH_LISTEN_PORT=8765 go run ./cmd/gateway --config configs/gateway.yaml --check-config
+git check-ignore -v private/audio/russian.m4a
+git diff --check
 ```
 
-Expected HTTP statuses in order: 200, 503, 404, 404. Only gateway publishes a host port. STT/TTS should be running, but unavailable for inference. Review contracts, ADRs and the M00 reported observations. Confirm no existing stack changes.
+Expected: all commands exit zero; the override checker accepts the same 8765 target and process port; the private audio ignore rule resolves to `/private/`. These checks do not validate a running deployment.
 
-If the original benchmark source becomes available in a local directory, archive code and documentation without overwriting:
+## Target-host read-only inspection
 
-```sh
-M00_BENCHMARK_SOURCE=/path/to/local/benchmark bash scripts/archive-m00.sh /tmp/speech-m00-source.tar
-```
+The user completed the procedure in [host-inspection.md](host-inspection.md). Codex did not connect to the host. User-reported observations:
 
-Review archive privately for secrets before adding selected scripts/configuration. Never add recordings.
+- Existing Ollama and Dify containers were running. Published ports included 80, 443, 5003 and 11434.
+- No listener was observed on host port 8080 at inspection time.
+- NVIDIA Quadro RTX 5000 was visible; driver version 580.178.04 was reported. NVIDIA Docker runtime was registered.
+- Approximately 58 GiB RAM was available and approximately 105 GB was available on the root filesystem.
+- No containers or services were modified.
 
-Record actual command outputs, environment, date, reviewer and explicit acceptance here. Do not mark complete based on local automated checks alone. No user validation has occurred.
+These are user-reported host observations, not independently collected by Codex. The host details supported a read-only preflight; they do not prove future port availability or Speech Platform runtime behavior. Runtime GPU passthrough and available VRAM at inspection time were not established.
+
+## M00 benchmark-source scope decision
+
+OBSERVED: the user approved deferring recovery of the original M00 scripts/configuration. Existing measurements and provenance remain recorded; benchmark reproduction is not claimed. Source preservation is **NOT ESTABLISHED**, and this is not a passed preservation test. Recovery is deferred and does not block M01 closure.
+
+## Validation record
+
+Acceptance decision: **M01 PASS** within the approved scope. User validation accepts the local foundation and static Compose isolation/configuration checks plus the read-only host observations. It does not claim deployed runtime validation, GPU passthrough, inference, or recovered/reproduced M00 benchmark sources. M02 remains not started and requires separate authorization.

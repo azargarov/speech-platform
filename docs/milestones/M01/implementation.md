@@ -1,65 +1,21 @@
-# Implementation
+# M01 implementation
 
-OBSERVED: initial repository had no commits/source and one untracked russian.m4a. That file was left unchanged and audio patterns ignored. Go 1.27.2, Python 3.13.15, Compose 5.6.0 and Make were available. A configured SSH alias could not be resolved during the read-only source retrieval attempt.
+## Historical baseline record
 
-Implemented Go gateway, shared Python transport with separate STT/TTS entry points, strict YAML, skeleton health/readiness, three versioned contracts, isolated Compose deployment, Dockerfiles, verification and CI, documentation and ADRs. No inference handlers installed. No service deployment or commit performed.
+OBSERVED (baseline work recorded 2026-10-17, before the initial Git commit): the original foundation was created in an empty repository workspace. The then-present recording was left outside Git. A read-only remote source lookup failed because its SSH alias did not resolve. The historical verification and implementation details remain in [baseline verification evidence](evidence/make-verify.txt) and [baseline verification record](verification.md).
 
-INTERPRETATION: foundations are suitable for adding providers within isolated workers while keeping the public contract stable.
+The earlier statement “no commit made” described the state at that time only. The approved initial baseline is now commit `4beb6216b57696dcce28e8ee282c7633b74cdb5a`. The private recording is now under ignored `private/audio/russian.m4a`; it is not part of the commit.
 
-NOT ESTABLISHED: real inference, authentication, routing, GPU behavior, host deployment, operational performance, benchmark source preservation and user acceptance.
+## Current remediation
 
-## Created files
+OBSERVED: remediation was authorized on 2026-10-17 after the read-only audit. Gateway and worker boundaries, public/internal API separation and fail-closed inference routes are retained.
 
-All implementation files are new in the previously empty repository. Existing audio is unchanged.
+Changes made during this remediation: use `SPEECH_LISTEN_PORT` for the Gateway process and Compose target; validate rendered port and bind agreement; enforce the Gateway body-size limit; remove unused worker model path, request-size and inference-drain settings and defer them to M02/M03; validate listen hosts and port boundaries; tighten OpenAPI limits and response declarations; make process limits configurable; and reconcile milestone evidence. Verification results are in [remediation evidence](evidence/remediation-verify.txt).
 
-- `.dockerignore`
-- `.github/workflows/verify.yaml`
-- `.gitignore`
-- `.ruff_cache/.gitignore`
-- `.ruff_cache/0.14.1/11210373644928086331`
-- `.ruff_cache/0.14.1/16607362386770682890`
-- `.ruff_cache/0.14.1/17714781756565565155`
-- `.ruff_cache/0.14.1/7710217385839355417`
-- `.ruff_cache/CACHEDIR.TAG`
-- `Makefile`
-- `PLANS.md`
-- `README.md`
-- `api/openapi/internal-stt-v1.yaml`
-- `api/openapi/internal-tts-v1.yaml`
-- `api/openapi/public-v1.yaml`
-- `benchmarks/README.md`
-- `cmd/gateway/main.go`
-- `configs/gateway.yaml`
-- `configs/stt.yaml`
-- `configs/tts.yaml`
-- `deployments/compose/compose.yaml`
-- `deployments/compose/gateway.Dockerfile`
-- `deployments/compose/worker.Dockerfile`
-- `docs/adr/0001-component-boundaries.md`
-- `docs/adr/0002-contracts.md`
-- `docs/adr/0003-deployment.md`
-- `docs/adr/0004-security-milestones.md`
-- `docs/adr/0005-config-observability.md`
-- `docs/architecture/overview.md`
-- `docs/milestones/M01/evidence/make-verify.txt`
-- `docs/milestones/M01/implementation.md`
-- `docs/milestones/M01/plan.md`
-- `docs/milestones/M01/result.md`
-- `docs/milestones/M01/user-validation.md`
-- `docs/milestones/M01/verification.md`
-- `docs/operations/runbook.md`
-- `go.mod`
-- `go.sum`
-- `internal/config/config.go`
-- `internal/config/config_test.go`
-- `internal/gateway/handler.go`
-- `internal/gateway/handler_test.go`
-- `internal/transport/http.go`
-- `requirements-dev.txt`
-- `scripts/archive-m00.sh`
-- `scripts/check_compose.py`
-- `scripts/test_acceptance.py`
-- `services/requirements.txt`
-- `services/stt/main.py`
-- `services/tts/main.py`
-- `services/worker/server.py`
+OBSERVED: the checked local benchmark-source candidate was absent. No remote system was accessed. The original benchmark sources have not been recovered or preserved in this repository. `benchmarks/README.md` records the supplied observations and this limitation.
+
+USER-APPROVED SCOPE DECISION (2026-10-17): original benchmark scripts and configuration were not recovered; the existing M00 measurements and provenance remain recorded; benchmark reproduction is not claimed. Recovery is deferred and does not block M01 closure. This is an acceptance-scope exception, not a passed source-preservation test.
+
+INTERPRETATION: the current changes improve configuration truthfulness and regression protection without changing the component architecture or adding inference/routing behavior.
+
+NOT ESTABLISHED: target-host deployment, runtime service behavior, Docker image rebuild after remediation, runtime inference, authentication, GPU passthrough, available VRAM at inspection time, and original M00 source recovery/preservation. The source-recovery gap is explicitly deferred under the user-approved scope decision above and is not a closure blocker. User validation is recorded in [user-validation.md](user-validation.md).

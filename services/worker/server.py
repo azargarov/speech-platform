@@ -1,7 +1,9 @@
 """Shared transport only. STT and TTS do not import each other."""
 
 import argparse
+import ipaddress
 import json
+import math
 import signal
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,38 +35,65 @@ def load_config(path, kind):
         "kind",
         "listen_host",
         "listen_port",
-        "max_request_bytes",
-        "request_timeout_seconds",
-        "shutdown_timeout_seconds",
-        "model_path",
+        "socket_timeout_seconds",
+        "poll_interval_seconds",
     }
     if not isinstance(data, dict) or set(data) != fields:
         raise ValueError("configuration fields must match required schema")
     if data["kind"] != kind or kind not in {"stt", "tts"}:
         raise ValueError("invalid worker kind")
-    for field in ("listen_host", "model_path"):
-        if not isinstance(data[field], str) or not data[field].strip():
-            raise ValueError(f"{field} must be nonempty")
-    if not Path(data["model_path"]).is_absolute():
-        raise ValueError("model_path must be absolute")
-    for field in (
-        "listen_port",
-        "max_request_bytes",
-        "request_timeout_seconds",
-        "shutdown_timeout_seconds",
+    if not isinstance(data["listen_host"], str) or not valid_host(data["listen_host"]):
+        raise ValueError("listen_host must be a valid IPv4 address or hostname")
+    if type(data["listen_port"]) is not int or data["listen_port"] <= 0:
+        raise ValueError("listen_port must be a positive integer")
+    if (
+        type(data["socket_timeout_seconds"]) is not int
+        or not 0 < data["socket_timeout_seconds"] <= 86400
     ):
-        if type(data[field]) is not int or data[field] <= 0:
-            raise ValueError(f"{field} must be a positive integer")
+        raise ValueError("socket_timeout_seconds must be in 1..86400")
     if data["listen_port"] > 65535:
         raise ValueError("invalid port")
+    interval = data["poll_interval_seconds"]
+    if (
+        type(interval) not in (int, float)
+        or not math.isfinite(interval)
+        or not 0 < interval <= 60
+    ):
+        raise ValueError("poll_interval_seconds must be greater than 0 and at most 60")
     return data
+
+
+def valid_host(value):
+    if not isinstance(value, str) or not value or value.strip() != value:
+        return False
+    try:
+        ipaddress.IPv4Address(value)
+        return True
+    except ipaddress.AddressValueError:
+        if all(char.isdigit() or char == "." for char in value):
+            return False
+        if len(value) > 253:
+            return False
+        labels = value.rstrip(".").split(".")
+        return all(
+            label
+            and len(label) <= 63
+            and label[0].isascii()
+            and label[0].isalnum()
+            and label[-1].isascii()
+            and label[-1].isalnum()
+            and all(
+                char.isascii() and (char.isalnum() or char == "-") for char in label
+            )
+            for label in labels
+        )
 
 
 def handler(config):
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
             super().setup()
-            self.connection.settimeout(config["request_timeout_seconds"])
+            self.connection.settimeout(config["socket_timeout_seconds"])
 
         def log_message(self, *_args):
             pass  # Never log payloads or transcription content.
@@ -126,7 +155,7 @@ def main(kind):
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    server.timeout = min(0.5, config["shutdown_timeout_seconds"])
+    server.timeout = config["poll_interval_seconds"]
     print(json.dumps({"event": "worker_starting", "kind": kind}), flush=True)
     try:
         while not stopping.is_set():

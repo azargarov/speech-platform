@@ -1,6 +1,6 @@
 # M00 observed experiment
 
-Original benchmark scripts and configuration remain in their separately maintained source directory. No private recordings belong in Git. The local sample is kept at `private/audio/russian.m4a`; the entire root `private/` directory is ignored. A retrieval attempt during M01 could not resolve the configured SSH alias. Source files have therefore not been inspected or copied; preservation in this repository is NOT ESTABLISHED. The original directory was not accessed or modified.
+Original benchmark scripts and configuration were reported as part of the separately maintained M00 experiment. No local source directory was present at the checked local VoiceHub benchmark location. Remote access was not performed. Original source files have not been inspected or copied; preservation in this repository is NOT ESTABLISHED. Under a user-approved M01 scope decision, source recovery is deferred and does not block M01 closure. This is not a passed preservation test, and benchmark reproduction is not claimed. No private recordings belong in Git. The local sample is kept at `private/audio/russian.m4a`; the entire root `private/` directory is ignored.
 
 OBSERVED (user-reported; not independently reproduced): faster-whisper 1.2.1, CUDA 12.8, Docker Compose, persistent Hugging Face cache, Whisper large-v3-turbo. Russian M4A duration 21.205 s. Two warmups and ten measured runs. Median transcription 0.666 s, p95 0.705 s, median RTF 0.0314. All ten transcriptions identical. Repeated startup loaded cached model in 2.87 s.
 

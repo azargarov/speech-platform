@@ -1,0 +1,24 @@
+M01 remediation override and privacy checks
+UTC date: 2026-10-17 10:35:12
+
+Command: make compose-check PYTHON=.venv/bin/python
+docker compose -f deployments/compose/compose.yaml config --quiet
+docker compose -f deployments/compose/compose.yaml config --format json | .venv/bin/python scripts/check_compose.py
+exit_code=0
+
+Command: env SPEECH_LISTEN_PORT=8765 SPEECH_BIND_IP=127.0.0.2 make compose-check PYTHON=.venv/bin/python
+docker compose -f deployments/compose/compose.yaml config --quiet
+docker compose -f deployments/compose/compose.yaml config --format json | .venv/bin/python scripts/check_compose.py
+exit_code=0
+
+Command: env SPEECH_LISTEN_PORT=8765 go run ./cmd/gateway --config configs/gateway.yaml --check-config
+exit_code=0
+
+Command: git check-ignore -v private/audio/russian.m4a
+.gitignore:2:/private/	private/audio/russian.m4a
+exit_code=0
+
+Command: git diff --check
+exit_code=0
+
+verification_exit_code=0

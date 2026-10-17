@@ -1,7 +1,9 @@
 package gateway
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"speech-platform/internal/transport"
 )
@@ -37,6 +39,15 @@ func Handler(state Readiness, maxBytes int64) http.Handler {
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				transport.JSON(w, http.StatusRequestEntityTooLarge, transport.Error{Code: "request_too_large", Message: "request size limit exceeded"})
+				return
+			}
+			transport.JSON(w, http.StatusBadRequest, transport.Error{Code: "invalid_request_body", Message: "request body could not be read"})
+			return
+		}
 		mux.ServeHTTP(w, r)
 	})
 }
