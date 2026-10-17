@@ -89,7 +89,7 @@ def valid_host(value):
         )
 
 
-def handler(config):
+def handler(config, lifecycle=None):
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
             super().setup()
@@ -108,9 +108,11 @@ def handler(config):
 
         def do_GET(self):
             if self.path == "/metrics":
+                ready = lifecycle.ready() if lifecycle is not None else False
+                metric_value = "1" if ready else "0"
                 payload = (
                     "# HELP speech_ready Whether this component can serve inference.\n"
-                    "# TYPE speech_ready gauge\nspeech_ready 0\n"
+                    f"# TYPE speech_ready gauge\nspeech_ready {metric_value}\n"
                 ).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; version=0.0.4")
@@ -120,9 +122,22 @@ def handler(config):
             elif self.path == "/healthz":
                 self.reply(200, {"status": "alive"})
             elif self.path == "/readyz":
-                self.reply(
-                    503, {"code": "not_ready", "message": "model provider unavailable"}
-                )
+                ready = lifecycle.ready() if lifecycle is not None else False
+                if ready:
+                    self.reply(200, {"status": "ready"})
+                elif lifecycle is not None and lifecycle.cleanup_unconfirmed():
+                    self.reply(
+                        503,
+                        {
+                            "code": "cleanup_unconfirmed",
+                            "message": "inference process cleanup is unconfirmed",
+                        },
+                    )
+                else:
+                    self.reply(
+                        503,
+                        {"code": "not_ready", "message": "model provider unavailable"},
+                    )
             else:
                 self.reply(
                     404, {"code": "not_found", "message": "endpoint unavailable"}
@@ -138,11 +153,28 @@ def handler(config):
 def main(kind):
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
+    parser.add_argument("--application-config")
+    parser.add_argument("--deployment-config")
     parser.add_argument("--check-config", action="store_true")
     args = parser.parse_args()
     config = load_config(args.config, kind)
+    application_config = None
+    deployment_config = None
+    if args.application_config or args.deployment_config:
+        if kind != "stt" or not args.application_config or not args.deployment_config:
+            parser.error(
+                "STT application and deployment config must be supplied together"
+            )
+        from services.stt.config import load_application_config, load_deployment_config
+
+        application_config = load_application_config(args.application_config)
+        deployment_config = load_deployment_config(args.deployment_config)
     if args.check_config:
         return
+    if application_config is not None and deployment_config is not None:
+        raise ValueError(
+            "no production inference backend is registered in M02-A; refusing to start"
+        )
     server = ThreadingHTTPServer(
         (config["listen_host"], config["listen_port"]), handler(config)
     )

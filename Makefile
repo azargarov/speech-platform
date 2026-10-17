@@ -22,6 +22,7 @@ compose-check:
 test:
 	go test -race ./...
 	$(PYTHON) -m unittest discover -s scripts -p 'test_*.py' -v
+	$(PYTHON) -m unittest discover -s services/stt/tests -p 'test_*.py' -v
 build:
 	go build ./...
 	$(PYTHON) -c 'import ast,pathlib; [ast.parse(p.read_text()) for p in pathlib.Path("services").rglob("*.py")]'

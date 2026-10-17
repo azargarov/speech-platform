@@ -1,6 +1,6 @@
 # M02 STT inference plan
 
-Status: design closeout checks passed; final user approval pending; implementation NOT STARTED. M02-A is the next approval gate. This plan does not authorize M02 inference code, service startup or deployment. The accepted architecture is documented in [m02-stt-design.md](../../architecture/m02-stt-design.md) and its network boundary in [ADR 0009](../../adr/0009-worker-network-reachability.md).
+Status: M02-A is PASS following user validation and explicit closeout approval on 2026-10-17. Overall M02 remains incomplete. M02-B is NEXT, has not started, and requires separate user approval. No service startup or deployment was authorized. The accepted architecture is documented in [m02-stt-design.md](../../architecture/m02-stt-design.md) and its network boundary in [ADR 0009](../../adr/0009-worker-network-reachability.md).
 
 ## Scope
 
@@ -14,7 +14,7 @@ Each phase is a reviewable deliverable. User approval is required before beginni
 
 ### M02-A — Application and execution foundation
 
-Entry gate: M01 PASS (satisfied); separate explicit user approval for M02-A. Exit gate: all acceptance criteria and verification pass, records are updated, and user validates A before B is proposed.
+Entry gate: M01 PASS (satisfied); M02-A implementation was explicitly authorized. Exit gate: all acceptance criteria and verification pass, records are updated, and user validates A before B is proposed. **Status: PASS.** User validation and closeout approval were received 2026-10-17. M02-B is the next separate approval gate.
 
 Deliver typed domain/ports, alias catalog, versioned strict inference config and deployment config; legacy health-only compatibility; manifest schema/validation; worker/model lifecycles; admission and byte accounting; supervised child protocol; health/readiness; safe errors and metrics. Use fake backend and fake device/process adapters. Do not add faster-whisper, CUDA or start containers in this phase.
 
@@ -22,7 +22,7 @@ Acceptance: unknown/missing/duplicate/invalid config fails; old M01 health-only 
 
 Verification commands: `make verify PYTHON=.venv/bin/python` (includes rendered Compose and static topology validation); focused new suite `PYTHON=.venv/bin/python -m unittest discover -s services/stt/tests -v`; `git diff --check`. CI runs the fake-backend suite without GPU. The focused command is a planned test location to create in A. Runtime network reachability remains unverified until separately authorized deployment.
 
-User validation: review config/schema and failure policy; run the listed commands locally; confirm legacy health-only compatibility, static network topology, and explicit M02-A acceptance. ADR 0009 is accepted for design; no host access or deployment is part of M02-A.
+User validation: completed 2026-10-17. User approved M02-A validation after the final audit recommendation ACCEPT. ADR 0009 is accepted for design; no host access or deployment is part of M02-A.
 
 ### M02-B — faster-whisper CPU/CUDA adapter and private STT operation
 

@@ -1,6 +1,6 @@
 # M02 STT architecture design
 
-Status: accepted design for planning; no M02 implementation is authorized or started. M01 remains PASS. See [M02 plan](../milestones/M02/plan.md) and ADRs [0006](../adr/0006-stt-alias-ownership.md), [0007](../adr/0007-stt-execution-lifecycle.md), [0008](../adr/0008-stt-artifacts-devices-configuration.md) and accepted [0009](../adr/0009-worker-network-reachability.md).
+Status: accepted architecture baseline. At design closeout no M02 implementation had started; M02-A was subsequently authorized, implemented, locally verified and user-accepted as PASS on 2026-10-17. M01 remains PASS. Overall M02 remains incomplete; M02-B is the next approval gate and has not started. See [M02 plan](../milestones/M02/plan.md) and ADRs [0006](../adr/0006-stt-alias-ownership.md), [0007](../adr/0007-stt-execution-lifecycle.md), [0008](../adr/0008-stt-artifacts-devices-configuration.md) and accepted [0009](../adr/0009-worker-network-reachability.md).
 
 ## Evidence and assumptions
 
@@ -283,7 +283,7 @@ execution:
 
 Portable policy for initial `llm` is explicit CUDA with no CPU fallback. A separate CPU-only profile selects CPU, omits all NVIDIA libraries/device access, and uses CPU-compatible precision and thread settings. `auto` is for portable applications and tests; it follows a validated ordered preference and never changes device mid-request. Missing CUDA, unsupported precision or inadequate headroom makes an explicit CUDA model unready. No silent downgrade.
 
-The memory threshold is a preflight heuristic and can race with Ollama or Dify allocations. It is neither a reservation nor a hard VRAM limit. Never evict, unload or signal another service's model. Cgroups bound CPU, host memory and processes; they do not provide a GPU allocation limit.
+The memory threshold is a preflight heuristic and can race with Ollama or Dify allocations. If a backend declares a mandatory peak-memory estimate, a CUDA device with unknown free memory fails selection; insufficient reported free memory also fails. A sufficient observation is advisory only: it is neither a reservation nor a hard VRAM limit. Never evict, unload or signal another service's model. Cgroups bound CPU, host memory and processes; they do not provide a GPU allocation limit.
 
 ### Artifact manifest
 
