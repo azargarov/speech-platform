@@ -34,3 +34,21 @@ def verify_approved_audio(audio_file: str | Path, checksum_file: str | Path) -> 
     if actual != expected:
         raise ValueError("audio does not match approved checksum")
     return expected
+
+
+def validate_free_gpu_memory(free_memory_mib: int, minimum_free_bytes: int) -> None:
+    """Compare one observed nvidia-smi value with the validated deployment gate."""
+    if type(free_memory_mib) is not int or free_memory_mib < 0:
+        raise ValueError("GPU free-memory observation is invalid")
+    if type(minimum_free_bytes) is not int or minimum_free_bytes <= 0:
+        raise ValueError("configured GPU free-memory gate is invalid")
+    if free_memory_mib * 1024**2 < minimum_free_bytes:
+        raise ValueError("GPU free memory is below the configured admission gate")
+
+
+def parse_free_gpu_memory_mib(output: str) -> int:
+    """Parse the single numeric field emitted by nvidia-smi in MiB mode."""
+    value = output.strip()
+    if not re.fullmatch(r"[0-9]+", value):
+        raise ValueError("GPU free-memory probe returned an invalid value")
+    return int(value)

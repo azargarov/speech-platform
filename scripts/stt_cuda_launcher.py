@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import selectors
@@ -152,7 +153,51 @@ def _utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def validate_docker_invocation(command: list[str]) -> None:
+def _docker_option(args: list[str], name: str) -> list[str]:
+    values = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == name and index + 1 < len(args):
+            values.append(args[index + 1])
+            index += 2
+            continue
+        if arg.startswith(name + "="):
+            values.append(arg.partition("=")[2])
+        index += 1
+    return values
+
+
+def _memory_bytes(value: str) -> int:
+    match = re.fullmatch(r"([0-9]+)(b|k|m|g|kb|mb|gb|ki|mi|gi)?", value.lower())
+    if not match:
+        raise ValueError("CUDA HTTP memory limit is invalid")
+    amount = int(match.group(1))
+    unit = match.group(2) or "b"
+    scale = {
+        "b": 1,
+        "k": 1000,
+        "m": 1000**2,
+        "g": 1000**3,
+        "kb": 1000,
+        "mb": 1000**2,
+        "gb": 1000**3,
+        "ki": 1024,
+        "mi": 1024**2,
+        "gi": 1024**3,
+    }[unit]
+    return amount * scale
+
+
+def validate_docker_invocation(
+    command: list[str],
+    *,
+    cuda_http_profile: bool = False,
+    expected_gpu_index: int | None = None,
+    expected_image_id: str | None = None,
+    expected_platform: str | None = None,
+    expected_shared_gid: int | None = None,
+) -> dict | None:
     """Reject obvious violations of this diagnostic's isolation boundary."""
     if len(command) < 3 or Path(command[0]).name != "docker" or command[1] != "run":
         raise ValueError("launcher requires a docker run argument vector")
@@ -165,7 +210,12 @@ def validate_docker_invocation(command: list[str]) -> None:
     )
     if not network_none:
         raise ValueError("diagnostic container must use network none")
-    if any(arg in {"-p", "--publish"} or arg.startswith("--publish=") for arg in args):
+    if any(
+        arg in {"-p", "-P", "--publish", "--publish-all"}
+        or arg.startswith("--publish=")
+        or (arg.startswith("-p") and len(arg) > 2)
+        for arg in args
+    ):
         raise ValueError("diagnostic container cannot publish ports")
     user_value = None
     mounts = []
@@ -189,6 +239,8 @@ def validate_docker_invocation(command: list[str]) -> None:
             parsed_mounts.append(
                 (Path(fields["src"]), fields["dst"].rstrip("/"), flags)
             )
+    if cuda_http_profile and len(parsed_mounts) != len(mounts):
+        raise ValueError("CUDA HTTP container permits bind mounts only")
     for source, destination, flags in parsed_mounts:
         if "readonly" not in flags and "ro" not in flags:
             continue
@@ -204,6 +256,96 @@ def validate_docker_invocation(command: list[str]) -> None:
                 raise ValueError(
                     "nested bind target must exist inside its read-only parent source"
                 )
+
+    if not cuda_http_profile:
+        return None
+    if expected_gpu_index is None or expected_gpu_index < 0:
+        raise ValueError("CUDA HTTP profile requires a validated configured GPU index")
+    if _docker_option(args, "--network") != ["none"]:
+        raise ValueError(
+            "CUDA HTTP container must use exactly one isolated network mode"
+        )
+    if expected_image_id is None or args.count(expected_image_id) != 1:
+        raise ValueError("Docker image must match the approved immutable image ID")
+    if expected_platform is None or _docker_option(args, "--platform") != [
+        expected_platform
+    ]:
+        raise ValueError("Docker platform must match the approved image platform")
+    if _docker_option(args, "--pull") != ["never"]:
+        raise ValueError("CUDA HTTP container must not pull an image at runtime")
+    if "--read-only" not in args:
+        raise ValueError("CUDA HTTP container root filesystem must be read-only")
+    if any(
+        arg in {"--privileged", "--cap-add"} or arg.startswith("--cap-add=")
+        for arg in args
+    ):
+        raise ValueError("CUDA HTTP container cannot request privileged capabilities")
+    if any(
+        arg in {"-v", "--volume", "--device", "--tmpfs", "--volumes-from"}
+        or arg.startswith(("--volume=", "--device=", "--tmpfs=", "--volumes-from="))
+        for arg in args
+    ):
+        raise ValueError(
+            "CUDA HTTP container uses an unsupported mount or device option"
+        )
+    if _docker_option(args, "--entrypoint") != ["python"]:
+        raise ValueError("CUDA HTTP container must use the approved Python entrypoint")
+    if _docker_option(args, "--user") != ["65532:65532"]:
+        raise ValueError(
+            "CUDA HTTP container must use the configured non-root identity"
+        )
+    if expected_shared_gid is None or _docker_option(args, "--group-add") != [
+        str(expected_shared_gid)
+    ]:
+        raise ValueError("CUDA HTTP group must match the report mount group")
+    gpu_values = _docker_option(args, "--gpus")
+    if gpu_values != [f"device={expected_gpu_index}"]:
+        raise ValueError("Docker GPU selection must match deployment configuration")
+
+    memory = _docker_option(args, "--memory")
+    cpus = _docker_option(args, "--cpus")
+    pids = _docker_option(args, "--pids-limit")
+    if len(memory) != 1 or _memory_bytes(memory[0]) <= 0:
+        raise ValueError("CUDA HTTP container requires one positive memory limit")
+    if len(cpus) != 1:
+        raise ValueError("CUDA HTTP container requires one CPU limit")
+    try:
+        cpu_limit = float(cpus[0])
+    except ValueError as exc:
+        raise ValueError("CUDA HTTP CPU limit is invalid") from exc
+    if not (0 < cpu_limit < float("inf")):
+        raise ValueError("CUDA HTTP CPU limit must be finite and positive")
+    if len(pids) != 1 or not pids[0].isdecimal() or int(pids[0]) < 1:
+        raise ValueError("CUDA HTTP container requires one positive PID limit")
+
+    destinations = {}
+    writable = []
+    for source, destination, flags in parsed_mounts:
+        destinations[destination] = flags
+        if "readonly" not in flags and "ro" not in flags:
+            writable.append(destination)
+    if len(destinations) != len(parsed_mounts):
+        raise ValueError("CUDA HTTP bind mount destinations must be unique")
+    required = {
+        "/input",
+        "/models",
+        "/opt/validation/configs",
+        "/opt/validation/scripts",
+        "/opt/validation/services",
+        "/results",
+    }
+    if not required.issubset(destinations):
+        raise ValueError(
+            "CUDA HTTP input, artifact, code and report mounts are required"
+        )
+    if writable != ["/results"]:
+        raise ValueError("only the attempt-specific results mount may be writable")
+    return {
+        "gpu_device_index": expected_gpu_index,
+        "cpu_limit": cpu_limit,
+        "memory_limit_bytes": _memory_bytes(memory[0]),
+        "pids_limit": int(pids[0]),
+    }
 
 
 class _BoundedOutput:
@@ -374,11 +516,13 @@ class DiagnosticLauncher:
         *,
         image_id: str,
         container_name: str,
-        timeout_seconds: float = 180,
-        grace_seconds: float = 5,
+        timeout_seconds: float,
+        grace_seconds: float,
         harness_report_name: str = "harness-report.json",
-        platform: str = "linux/amd64",
+        platform: str,
         lock_sha256: str | None = None,
+        cuda_http_profile: bool = False,
+        expected_gpu_index: int | None = None,
     ) -> dict:
         if not SAFE_ID.fullmatch(attempt_id) or not SAFE_ID.fullmatch(container_name):
             raise ValueError("attempt and container identifiers must be safe tokens")
@@ -392,7 +536,12 @@ class DiagnosticLauncher:
             raise ValueError("lock digest must be SHA-256")
         if not command or not all(isinstance(arg, str) for arg in command):
             raise ValueError("command must be a non-empty argument vector")
-        if timeout_seconds <= 0 or grace_seconds <= 0:
+        if (
+            not math.isfinite(timeout_seconds)
+            or not math.isfinite(grace_seconds)
+            or timeout_seconds <= 0
+            or grace_seconds <= 0
+        ):
             raise ValueError("timeouts must be positive")
         if Path(harness_report_name).name != harness_report_name:
             raise ValueError("harness report name must be a basename")
@@ -452,7 +601,14 @@ class DiagnosticLauncher:
                 )
                 for arg in command
             ]
-            validate_docker_invocation(actual_command)
+            report["launch"]["cuda_http_limits"] = validate_docker_invocation(
+                actual_command,
+                cuda_http_profile=cuda_http_profile,
+                expected_gpu_index=expected_gpu_index,
+                expected_image_id=image_id,
+                expected_platform=platform,
+                expected_shared_gid=self.shared_gid,
+            )
             if self.shared_gid is not None:
                 report["report_mount_preflight"] = validate_static_report_mount(
                     harness_dir,

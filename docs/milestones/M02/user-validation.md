@@ -47,3 +47,20 @@ At M02-B closeout, NOT ESTABLISHED: cold-cache startup, representative throughpu
 The user authorized one CUDA diagnostic attempt on 2026-10-17. OBSERVED: the approved tiny model completed one transcription with explicit CUDA device 0 and float16. Five segments passed structural timestamp checks; language detection returned `ru`. The production bounded audio decoder was used. The attempt container exited successfully and was removed, and Ollama/Dify health checks were healthy before and after. Full provenance, stage timings and limitations are recorded in [verification](verification.md).
 
 The acceptance applies only to the bounded smoke test. NOT ESTABLISHED: peak VRAM, concurrency, sustained performance, CUDA HTTP worker integration, large-v3-turbo inference, persistent deployment, or shared-service coexistence under active load. No transcript text or private diagnostic reports are stored in Git. Overall M02 remains incomplete.
+
+## M02-C.3 CUDA HTTP integration — PASS for accepted scope
+
+The user accepted M02-C.3 on 2026-10-17 after the third controlled target attempt succeeded. The two prior attempts and their harness defects remain documented above and in [implementation](implementation.md); they were not retried during the successful run.
+
+OBSERVED from the accepted target evidence:
+
+- One production HTTP multipart request succeeded (HTTP 200) using explicit CUDA device 0 and float16 with no CPU fallback.
+- The response detected `ru` and contained five nonempty segments with valid timestamp bounds.
+- Model load took 2.549 s, transcription 0.959 s, and HTTP integration 3.828 s.
+- Shutdown was independently recorded as `completed_and_confirmed`; supervisor child exit and worker-not-ready state were confirmed. Container exit was 0 and the container was removed.
+- Ollama and Dify health remained satisfactory according to the available checks. GPU free memory was sampled at 14,909 MiB before and after; no instrumented peak was captured.
+- Reports are preserved outside Git at `/home/master/speech-platform-staging/M02/M02-C/M02-C.3/attempts/cuda-http-20261017-03/`. No private audio, model artifacts, or transcript content were copied into the repository.
+
+OBSERVED: Attempt `cuda-http-20261017-01` failed in the HTTP integration stage but did not persist status/code. Attempt `cuda-http-20261017-02` recorded HTTP 415 / `unsupported_media_type`; the extensionless mounted path resulted in an `application/octet-stream` part, which the production handler rejected before inference. Neither attempt established CUDA inference through HTTP. Evidence remains in operator-private staging outside Git.
+
+LIMITATIONS / NOT ESTABLISHED: no instrumented peak VRAM, concurrency or sustained-load validation, production latency/throughput claim, persistent deployment, or Ollama/Dify coexistence under active inference load. The acceptance is limited to the approved one-request C.3 scope. No shared service was modified. Overall M02 remains incomplete.

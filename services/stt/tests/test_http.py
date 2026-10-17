@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 import time
 import unittest
@@ -28,7 +29,7 @@ class FakeLifecycle:
 
 
 class FakeApplication:
-    def __init__(self, *, block_until_cancel=False):
+    def __init__(self, *, block_until_cancel=False, max_uploads=2, failure=None):
         self.config = SimpleNamespace(
             admission=SimpleNamespace(
                 max_request_bytes=1024,
@@ -38,8 +39,9 @@ class FakeApplication:
             )
         )
         self.lifecycle = FakeLifecycle()
-        self.uploads = UploadGate(2, 1024, 1024, 1024)
+        self.uploads = UploadGate(max_uploads, 1024, 1024, 1024)
         self.block_until_cancel = block_until_cancel
+        self.failure = failure
         self.started = threading.Event()
         self.cancelled = threading.Event()
 
@@ -62,12 +64,14 @@ class FakeApplication:
         context=None,
     ):
         lease.finish()
+        if self.failure is not None:
+            raise self.failure
         if self.block_until_cancel:
             self.started.set()
             while not context.cancelled():
                 time.sleep(0.005)
             self.cancelled.set()
-            raise SpeechFailure(FailureCode.CANCELLED)
+            raise SpeechFailure(FailureCode.DEADLINE_EXCEEDED)
         return TranscriptionResult(
             "synthetic transcript",
             "en",
@@ -153,6 +157,92 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             asyncio.to_thread(self.application.cancelled.wait, 2), 3
         )
         self.assertTrue(cancelled)
+
+    async def test_invalid_audio_failure_uses_safe_public_error(self):
+        await self.client.close()
+        self.application = FakeApplication(
+            failure=SpeechFailure(
+                FailureCode.DECODE_FAILED,
+                "private /srv/audio/russian.m4a token=secret-value transcript text",
+            )
+        )
+        self.client = TestClient(TestServer(create_http_app(self.application)))
+        await self.client.start_server()
+        response = await self.client.post(
+            "/internal/v1/transcriptions",
+            data=self.form(),
+            headers={"X-Request-Timeout-Ms": "4000"},
+        )
+        body = await response.json()
+        self.assertEqual(response.status, 422)
+        self.assertEqual(body["code"], "decode_failed")
+        self.assertEqual(body["message"], "audio could not be decoded")
+        self.assertNotIn("/srv/audio", json.dumps(body))
+        self.assertNotIn("secret-value", json.dumps(body))
+        self.assertNotIn("transcript text", json.dumps(body))
+
+    async def test_upload_admission_limit_is_enforced_over_http(self):
+        await self.client.close()
+        self.application = FakeApplication(block_until_cancel=True, max_uploads=1)
+        self.client = TestClient(TestServer(create_http_app(self.application)))
+        await self.client.start_server()
+        first = asyncio.create_task(
+            self.client.post(
+                "/internal/v1/transcriptions",
+                data=self.form(timestamps="false"),
+                headers={"X-Request-Timeout-Ms": "500"},
+            )
+        )
+        started = await asyncio.wait_for(
+            asyncio.to_thread(self.application.started.wait, 2), 3
+        )
+        self.assertTrue(started)
+        limited = await self.client.post(
+            "/internal/v1/transcriptions",
+            data=self.form(),
+            headers={"X-Request-Timeout-Ms": "4000"},
+        )
+        self.assertEqual(limited.status, 429)
+        self.assertEqual((await limited.json())["code"], "overloaded")
+        completed = await first
+        self.assertEqual(completed.status, 504)
+        cancelled = await asyncio.wait_for(
+            asyncio.to_thread(self.application.cancelled.wait, 2), 3
+        )
+        self.assertTrue(cancelled)
+
+    async def test_request_deadline_cancels_work_and_returns_gateway_timeout(self):
+        await self.client.close()
+        self.application = FakeApplication(block_until_cancel=True)
+        self.client = TestClient(TestServer(create_http_app(self.application)))
+        await self.client.start_server()
+        request = asyncio.create_task(
+            self.client.post(
+                "/internal/v1/transcriptions",
+                data=self.form(timestamps="false"),
+                headers={"X-Request-Timeout-Ms": "100"},
+            )
+        )
+        started = await asyncio.wait_for(
+            asyncio.to_thread(self.application.started.wait, 2), 3
+        )
+        self.assertTrue(started)
+        response = await request
+        self.assertEqual(response.status, 504)
+        self.assertEqual((await response.json())["code"], "deadline_exceeded")
+        cancelled = await asyncio.wait_for(
+            asyncio.to_thread(self.application.cancelled.wait, 2), 3
+        )
+        self.assertTrue(cancelled)
+
+    async def test_health_and_readiness_are_distinct(self):
+        self.application.lifecycle.is_ready = False
+        health = await self.client.get("/healthz")
+        ready = await self.client.get("/readyz")
+        self.assertEqual(health.status, 200)
+        self.assertEqual(ready.status, 503)
+        self.application.lifecycle.is_ready = True
+        self.assertEqual((await self.client.get("/readyz")).status, 200)
 
 
 if __name__ == "__main__":

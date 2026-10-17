@@ -93,7 +93,10 @@ class LauncherTests(unittest.TestCase):
             ],
             image_id=IMAGE,
             container_name="attempt-001",
+            platform="linux/amd64",
             lock_sha256="b" * 64,
+            timeout_seconds=180,
+            grace_seconds=5,
         )
 
     def test_success_missing_and_present_harness_report(self):
@@ -112,6 +115,9 @@ class LauncherTests(unittest.TestCase):
             ],
             image_id=IMAGE,
             container_name="attempt-002",
+            platform="linux/amd64",
+            timeout_seconds=180,
+            grace_seconds=5,
         )
         self.assertEqual(report["outcome"], "completed")
         self.assertTrue(
@@ -174,6 +180,9 @@ class LauncherTests(unittest.TestCase):
                     ],
                     image_id=IMAGE,
                     container_name="attempt",
+                    platform="linux/amd64",
+                    timeout_seconds=180,
+                    grace_seconds=5,
                 )
                 self.assertEqual(report["failure_layer"], expected)
 
@@ -231,9 +240,25 @@ class LauncherTests(unittest.TestCase):
     def test_retention_limit_refuses_unbounded_attempt_creation(self):
         launcher = DiagnosticLauncher(self.root, FakeRunner(), max_attempts=1)
         command = ["docker", "run", "--network", "none", "--user", "65532:65532"]
-        launcher.run("first", command, image_id=IMAGE, container_name="first")
+        launcher.run(
+            "first",
+            command,
+            image_id=IMAGE,
+            container_name="first",
+            platform="linux/amd64",
+            timeout_seconds=180,
+            grace_seconds=5,
+        )
         with self.assertRaisesRegex(RuntimeError, "retention limit"):
-            launcher.run("second", command, image_id=IMAGE, container_name="second")
+            launcher.run(
+                "second",
+                command,
+                image_id=IMAGE,
+                container_name="second",
+                platform="linux/amd64",
+                timeout_seconds=180,
+                grace_seconds=5,
+            )
 
     def test_shared_group_is_limited_to_harness_mount_subdirectory(self):
         runner = FakeRunner()
@@ -243,6 +268,9 @@ class LauncherTests(unittest.TestCase):
             ["docker", "run", "--network", "none", "--user", "65532:65532"],
             image_id=IMAGE,
             container_name="group-attempt",
+            platform="linux/amd64",
+            timeout_seconds=180,
+            grace_seconds=5,
         )
         attempt = self.root / "group-attempt"
         self.assertEqual(stat.S_IMODE(attempt.stat().st_mode), 0o700)
@@ -271,6 +299,9 @@ class LauncherTests(unittest.TestCase):
             ],
             image_id=IMAGE,
             container_name="static-failure",
+            platform="linux/amd64",
+            timeout_seconds=180,
+            grace_seconds=5,
         )
         self.assertEqual(report["outcome"], "preflight_failed")
         self.assertEqual(
@@ -307,6 +338,9 @@ class LauncherTests(unittest.TestCase):
                         base + extra,
                         image_id=IMAGE,
                         container_name="attempt",
+                        platform="linux/amd64",
+                        timeout_seconds=180,
+                        grace_seconds=5,
                     )
 
     def test_readonly_parent_bind_requires_existing_nested_target(self):
@@ -333,6 +367,114 @@ class LauncherTests(unittest.TestCase):
 
         (source / "smoke-audio").touch()
         validate_docker_invocation(command)
+
+    def test_cuda_http_invocation_requires_explicit_configured_limits(self):
+        from scripts.stt_cuda_launcher import validate_docker_invocation
+
+        sources = Path(self.tmp.name)
+        for name in ("input", "models", "configs", "scripts", "services", "results"):
+            (sources / name).mkdir(exist_ok=True)
+        image = IMAGE
+        command = [
+            "docker",
+            "run",
+            "--network",
+            "none",
+            "--platform",
+            "linux/amd64",
+            "--pull",
+            "never",
+            "--read-only",
+            "--user",
+            "65532:65532",
+            "--group-add",
+            "1000",
+            "--entrypoint",
+            "python",
+            "--gpus",
+            "device=0",
+            "--memory",
+            str(8 * 1024**3),
+            "--cpus",
+            "4",
+            "--pids-limit",
+            "128",
+        ]
+        for name, destination in (
+            ("input", "/input"),
+            ("models", "/models"),
+            ("configs", "/opt/validation/configs"),
+            ("scripts", "/opt/validation/scripts"),
+            ("services", "/opt/validation/services"),
+        ):
+            command.extend(
+                [
+                    "--mount",
+                    f"type=bind,src={sources / name},dst={destination},readonly",
+                ]
+            )
+        command.extend(
+            [
+                "--mount",
+                f"type=bind,src={sources / 'results'},dst=/results",
+                image,
+                "scripts/stt_cuda_http_smoke.py",
+            ]
+        )
+        profile = validate_docker_invocation(
+            command,
+            cuda_http_profile=True,
+            expected_gpu_index=0,
+            expected_image_id=image,
+            expected_platform="linux/amd64",
+            expected_shared_gid=1000,
+        )
+        self.assertEqual(profile["gpu_device_index"], 0)
+        self.assertEqual(profile["memory_limit_bytes"], 8 * 1024**3)
+        self.assertEqual(profile["cpu_limit"], 4)
+        self.assertEqual(profile["pids_limit"], 128)
+
+    def test_cuda_http_invocation_rejects_gpu_override_and_missing_resource_limit(self):
+        from scripts.stt_cuda_launcher import validate_docker_invocation
+
+        # The complete valid argument vector is built by the preceding test; these
+        # focused cases prove an operator override cannot silently change GPU policy.
+        command = [
+            "docker",
+            "run",
+            "--network=none",
+            "--platform=linux/amd64",
+            "--pull=never",
+            "--read-only",
+            "--user=65532:65532",
+            "--group-add=1000",
+            "--entrypoint=python",
+            "--gpus=device=1",
+            f"--memory={8 * 1024**3}",
+            "--cpus=4",
+            "--pids-limit=128",
+            IMAGE,
+        ]
+        with self.assertRaisesRegex(ValueError, "GPU selection"):
+            validate_docker_invocation(
+                command,
+                cuda_http_profile=True,
+                expected_gpu_index=0,
+                expected_image_id=IMAGE,
+                expected_platform="linux/amd64",
+                expected_shared_gid=1000,
+            )
+        command[command.index("--gpus=device=1")] = "--gpus=device=0"
+        command.remove(f"--memory={8 * 1024**3}")
+        with self.assertRaisesRegex(ValueError, "memory limit"):
+            validate_docker_invocation(
+                command,
+                cuda_http_profile=True,
+                expected_gpu_index=0,
+                expected_image_id=IMAGE,
+                expected_platform="linux/amd64",
+                expected_shared_gid=1000,
+            )
 
     def test_real_runner_without_docker_captures_only_sanitized_bounded_output(self):
         out = Path(self.tmp.name) / "out.json"

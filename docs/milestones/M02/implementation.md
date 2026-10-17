@@ -104,3 +104,44 @@ NOT ESTABLISHED:
 
 - True peak VRAM or GPU utilization, concurrency, sustained performance, production HTTP worker integration on CUDA, cancellation during CUDA inference, large-v3-turbo behavior, capacity, persistent deployment, and coexistence during active Ollama/Dify workload.
 - Transcription quality beyond detected language and structural segment/timestamp validation.
+
+## M02-C.3 HTTP CUDA integration harness — pre-acceptance implementation record
+
+OBSERVED:
+
+- Added `scripts/stt_cuda_http_smoke.py`. It uses the production aiohttp application through `TestServer`/`TestClient`, and the existing deferred application, admission controller, supervisor and faster-whisper runtime. It sends one multipart inference request to the private route, checks health/readiness, validates language and segment/timestamp metadata, and confirms the child is stopped and worker is unready after close.
+- The harness reuses strict application/deployment configuration, worker configuration, installed CUDA lock verification, model manifest verification, shared approved-audio checksum verification, and the existing atomic privacy-filtered diagnostic report runner. Its persisted result omits transcript and segment text.
+- Extended the maintained CUDA host launcher for the HTTP profile. It verifies the local immutable image/platform, explicit configured GPU index, CUDA float16 profile, configured free-VRAM gate, audio digest, dependency-lock digest, no runtime image pull, read-only root and input mounts, no external network or published ports, non-root execution, and explicit CPU/RAM/PID limits. Experiment timeouts are required arguments without launch defaults.
+- Added `make stt-cuda-http-integration`, an operator-configured one-attempt command. Application, deployment, worker, artifact, and audio settings have separate sources. The Docker GPU selector is derived from and checked against deployment configuration; the worker validates the same configuration in-container.
+- Added deterministic HTTP tests for invalid audio errors, overload at upload capacity, deadline cancellation, health/readiness behavior, and fixed safe error responses. Added profile override and Docker argument rejection tests, plus configured free-VRAM gate boundary tests.
+- The first two authorized C.3 target attempts did not pass. Attempt `cuda-http-20261017-01` preserved the non-200 branch but lacked status/error metadata. Attempt `cuda-http-20261017-02` recorded HTTP 415 / `unsupported_media_type`: the extensionless `/input/smoke-audio` path caused the harness to send `application/octet-stream`. The handler rejected it before admission dispatch, decoding or inference. This was a harness defect; no production STT defect was established.
+- Corrected the harness to require explicit `STT_CUDA_AUDIO_MEDIA_TYPE`, validate it against supported formats, and produce a matching multipart filename for extensionless mounts. Added a separate bounded `shutdown-report.json` with confirmed, unconfirmed, and failed/timed-out outcomes. The shutdown evidence checks the application supervisor state; Docker container removal is not treated as child cleanup evidence.
+- `docs/operations/stt-cuda-http-integration.md` records configuration precedence, the proposed 4 CPU / 8 GiB / 128 PID / 180 second experiment envelope, its evidentiary limits, invocation, preflight and cleanup. No application inference semantics, TTS, Compose services or running services were changed.
+
+INTERPRETATION:
+
+- A successful future run will exercise the production route, app/admission path, child supervisor, bounded decoder and selected CUDA backend using an in-container loopback server. It will not validate host-published HTTP service behavior, the production Compose image, capacity or persistent deployment.
+- The CPU/RAM/PID values reuse the C.2b bounded test envelope. C.2b did not measure RSS or true peak VRAM; 8 GiB is a container ceiling, not a measured memory requirement or guarantee. The 12,288 MiB VRAM gate is read from strict deployment configuration and remains advisory, not a reservation.
+
+NOT ESTABLISHED:
+
+- Local C.3 implementation and correction verification used no Docker container, model load, CUDA initialization or inference. The two separately authorized HTTP attempts reached the target container but neither performed transcription. Actual CUDA HTTP inference, real-audio response success, child shutdown confirmation for those attempts, resource use and Ollama/Dify coexistence under successful inference remain unverified. C.3 is not PASS; overall M02 remains incomplete.
+
+At the time of this implementation entry, the correction was locally verified but had not yet been staged or run. The subsequent accepted target attempt is recorded below.
+
+## M02-C.3 accepted target run — PASS for bounded scope
+
+OBSERVED on 2026-10-17 during the third user-authorized attempt:
+
+- Updated target staging with only the changed `Makefile` and HTTP smoke harness. All 26 staged runtime/source/config files matched the current workstation source by SHA-256; target Git checkout was not modified.
+- The extensionless audio mount was submitted with explicit `Content-Type: audio/mp4` and generated multipart filename `smoke-audio.m4a`. The production HTTP integration stage passed; its non-200 branch fails the stage, establishing HTTP 200.
+- The strict config and artifact checks passed. The harness reported explicit CUDA device 0, float16 and `cpu_fallback: false`; the pinned model manifest and audio checksum matched approved metadata.
+- Output validation passed: detected language `ru`, five nonempty segments and valid timestamp bounds. No transcript text or audio content was included in the reports.
+- Timings: model load 2.548835 s, transcription 0.958716 s, HTTP integration 3.827919 s.
+- The independent shutdown report recorded `completed_and_confirmed`, with `child_exit_confirmed: true`, `worker_not_ready: true` and completed TestClient close. Docker exited 0 and the attempt container was absent after cleanup.
+- GPU 0 had 14,909 MiB free before and after, with no compute process and 0% sampled utilization. Ollama HTTP health passed before and after. Dify API/database/Redis/sandbox health checks passed; web/proxy containers remained running and the proxy returned HTTP 307.
+- Sanitized evidence remains outside Git at `/home/master/speech-platform-staging/M02/M02-C/M02-C.3/attempts/cuda-http-20261017-03/`, including `launcher-report.json`, `harness/harness-report.json`, `harness/shutdown-report.json`, and bounded stdout/stderr classifications.
+
+INTERPRETATION: this demonstrates one accepted end-to-end multipart HTTP transcription through the production application and CUDA adapter in an isolated ephemeral container. It does not establish general service performance or production deployment behavior.
+
+NOT ESTABLISHED: instrumented peak VRAM, concurrency, sustained load, production latency/throughput, persistent deployment, or Ollama/Dify coexistence under active inference load. C.3 PASS is limited to the accepted one-request test. Overall M02 remains incomplete.

@@ -92,3 +92,56 @@ OBSERVED on 2026-10-17 during the one user-authorized diagnostic attempt:
 INTERPRETATION: the approved faster-whisper/CTranslate2 CUDA path completed one tiny-model transcription with the production bounded audio decoder on the inspected host. The diagnostic used the same decoder path as the production adapter, avoiding faster-whisper 1.2.1's path-based PyAV call that passes the removed `metadata_errors` argument in PyAV 19.0.1. The production adapter was not changed by that diagnostic correction.
 
 NOT ESTABLISHED: true peak VRAM/GPU utilization, concurrent or sustained performance, CUDA execution through the HTTP worker, CUDA cancellation behavior, large-v3-turbo behavior, capacity, persistent deployment and coexistence while Ollama/Dify are under active load. Structural segment validation and language detection do not establish transcription quality. User accepted the bounded C.2b smoke scope as PASS on 2026-10-17; overall M02 remains incomplete.
+
+## M02-C.3 pre-run local implementation verification (historical)
+
+OBSERVED in the local repository workspace:
+
+- `.venv/bin/python -m unittest services.stt.tests.test_http scripts.test_stt_cuda_http_smoke scripts.test_stt_cuda_launcher scripts.test_stt_cuda_preflight -v` — PASS; 41 focused tests passed. Coverage includes fake HTTP decode errors with private diagnostics, admission capacity, request deadline cancellation, health/readiness separation, CUDA config/model/lock identity and override rejection, free-memory boundary parsing, Docker GPU/image/platform/resource/mount policy, and evidence-safe responses.
+- Ruff formatting/checks for changed Python modules — PASS.
+- No GPU, Docker container, model load, audio decode or inference was run. The canonical full verification result for this implementation is recorded after execution below.
+
+INTERPRETATION: the focused suite validates local policy and test behavior with fakes. It does not establish that the target image starts the new harness, that the private model/audio mounts are correct on the target host, or that the worker performs CUDA inference over HTTP.
+
+NOT ESTABLISHED: target-host image inspection, free VRAM at launch, CUDA HTTP inference, measured C.3 CPU/RAM/PID use, peak VRAM/RSS, application shutdown on the host, service coexistence during the request, or persistent deployment. M02-C.3 is not PASS.
+
+OBSERVED in the local repository workspace after implementation:
+
+- `make governance-check PYTHON=.venv/bin/python` — PASS; governance structure validation and 2 tests passed.
+- `make verify PYTHON=.venv/bin/python` — PASS; Go vet, race-enabled Go tests/build, Ruff checks, configuration checks, rendered Compose/static topology checks, 80 repository Python tests, 56 STT tests, governance validation, lock policy and Python AST parsing passed.
+- `git diff --check` — PASS.
+- `make -n stt-cuda-http-integration` with synthetic operator variables — PASS as a dry-run inspection. It only printed the launch recipe; it did not run Docker or contact a GPU.
+
+INTERPRETATION: the canonical suite verifies the command validation, fake HTTP flow, config identity checks and static Compose configuration. Compose `config` rendering does not start services. No launch recipe was executed.
+
+## M02-C.3 HTTP smoke harness correction — pre-run offline verification (historical)
+
+OBSERVED in the local repository workspace:
+
+- `STT_CUDA_AUDIO_MEDIA_TYPE` is passed explicitly from the experiment command configuration. The harness allowlists supported values, checks any filename suffix against the declared format, and adds the canonical suffix to an extensionless multipart filename. The M4A request therefore uses filename `.m4a` and `Content-Type: audio/mp4`, independent of the mounted path suffix. Artifact validation rejects unsupported or mismatched declarations before starting the test worker.
+- The smoke harness writes a separate atomic `shutdown-report.json` from its `finally` path for successful and non-200 HTTP outcomes. It reports `completed_and_confirmed`, `attempted_but_unconfirmed`, or `failed_or_timed_out`, using existing TestClient, worker lifecycle and supervisor child state. Container removal is not used as child-exit evidence.
+- `.venv/bin/python -m unittest scripts.test_stt_cuda_http_smoke -v` — PASS; 14 tests passed, including extensionless multipart metadata, unsupported/mismatched media types, successful and non-200 request shutdown evidence, unconfirmed cleanup and close failure/deadline classifications.
+- `make governance-check PYTHON=.venv/bin/python` — PASS; governance validation and 2 tests passed.
+- `make verify PYTHON=.venv/bin/python` — PASS; Go vet/race tests/build, Ruff, configuration validation, Compose static checks, 86 script tests, 56 STT tests, governance and lock checks passed.
+- `git diff --check` — PASS.
+- No Docker, target-host access, CUDA initialization, model loading, audio decoding or inference was performed for this correction.
+
+INTERPRETATION: offline tests establish the generated multipart metadata and safe shutdown-report behavior with deterministic fakes. They do not validate that the corrected harness has been staged on the target or that CUDA HTTP transcription succeeds there.
+
+NOT ESTABLISHED at that point: the corrected multipart request on the target, real HTTP CUDA inference, target-side child cleanup, GPU/resource behavior and Ollama/Dify coexistence during a successful request. The later accepted target run is recorded below.
+
+## M02-C.3 accepted target integration — OBSERVED 2026-10-17
+
+- Target: operator-designated host reached as `wisper`; the target Git checkout was not used or modified. Two changed staged files (`Makefile`, `scripts/stt_cuda_http_smoke.py`) were synchronized. SHA-256 comparison confirmed all 26 staged runtime/source/config files matched current workstation source. Private app/deployment config and approved artifact metadata were validated against the accepted identities without copying them into Git.
+- Provenance: immutable image `sha256:b25af1309e1e51e8ce72c227028727cb26014fef512b716fbd11cf8f9fb16540` (`linux/amd64`); CUDA lock SHA-256 `68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14`; model revision `d90ca5fe260221311c53c58e660288d3deb8d356`; model manifest SHA-256 `1c955577f5ecc29540ddece161769cc69bae4e86fd8059f0862cff765b447e44`. Model artifact verification and approved audio digest validation passed. The request used an extensionless mount with generated multipart filename `smoke-audio.m4a` and configured media type `audio/mp4`.
+- Preflight: Quadro RTX 5000, device 0, 14,909 MiB free of 15,360 MiB, 0% reported utilization and no compute process. The configured gate was 12,288 MiB. The command used 4 CPUs, 8 GiB memory, 128 PIDs, 180 seconds, network disabled, no published ports, non-root UID/GID 65532:65532 plus GID 1000, read-only code/config/artifact mounts, and the dedicated writable report mount.
+- Harness outcome: all stages passed (report mount, dependency check, configuration parse, CUDA profile, artifact validation, HTTP integration, output validation and shutdown validation). The integration stage passed; per harness control flow, any response other than HTTP 200 fails that stage. The response schema and timestamp checks passed; language was `ru`, with five segments and valid timestamp bounds. The safe report recorded device `cuda`, compute type `float16`, and `cpu_fallback: false`. Dependency inventory matched the approved lock, including faster-whisper 1.2.1, CTranslate2 4.8.3, PyAV 19.0.1, cuBLAS 12.9.2.10, cuDNN 9.27.0.42 and NVRTC 12.9.86.
+- Timings: model load 2.548835 s; transcription 0.958716 s; HTTP integration 3.827919 s.
+- Shutdown: separate `shutdown-report.json` recorded `completed_and_confirmed`, `close_completed: true`, `child_exit_confirmed: true`, and `worker_not_ready: true`. Launcher process exit was 0 and confirmed; the created container was absent after cleanup.
+- Shared services: Ollama HTTP health passed before and after. Dify API, database, Redis and sandbox health checks passed; web and proxy containers remained running, and the proxy returned HTTP 307 before and after. No shared service was modified.
+- GPU postflight: 14,909 MiB free and 0% utilization sampled after cleanup, with no compute process. The equal before/after samples do not establish peak VRAM.
+- Sanitized evidence is preserved outside Git at `/home/master/speech-platform-staging/M02/M02-C/M02-C.3/attempts/cuda-http-20261017-03/`: `launcher-report.json`, `harness/harness-report.json`, `harness/shutdown-report.json`, `stdout.json`, `stderr.json`, and `container.id`. Reports contain no audio or transcript fields. No private media, model weights, or diagnostic reports were copied into the repository.
+
+INTERPRETATION: this is user-accepted evidence for one isolated CUDA transcription through the production aiohttp application and adapter. It does not establish general performance, capacity, persistent deployment, or active-load coexistence.
+
+NOT ESTABLISHED: instrumented peak VRAM, concurrency, sustained-load behavior, production latency/throughput, persistent deployment, and coexistence under active Ollama/Dify inference load. Overall M02 remains incomplete.

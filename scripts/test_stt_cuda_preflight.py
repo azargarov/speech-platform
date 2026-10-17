@@ -9,7 +9,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.stt_cuda_preflight import verify_approved_audio
+from scripts.stt_cuda_preflight import (
+    parse_free_gpu_memory_mib,
+    validate_free_gpu_memory,
+    verify_approved_audio,
+)
 
 
 class AudioPreflightTests(unittest.TestCase):
@@ -77,6 +81,12 @@ class AudioPreflightTests(unittest.TestCase):
             str(self.audio),
             "--audio-checksum-file",
             str(self.checksum),
+            "--platform",
+            "linux/amd64",
+            "--timeout-seconds",
+            "180",
+            "--grace-seconds",
+            "5",
             "--",
             "docker",
             "run",
@@ -96,6 +106,18 @@ class AudioPreflightTests(unittest.TestCase):
         diagnostic_launcher.assert_not_called()
         self.assertIn("audio failed approved checksum preflight", output.getvalue())
         self.assertFalse((self.root / "attempts").exists())
+
+    def test_gpu_memory_gate_uses_configured_threshold_at_boundary(self):
+        gate = 12 * 1024**3
+        validate_free_gpu_memory(12 * 1024, gate)
+        with self.assertRaisesRegex(ValueError, "below"):
+            validate_free_gpu_memory(12 * 1024 - 1, gate)
+
+    def test_gpu_memory_probe_rejects_unparseable_output(self):
+        self.assertEqual(parse_free_gpu_memory_mib("12288\n"), 12288)
+        for output in ("", "12288 MiB", "12,288", "unknown"):
+            with self.subTest(output=output), self.assertRaises(ValueError):
+                parse_free_gpu_memory_mib(output)
 
 
 if __name__ == "__main__":

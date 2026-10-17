@@ -1,6 +1,6 @@
 PYTHON ?= python3
 COMPOSE = docker compose -f deployments/compose/compose.yaml
-.PHONY: verify fmt lint config test build compose-check bootstrap governance-check stt-lock-check stt-cpu-integration
+.PHONY: verify fmt lint config test build compose-check bootstrap governance-check stt-lock-check stt-cpu-integration stt-cuda-http-integration
 bootstrap:
 	$(PYTHON) -m pip install -r requirements-dev.txt
 	$(PYTHON) -m pip install --require-hashes -r services/requirements-stt-cpu.lock
@@ -37,4 +37,52 @@ stt-lock-check:
 stt-cpu-integration:
 	@test -n "$(STT_APPLICATION_CONFIG)" -a -n "$(STT_DEPLOYMENT_CONFIG)" -a -n "$(STT_SMOKE_AUDIO)" || (echo "set STT_APPLICATION_CONFIG, STT_DEPLOYMENT_CONFIG and STT_SMOKE_AUDIO to local provisioned files" >&2; exit 2)
 	PYTHONPATH=. $(PYTHON) scripts/stt_cpu_smoke.py
+stt-cuda-http-integration:
+	@test -n "$(STT_CUDA_INPUT_DIR)" -a -n "$(STT_SMOKE_AUDIO)" -a -n "$(STT_CUDA_AUDIO_MEDIA_TYPE)" -a -n "$(STT_AUDIO_CHECKSUM_FILE)" -a -n "$(STT_MODEL_HOST_ROOT)" -a -n "$(STT_CUDA_ATTEMPT_ROOT)" -a -n "$(STT_CUDA_ATTEMPT_ID)" -a -n "$(STT_CUDA_IMAGE_ID)" -a -n "$(STT_CUDA_LOCK_SHA256)" -a -n "$(STT_CUDA_MODEL_REVISION)" -a -n "$(STT_CUDA_MODEL_MANIFEST_SHA256)" -a -n "$(STT_CUDA_SHARED_GID)" -a -n "$(STT_CUDA_PLATFORM)" -a -n "$(STT_CUDA_HTTP_CPU_LIMIT)" -a -n "$(STT_CUDA_HTTP_MEMORY_BYTES)" -a -n "$(STT_CUDA_HTTP_PIDS_LIMIT)" -a -n "$(STT_CUDA_HTTP_DEADLINE_SECONDS)" -a -n "$(STT_CUDA_HTTP_GRACE_SECONDS)" || (echo "provide the C.3 experiment inputs, image, approved artifact identities, attempt settings and resource limits; see docs/operations/stt-cuda-http-integration.md" >&2; exit 2)
+	@test -f "$(STT_CUDA_INPUT_DIR)/stt-application.yaml" -a -f "$(STT_CUDA_INPUT_DIR)/stt-deployment.yaml" -a -e "$(STT_CUDA_INPUT_DIR)/smoke-audio" -a -e "$(STT_CUDA_INPUT_DIR)/smoke-audio.sha256" -a -d "$(STT_MODEL_HOST_ROOT)" || (echo "C.3 inputs, nested audio mount placeholders and model root must be present" >&2; exit 2)
+	@set -eu; \
+	device_index=$$(PYTHONPATH=. $(PYTHON) -c 'import sys; from services.stt.config import load_deployment_config; print(load_deployment_config(sys.argv[1]).cuda_device_index)' "$(STT_CUDA_INPUT_DIR)/stt-deployment.yaml"); \
+	PYTHONPATH=. $(PYTHON) scripts/launch_stt_cuda_diagnostic.py \
+	  --cuda-http-profile \
+	  --attempt-root "$(STT_CUDA_ATTEMPT_ROOT)" \
+	  --shared-gid "$(STT_CUDA_SHARED_GID)" \
+	  --attempt-id "$(STT_CUDA_ATTEMPT_ID)" \
+	  --container-name "$(STT_CUDA_ATTEMPT_ID)" \
+	  --image-id "$(STT_CUDA_IMAGE_ID)" \
+	  --platform "$(STT_CUDA_PLATFORM)" \
+	  --application-config "$(STT_CUDA_INPUT_DIR)/stt-application.yaml" \
+	  --deployment-config "$(STT_CUDA_INPUT_DIR)/stt-deployment.yaml" \
+	  --lock-file "$(CURDIR)/services/requirements-stt-cuda.lock" \
+	  --lock-sha256 "$(STT_CUDA_LOCK_SHA256)" \
+	  --model-revision "$(STT_CUDA_MODEL_REVISION)" \
+	  --model-manifest-sha256 "$(STT_CUDA_MODEL_MANIFEST_SHA256)" \
+	  --audio-file "$(STT_SMOKE_AUDIO)" \
+	  --audio-checksum-file "$(STT_AUDIO_CHECKSUM_FILE)" \
+	  --timeout-seconds "$(STT_CUDA_HTTP_DEADLINE_SECONDS)" \
+	  --grace-seconds "$(STT_CUDA_HTTP_GRACE_SECONDS)" \
+	  -- docker run --rm --network none --platform "$(STT_CUDA_PLATFORM)" --pull never --read-only \
+	    --name "$(STT_CUDA_ATTEMPT_ID)" --cidfile '{attempt_dir}/container.id' \
+	    --user 65532:65532 --group-add "$(STT_CUDA_SHARED_GID)" --entrypoint python \
+	    --gpus "device=$$device_index" --memory "$(STT_CUDA_HTTP_MEMORY_BYTES)" --cpus "$(STT_CUDA_HTTP_CPU_LIMIT)" --pids-limit "$(STT_CUDA_HTTP_PIDS_LIMIT)" \
+	    --mount "type=bind,src={harness_dir},dst=/results" \
+	    --mount "type=bind,src=$(STT_CUDA_INPUT_DIR),dst=/input,readonly" \
+	    --mount "type=bind,src=$(STT_SMOKE_AUDIO),dst=/input/smoke-audio,readonly" \
+	    --mount "type=bind,src=$(STT_AUDIO_CHECKSUM_FILE),dst=/input/smoke-audio.sha256,readonly" \
+	    --mount "type=bind,src=$(STT_MODEL_HOST_ROOT),dst=/models,readonly" \
+	    --mount "type=bind,src=$(CURDIR)/scripts,dst=/opt/validation/scripts,readonly" \
+	    --mount "type=bind,src=$(CURDIR)/services,dst=/opt/validation/services,readonly" \
+	    --mount "type=bind,src=$(CURDIR)/configs,dst=/opt/validation/configs,readonly" \
+	    --workdir /opt/validation --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 --env PYTHONPATH=/opt/validation \
+	    "$(STT_CUDA_IMAGE_ID)" scripts/stt_cuda_http_smoke.py \
+	      --application-config /input/stt-application.yaml \
+	      --deployment-config /input/stt-deployment.yaml \
+	      --worker-config /opt/validation/configs/stt.yaml \
+	      --audio /input/smoke-audio \
+	      --audio-media-type "$(STT_CUDA_AUDIO_MEDIA_TYPE)" \
+	      --audio-checksum-file /input/smoke-audio.sha256 \
+	      --lock /opt/validation/services/requirements-stt-cuda.lock \
+	      --approved-lock-sha256 "$(STT_CUDA_LOCK_SHA256)" \
+	      --model-revision "$(STT_CUDA_MODEL_REVISION)" \
+	      --model-manifest-sha256 "$(STT_CUDA_MODEL_MANIFEST_SHA256)" \
+	      --report /results/harness-report.json
 verify: lint config compose-check test build governance-check stt-lock-check

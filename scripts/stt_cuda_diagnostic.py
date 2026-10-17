@@ -146,6 +146,34 @@ def _exception_record(exc: BaseException) -> dict:
     code = getattr(exc, "diagnostic_code", None)
     if code in SAFE_DIAGNOSTIC_CODES:
         record["diagnostic_code"] = code
+    http_metadata = getattr(exc, "safe_http_metadata", None)
+    if (
+        type(exc).__name__ == "HTTPIntegrationFailure"
+        and type(exc).__module__ in {"__main__", "scripts.stt_cuda_http_smoke"}
+        and isinstance(http_metadata, dict)
+    ):
+        status = http_metadata.get("http_status")
+        request_stage = http_metadata.get("request_stage")
+        failure_category = http_metadata.get("failure_category")
+        public_error_code = http_metadata.get("public_error_code")
+        if (
+            type(status) is int
+            and 100 <= status <= 599
+            and request_stage == "transcription_response"
+            and failure_category
+            in {
+                "application_error_response",
+                "malformed_error_response",
+                "unrecognized_error_code",
+            }
+        ):
+            record["http_status"] = status
+            record["request_stage"] = request_stage
+            record["failure_category"] = failure_category
+            if isinstance(public_error_code, str) and re.fullmatch(
+                r"[a-z][a-z0-9_]{0,63}", public_error_code
+            ):
+                record["public_error_code"] = public_error_code
     causes = []
     cause = exc.__cause__ or exc.__context__
     while cause is not None and len(causes) < 3:
@@ -276,6 +304,14 @@ def _safe_result(value: dict) -> dict:
         "cuda_device_index",
         "minimum_free_gpu_bytes_before_load",
         "mode",
+        "compute_type",
+        "health_status",
+        "initial_ready_status",
+        "ready_status",
+        "model_load_seconds",
+        "transcription_seconds",
+        "child_alive",
+        "ready",
     }
     result = {}
     for key in allowed:
@@ -317,7 +353,13 @@ def _safe_result(value: dict) -> dict:
             result[key] = item
         elif key == "application_device_mode" and item in {"cpu", "cuda", "auto"}:
             result[key] = item
-        elif key == "mode" and item in {"startup_only", "cuda_diagnostic"}:
+        elif key == "mode" and item in {
+            "startup_only",
+            "cuda_diagnostic",
+            "cuda_http",
+        }:
+            result[key] = item
+        elif key == "request_status" and type(item) is int and 100 <= item <= 599:
             result[key] = item
         elif key in {"cuda_device_index", "minimum_free_gpu_bytes_before_load"} and (
             type(item) is int and item >= 0
@@ -332,6 +374,16 @@ def _safe_result(value: dict) -> dict:
         elif key in {"segment_count", "timestamp_bounds_valid"} and isinstance(
             item, (int, bool)
         ):
+            result[key] = item
+        elif key in {"health_status", "initial_ready_status", "ready_status"} and (
+            type(item) is int and 100 <= item <= 599
+        ):
+            result[key] = item
+        elif key in {"model_load_seconds", "transcription_seconds"} and (
+            type(item) in (int, float) and 0 <= item < float("inf")
+        ):
+            result[key] = round(float(item), 6)
+        elif key in {"child_alive", "ready"} and type(item) is bool:
             result[key] = item
     return result
 
