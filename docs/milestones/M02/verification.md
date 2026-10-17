@@ -63,3 +63,32 @@ INTERPRETATION: local offline CPU operation through the actual private HTTP tran
 NOT ESTABLISHED: broader transcription quality, cold-cache startup, representative CPU capacity, worker-only RSS, sustained load, CUDA execution, GPU passthrough, driver compatibility, GPU memory behavior, remote deployment reachability, coexistence under active Ollama/Dify load, and real HTTP client-disconnect behavior during inference. External network was used only to retrieve pinned public model files/metadata; inference passed with offline flags. No audio was uploaded, and runtime model loading uses the local artifact.
 
 See [implementation](implementation.md) and [user validation](user-validation.md).
+
+## M02-C.2a CUDA dependency-policy checks
+
+OBSERVED in the local repository workspace:
+
+- The CUDA dependency input now explicitly pins CTranslate2 4.8.3. The regenerated lock retains the resolved runtime versions and package artifact hashes for faster-whisper 1.2.1, CTranslate2 4.8.3, cuBLAS 12.9.2.10, cuDNN 9.27.0.42 and CUDA NVRTC 12.9.86; see the tracked lock diff for the CTranslate2 dependency annotation change.
+- The lock checker enforces the approved CTranslate2/cuBLAS/cuDNN versions and rejects `nvidia-cuda-runtime-cu12`. The CPU dependency input and lock are unchanged.
+- No maintained CUDA runtime probe exists in the repository. The earlier direct `libcudart.so.12` check belonged to a temporary probe and was not retained.
+- Upstream policy references: [CTranslate2 4.8.3 changelog](https://github.com/OpenNMT/CTranslate2/blob/v4.8.3/CHANGELOG.md) records cuDNN 9 support beginning in 4.5.0 and removal of cuDNN 8 support; [faster-whisper 1.2.1 requirements](https://github.com/SYSTRAN/faster-whisper/blob/v1.2.1/README.md) specifies CUDA 12/cuDNN 9 for the current CTranslate2 stack. The conflicting cuDNN 8 note in [CTranslate2 4.8.3 CONTRIBUTING.md](https://github.com/OpenNMT/CTranslate2/blob/v4.8.3/CONTRIBUTING.md#cuda-support-in-python-wheels) is treated as stale. The wheel note's static CUDA Runtime linkage means separate `libcudart.so.12` discovery is not a valid dependency gate.
+
+INTERPRETATION: the static dependency policy is internally pinned and matches the selected upstream compatibility guidance. The policy check does not establish that a loaded model can execute on the target GPU.
+
+NOT ESTABLISHED: no image was built, container run, model loaded or inference executed for this closeout. CUDA STT inference, GPU memory use, deployment, GPU passthrough in the production image, and coexistence under active Ollama/Dify load remain unverified. No M02-C phase status is advanced by these static checks.
+
+## M02-C.2b bounded CUDA smoke evidence
+
+OBSERVED on 2026-10-17 during the one user-authorized diagnostic attempt:
+
+- Image: approved `sha256:b25af1309e1e51e8ce72c227028727cb26014fef512b716fbd11cf8f9fb16540`, linux/amd64. CUDA lock SHA-256: `68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14`. Runtime versions: faster-whisper 1.2.1, CTranslate2 4.8.3, PyAV 19.0.1, cuBLAS 12.9.2.10, cuDNN 9.27.0.42, NVRTC 12.9.86.
+- Model: `Systran/faster-whisper-tiny`, upstream revision `d90ca5fe260221311c53c58e660288d3deb8d356`; manifest digest `1c955577f5ecc29540ddece161769cc69bae4e86fd8059f0862cff765b447e44`. Audio integrity was checked against the approved private checksum metadata; the digest is intentionally not repeated in tracked milestone records.
+- Explicit CUDA device 0 and float16 were selected. The bounded production decoder completed, model load succeeded, the one transcription call returned, lazy segment iteration completed, and output validation passed: language `ru`, five segments and valid timestamp bounds. No transcript text was retained.
+- Stage durations: model load 1.206437 s; `transcribe_call` 0.693926 s including audio decoding; segment iteration 0.248505 s; output validation 0.000465 s. This was one measurement on one short recording.
+- Reported GPU was Quadro RTX 5000. Preflight free memory was 14,909 MiB. The available post-run observation returned to the same reported state. No instrumented peak VRAM measurement was made, and these observations are not a peak measurement.
+- Ollama HTTP health was 200 before and after. Dify component checks were healthy before and after. Container exit was 0 and the attempt container was confirmed removed; the retained launcher and harness reports are in the operator's private staging area, outside Git.
+- The run was isolated: network disabled, no published ports, non-root container, read-only root and input/artifact mounts, one writable results mount, one request, and a 180-second maximum. No model download, image rebuild or persistent deployment occurred.
+
+INTERPRETATION: the approved faster-whisper/CTranslate2 CUDA path completed one tiny-model transcription with the production bounded audio decoder on the inspected host. The diagnostic used the same decoder path as the production adapter, avoiding faster-whisper 1.2.1's path-based PyAV call that passes the removed `metadata_errors` argument in PyAV 19.0.1. The production adapter was not changed by that diagnostic correction.
+
+NOT ESTABLISHED: true peak VRAM/GPU utilization, concurrent or sustained performance, CUDA execution through the HTTP worker, CUDA cancellation behavior, large-v3-turbo behavior, capacity, persistent deployment and coexistence while Ollama/Dify are under active load. Structural segment validation and language detection do not establish transcription quality. User accepted the bounded C.2b smoke scope as PASS on 2026-10-17; overall M02 remains incomplete.

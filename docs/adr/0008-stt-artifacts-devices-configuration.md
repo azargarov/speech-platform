@@ -12,7 +12,7 @@ Use strict versioned application configuration separately from deployment config
 
 Device discovery is adapter-owned. Initial `llm` deployment explicitly selects CUDA and fails closed without CPU fallback. A separate CPU profile uses the same faster-whisper adapter and omits CUDA/NVIDIA dependencies. Portable auto selection uses a deterministic configured order during startup only. There is no runtime device switching, OOM retry, model eviction or GPU reservation.
 
-Pin the complete resolved Python dependency graph and image digest. Validate faster-whisper, CTranslate2, CUDA, cuBLAS and cuDNN as a versioned combination. M00 faster-whisper 1.2.1 is only a candidate; it is not a verified runtime pin. Provision models offline and deny runtime model downloads.
+Pin the complete resolved Python dependency graph and image digest. The approved M02-B CUDA dependency policy explicitly pins faster-whisper 1.2.1, CTranslate2 4.8.3, cuBLAS 12.9.2.10 and cuDNN 9.27.0.42; CUDA NVRTC 12.9.86 is resolved transitively. Keep CPU and CUDA lock sets separate. CTranslate2 4.8.3's versioned changelog establishes Python wheel support for cuDNN 9 and says cuDNN 8 is no longer supported; this takes precedence over the conflicting cuDNN 8 note in its `CONTRIBUTING.md`. CTranslate2's Python wheel notes describe CUDA Runtime as statically linked, so a separately loadable `libcudart.so.12` is not a required package-level assertion. This dependency policy does not establish inference compatibility on a target GPU. Provision models offline and deny runtime model downloads. See the [M02 STT design](../architecture/m02-stt-design.md) for source references and validation limits.
 
 ## Consequences
 

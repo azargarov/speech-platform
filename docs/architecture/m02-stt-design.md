@@ -1,6 +1,6 @@
 # M02 STT architecture design
 
-Status: accepted architecture baseline. M02-A and M02-B are PASS following user validation on 2026-10-17. M01 remains PASS; overall M02 is incomplete and M02-C is the next approval gate, not started. See [M02 plan](../milestones/M02/plan.md) and ADRs [0006](../adr/0006-stt-alias-ownership.md), [0007](../adr/0007-stt-execution-lifecycle.md), [0008](../adr/0008-stt-artifacts-devices-configuration.md) and accepted [0009](../adr/0009-worker-network-reachability.md).
+Status: accepted architecture baseline. M02-A, M02-B and the bounded M02-C.2b CUDA smoke scope are PASS. M01 remains PASS and overall M02 is incomplete; broader M02-C deployment and CUDA worker acceptance remain open. See [M02 plan](../milestones/M02/plan.md) and ADRs [0006](../adr/0006-stt-alias-ownership.md), [0007](../adr/0007-stt-execution-lifecycle.md), [0008](../adr/0008-stt-artifacts-devices-configuration.md) and accepted [0009](../adr/0009-worker-network-reachability.md).
 
 ## Evidence and assumptions
 
@@ -8,7 +8,7 @@ Status: accepted architecture baseline. M02-A and M02-B are PASS following user 
 
 **INTERPRETATION:** M02 can prove model and backend replaceability with one real backend plus a fake. The same faster-whisper adapter can accept CPU or CUDA device selections without changing the application layer. Limiting a worker instance to one model and active job keeps resource ownership clear on a shared GPU; it does not make these permanent architecture limits.
 
-**NOT ESTABLISHED:** pinned model revision and converted artifact digest; Python/CUDA/cuDNN compatibility matrix; CPU/GPU memory envelope; cancellation/driver release latency; quality and performance outside the M00 audio; and runtime coexistence with Ollama/Dify while inference is active.
+**NOT ESTABLISHED:** production large-v3-turbo behavior; peak VRAM (only before/after state is recorded); concurrency, sustained performance, CUDA HTTP worker integration, cancellation/driver release latency during CUDA inference, and persistent deployment. The tiny-model smoke does not establish an operating envelope or coexistence under active shared-service load.
 
 ## Boundaries and data flow
 
@@ -316,16 +316,13 @@ The `large-v3-turbo` value identifies the intended model family only. It is not 
 
 Use a checked-in resolved lock with exact versions and hashes for the worker's complete Python dependency graph. Pin the base image by an approved tag plus image digest in deployment review. Keep CUDA userspace, cuBLAS, cuDNN and CTranslate2 compatibility together in the CUDA image/profile. The CPU profile must not import NVIDIA packages. Pin and test the model conversion/provisioning tool separately from the serving image.
 
-The historical M00 benchmark reports faster-whisper 1.2.1 and CUDA 12.8, but does not identify the exact CTranslate2 build, cuDNN library, base image digest or model artifact digest. Treat 1.2.1 as a candidate to check, not an approved runtime pin or reproduced environment. Upstream faster-whisper documents CUDA/cuDNN requirements and shows separate CPU/GPU compute types; CTranslate2 exposes supported compute-type discovery at runtime. [faster-whisper requirements and usage](https://github.com/SYSTRAN/faster-whisper/blob/master/README.md), [CTranslate2 supported compute types](https://opennmt.net/CTranslate2/quantization.html).
+The historical M00 benchmark reports faster-whisper 1.2.1 and CUDA 12.8, but does not identify the exact CTranslate2 build, cuDNN library, base image digest or model artifact digest. It is historical provenance, not a reproduced environment. The separately approved M02-B CUDA dependency policy pins faster-whisper 1.2.1, CTranslate2 4.8.3, cuBLAS 12.9.2.10 and cuDNN 9.27.0.42 in the CUDA lock; CUDA NVRTC 12.9.86 is resolved transitively. The CPU lock remains independent and unchanged.
 
-M01 currently pins only PyYAML in `services/requirements.txt`. Phase A should establish the resolved lock format, hash checking and reproducible build check for the existing STT environment. Phase B adds the following direct/runtime dependencies under that lock:
+For CTranslate2 4.8.3 Python wheels, use cuDNN 9: its versioned changelog says Python wheel support for cuDNN 9 began in 4.5.0 and that cuDNN 8 is no longer supported. faster-whisper 1.2.1 likewise documents CUDA 12 and cuDNN 9 for current CTranslate2 releases. The cuDNN 8 statement in the versioned CTranslate2 4.8.3 `CONTRIBUTING.md` conflicts with that release history and is treated as stale. CTranslate2's wheel notes describe CUDA Runtime as statically linked; therefore absence of a separately loadable `libcudart.so.12` is not itself a dependency failure. These sources establish the policy, not successful STT inference on the target GPU. [CTranslate2 4.8.3 changelog](https://github.com/OpenNMT/CTranslate2/blob/v4.8.3/CHANGELOG.md), [faster-whisper 1.2.1 CUDA requirements](https://github.com/SYSTRAN/faster-whisper/blob/v1.2.1/README.md), [conflicting CTranslate2 4.8.3 wheel note](https://github.com/OpenNMT/CTranslate2/blob/v4.8.3/CONTRIBUTING.md#cuda-support-in-python-wheels).
 
-- `faster-whisper`, with 1.2.1 checked as a candidate because M00 reported it; compatibility is not yet established.
-- Its `ctranslate2` and `av` dependencies, pinned at exact resolved versions and tested together.
-- A pinned asynchronous HTTP/multipart dependency for streaming uploads and disconnect notification. Proposed choice: `aiohttp`, isolated to STT; TTS keeps its current transport. It documents handler cancellation when the peer disconnects. The parent must still cancel/reap the inference subprocess explicitly. [aiohttp peer-disconnection behavior](https://docs.aiohttp.org/en/stable/web_advanced.html#peer-disconnection).
-- `nvidia-ml-py` in the CUDA-only dependency group if NVML free-memory and device facts are required. The NVIDIA driver library remains a host/container runtime prerequisite. CPU profiles must not install or import this optional group.
+The M02-B worker dependency graph is hash-locked separately for CPU and CUDA. It includes faster-whisper, CTranslate2, PyAV and the isolated aiohttp transport; CUDA additionally includes the pinned NVIDIA user-space packages and `nvidia-ml-py`. The CPU lock has no NVIDIA packages. aiohttp disconnect notification is not a substitute for explicit cancellation and child reaping. The NVIDIA driver remains a host/container runtime prerequisite.
 
-Pin every direct and transitive package with hashes in a checked-in lock and validate the exact Python, CUDA, cuBLAS, cuDNN, CTranslate2, base-image and driver combination on the authorized target. Do not invent version numbers from M00's incomplete provenance. Pin and test the artifact converter separately from the serving image.
+Pin every direct and transitive package with hashes in a checked-in lock and validate the exact Python, CUDA, cuBLAS, cuDNN, CTranslate2, base-image and driver combination on the authorized target. Do not infer runtime compatibility from M00's incomplete provenance or library discovery alone. Pin and test the artifact converter separately from the serving image.
 
 ## Worker, model and request lifecycles
 

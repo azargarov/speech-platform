@@ -1,6 +1,6 @@
 # M02 STT inference plan
 
-Status: M02-A and M02-B are PASS following user validation and explicit closeout approval on 2026-10-17. Overall M02 remains incomplete. M02-C is the next approval gate, has not started and requires separate authorization. No target service deployment or remote access was performed. The accepted architecture is documented in [m02-stt-design.md](../../architecture/m02-stt-design.md) and its network boundary in [ADR 0009](../../adr/0009-worker-network-reachability.md).
+Status: M02-A and M02-B are PASS following user validation and explicit closeout approval on 2026-10-17. **M02-C.2b: PASS for the bounded CUDA smoke-test scope only**, accepted on 2026-10-17. Overall M02 remains incomplete. No persistent target service deployment was performed. The accepted architecture is documented in [m02-stt-design.md](../../architecture/m02-stt-design.md) and its network boundary in [ADR 0009](../../adr/0009-worker-network-reachability.md).
 
 ## Scope
 
@@ -38,7 +38,7 @@ User validation: completed 2026-10-17. User accepted pinned-model CPU HTTP smoke
 
 ### M02-C — Authorized `llm` GPU validation and closeout
 
-Entry gate: M02-B is implemented, verified and explicitly user-accepted; separate explicit authorization for target-host access and deployment is still required. **NEXT APPROVAL GATE; NOT STARTED.** Exit gate: all host evidence and rollback review pass and the user explicitly approves M02 closeout.
+Entry gate: M02-B is implemented, verified and explicitly user-accepted. **C.2b bounded CUDA smoke-test scope: PASS.** This did not authorize or perform persistent deployment or validate CUDA through the HTTP worker. Remaining C work, including C.3, requires its own approval gate. Exit gate: all broader host evidence and rollback review pass and the user explicitly approves M02 closeout.
 
 Prepare a dedicated deployment profile/runbook and rollback. Only after separate host/deployment authorization, validate the exact `large-v3-turbo` artifact and image/library pins on CUDA, measure resource use, and test cancellation/shutdown/recovery while leaving Ollama/Dify untouched.
 
@@ -50,7 +50,7 @@ User validation: review measured results and limitations, inspect service status
 
 ## Verification baseline
 
-OBSERVED at M01 closeout: `make verify PYTHON=.venv/bin/python` passed at commit `734e223a249988a93df668a857831db7c2a43852`; this is historical and does not verify M02. Phase commands above are proposed; targets that do not exist yet must be added during their authorized phase. GPU results and current dependency/model pins remain NOT ESTABLISHED.
+OBSERVED at M01 closeout: `make verify PYTHON=.venv/bin/python` passed at commit `734e223a249988a93df668a857831db7c2a43852`; this is historical and does not verify M02. OBSERVED for C.2b: the approved tiny artifact completed one bounded CUDA float16 transcription; see [verification](verification.md). Phase commands above are proposed; targets that do not exist yet must be added during their authorized phase. Broader GPU resource behavior and deployment remain NOT ESTABLISHED.
 
 ## Decisions and risks
 

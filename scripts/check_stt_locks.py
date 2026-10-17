@@ -13,10 +13,17 @@ DIRECT = {
         "pyyaml",
         "aiohttp",
         "faster-whisper",
+        "ctranslate2",
         "nvidia-ml-py",
         "nvidia-cublas-cu12",
         "nvidia-cudnn-cu12",
     },
+}
+CUDA_RUNTIME_POLICY = {
+    "ctranslate2": "4.8.3",
+    "nvidia-cublas-cu12": "12.9.2.10",
+    "nvidia-cuda-nvrtc-cu12": "12.9.86",
+    "nvidia-cudnn-cu12": "9.27.0.42",
 }
 
 
@@ -51,10 +58,10 @@ def _locked_packages(path):
     return packages
 
 
-def validate():
+def validate(root=ROOT):
     for input_name, direct_names in DIRECT.items():
-        source = _requirements(ROOT / "services" / input_name)
-        lock = _locked_packages(ROOT / "services" / input_name.replace(".in", ".lock"))
+        source = _requirements(root / "services" / input_name)
+        lock = _locked_packages(root / "services" / input_name.replace(".in", ".lock"))
         if set(source) != direct_names:
             raise ValueError(f"unexpected direct dependencies in {input_name}")
         if not set(source).issubset(lock):
@@ -66,13 +73,24 @@ def validate():
             name.startswith("nvidia-") for name in lock
         ):
             raise ValueError("CPU lock must not include NVIDIA packages")
+        if input_name.endswith("cuda.in"):
+            for name, version in CUDA_RUNTIME_POLICY.items():
+                if lock.get(name) != version:
+                    raise ValueError(
+                        f"unsupported CUDA runtime combination: {name} must be {version}"
+                    )
+            if "nvidia-cuda-runtime-cu12" in lock:
+                raise ValueError(
+                    "CUDA lock must not add nvidia-cuda-runtime-cu12; "
+                    "CTranslate2 4.8.3 statically links CUDA Runtime"
+                )
         if (
             "faster-whisper" not in lock
             or "ctranslate2" not in lock
             or "av" not in lock
         ):
             raise ValueError("inference lock is incomplete")
-    print("PASS: STT lock pins, hashes and CPU/CUDA dependency separation")
+    print("PASS: STT lock pins, hashes and CPU/CUDA compatibility policy")
 
 
 if __name__ == "__main__":

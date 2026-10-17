@@ -1,6 +1,6 @@
 # M02 implementation
 
-Status: M02-A and M02-B implemented, verified and user-validated as PASS on 2026-10-17. Overall M02 remains incomplete; M02-C is the next approval gate and has not started.
+Status: M02-A, M02-B and M02-C.2b bounded CUDA smoke-test scope are PASS. Overall M02 remains incomplete; persistent deployment and broader C acceptance are not complete.
 
 ## M02-A implementation record
 
@@ -66,4 +66,41 @@ NOT ESTABLISHED:
 - Local CTranslate2 reports zero CUDA devices. No CUDA inference, GPU integration test, Docker GPU passthrough or target-host compatibility test was run.
 - No containers were started, no remote host was accessed, and Ollama/Dify were not touched. Real model HTTP disconnect cancellation under an interrupted client was not exercised; prior cancellation coverage remains fake-application based.
 
-M02-B is PASS after CPU user acceptance; the NOT ESTABLISHED runtime checks above remain limitations of that acceptance. M02-C has not started. See [verification](verification.md), [user validation](user-validation.md), [result](result.md), and [design](../../architecture/m02-stt-design.md).
+At M02-B closeout, M02-C had not started; its CPU acceptance limitations are historical. The subsequent C.2b smoke is recorded below. See [verification](verification.md), [user validation](user-validation.md), [result](result.md), and [design](../../architecture/m02-stt-design.md).
+
+## M02-C.2a CUDA dependency-policy closeout
+
+OBSERVED:
+
+- Added CTranslate2 4.8.3 as an explicit CUDA input pin and regenerated the CUDA hash lock using its documented `uv pip compile` command. The resolved package versions and hashes are unchanged; the lock now records CTranslate2 as both an explicit requirement and a faster-whisper dependency.
+- Added a lock-policy check for CTranslate2 4.8.3, cuBLAS 12.9.2.10 and cuDNN 9.27.0.42, and a guard against adding `nvidia-cuda-runtime-cu12`. Added tests for the approved tuple and rejection of incompatible CTranslate2/cuDNN pins and the CUDA Runtime package.
+- Kept the CPU input and lock unchanged. No repository-maintained CUDA probe existed; the incorrect `libcudart.so.12` assertion was in the temporary diagnostic probe, so no new probe was added.
+- Updated the architecture and ADR-0008 to record the accepted version policy and upstream documentation conflict.
+
+INTERPRETATION:
+
+- CTranslate2 4.8.3's versioned changelog is authoritative for cuDNN compatibility; its generic wheel note about cuDNN 8 is stale. The separate `libcudart.so.12` load check is not an appropriate package-compatibility requirement because the CTranslate2 wheel notes describe CUDA Runtime as statically linked.
+
+NOT ESTABLISHED:
+
+- At the C.2a dependency-policy closeout, CUDA STT inference, GPU memory behavior under model load, target-host deployment and coexistence during active Ollama/Dify workloads remained unverified. The later C.2b smoke provides one limited inference observation; it does not establish these broader properties.
+
+## M02-C.2b bounded CUDA smoke — PASS
+
+OBSERVED on 2026-10-17 in the authorized single diagnostic attempt:
+
+- The approved immutable image (`sha256:b25af1309e1e51e8ce72c227028727cb26014fef512b716fbd11cf8f9fb16540`, linux/amd64) used faster-whisper 1.2.1, CTranslate2 4.8.3, PyAV 19.0.1, cuBLAS 12.9.2.10, cuDNN 9.27.0.42 and NVRTC 12.9.86. CUDA lock SHA-256: `68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14`.
+- The manifest-verified `Systran/faster-whisper-tiny` artifact at revision `d90ca5fe260221311c53c58e660288d3deb8d356` loaded with explicit CUDA device 0 and float16. The production bounded decoder handled the approved audio. The single transcribe call and lazy segment iteration completed; output validation found Russian (`ru`), five segments and valid timestamp bounds. Transcript text was not persisted.
+- Observed stage durations: model load 1.206437 s; transcribe call including production audio decode 0.693926 s; segment iteration 0.248505 s; output validation 0.000465 s. These are one-run diagnostic timings, not a performance claim.
+- The launcher and harness reported success; the container exited 0 and was removed. The sanitized evidence is retained outside Git under the operator's private staging tree at `M02/M02-C/M02-C.2b/attempts/cuda-final-decoderfix-20261017-01/` (`launcher-report.json` and `harness/harness-report.json`). Ollama HTTP health remained 200 and Dify component health checks remained healthy before and after. GPU preflight reported a Quadro RTX 5000 with 14,909 MiB free; post-run observation returned to the same reported state. These observations do not measure true peak allocation.
+- Execution used no network or published ports, non-root identity, read-only root/input/artifact mounts, one writable attempt-results mount, GPU 0 only and a 180-second bound. No persistent service was deployed.
+
+INTERPRETATION:
+
+- This demonstrates that the pinned tiny-model faster-whisper/CTranslate2 CUDA path completed one transcription on the inspected host using the approved image and production decoder. The diagnostic decoder adjustment avoids the PyAV 19.0.1 incompatibility in faster-whisper 1.2.1's path-based decode; production adapter code was not changed for this workaround.
+- User formally accepted this bounded smoke-test scope as PASS on 2026-10-17. This is not deployment or full M02 acceptance.
+
+NOT ESTABLISHED:
+
+- True peak VRAM or GPU utilization, concurrency, sustained performance, production HTTP worker integration on CUDA, cancellation during CUDA inference, large-v3-turbo behavior, capacity, persistent deployment, and coexistence during active Ollama/Dify workload.
+- Transcription quality beyond detected language and structural segment/timestamp validation.

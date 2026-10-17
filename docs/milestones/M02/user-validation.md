@@ -1,6 +1,6 @@
-# M02-A and M02-B user validation — PASS; M02-C pending
+# M02 user validation — M02-A/B/C.2b bounded smoke PASS
 
-User validation and explicit closeout approvals for M02-A and M02-B were received 2026-10-17. Both phases are PASS. Overall M02 remains incomplete. M02-C is the next approval gate and has not started.
+User validation and explicit closeout approvals for M02-A and M02-B were received 2026-10-17. The user formally accepted M02-C.2b as PASS for the bounded CUDA smoke-test scope on 2026-10-17. Overall M02 remains incomplete.
 
 ## Validation evidence
 
@@ -40,4 +40,10 @@ OBSERVED: the pinned Systran/faster-whisper-tiny revision, MIT model-card licens
 
 Two blocking validation defects were found and corrected before successful inference: the adapter required a file absent from this upstream model, and the deployment example placed the manifest inside the artifact root. The CPU Make target also lacked a project-root import path; it now sets `PYTHONPATH=.`. A regression test covers the manifest placement and the adapter fixture matches the actual upstream file set.
 
-NOT ESTABLISHED: cold-cache startup, representative throughput/capacity, worker-isolated memory, real disconnect cancellation during inference, CUDA/GPU behavior, deployment and target-host coexistence. M02-C still requires separate authorization and must not start automatically.
+At M02-B closeout, NOT ESTABLISHED: cold-cache startup, representative throughput/capacity, worker-isolated memory, real disconnect cancellation during inference, CUDA/GPU behavior, deployment and target-host coexistence. Later C.2b testing established only the bounded CUDA smoke result recorded below; broader M02-C work still requires its approval gates.
+
+## M02-C.2b bounded CUDA smoke — PASS for approved scope
+
+The user authorized one CUDA diagnostic attempt on 2026-10-17. OBSERVED: the approved tiny model completed one transcription with explicit CUDA device 0 and float16. Five segments passed structural timestamp checks; language detection returned `ru`. The production bounded audio decoder was used. The attempt container exited successfully and was removed, and Ollama/Dify health checks were healthy before and after. Full provenance, stage timings and limitations are recorded in [verification](verification.md).
+
+The acceptance applies only to the bounded smoke test. NOT ESTABLISHED: peak VRAM, concurrency, sustained performance, CUDA HTTP worker integration, large-v3-turbo inference, persistent deployment, or shared-service coexistence under active load. No transcript text or private diagnostic reports are stored in Git. Overall M02 remains incomplete.
