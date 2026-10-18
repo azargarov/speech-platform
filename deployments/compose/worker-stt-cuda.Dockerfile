@@ -15,6 +15,9 @@ COPY services/stt ./services/stt
 COPY services/worker ./services/worker
 LABEL org.opencontainers.image.revision=${STT_SOURCE_REVISION} \
       com.speech-platform.image-role="stt-worker" \
+      com.speech-platform.service-role="stt-worker" \
+      com.speech-platform.service="stt" \
+      com.speech-platform.runtime-variant="cuda" \
       com.speech-platform.base-image=${STT_CUDA_BASE_IMAGE} \
       com.speech-platform.source-revision=${STT_SOURCE_REVISION} \
       com.speech-platform.cuda-lock-sha256=${STT_CUDA_LOCK_SHA256}

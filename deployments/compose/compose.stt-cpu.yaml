@@ -3,6 +3,13 @@ services:
     build:
       context: ../..
       dockerfile: deployments/compose/worker-stt-cpu.Dockerfile
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-unknown}
+        SERVICE_ROLE: stt-worker
+        STT_CPU_LOCK_SHA256: ${STT_CPU_LOCK_SHA256:?set the CPU lock digest}
+    labels:
+      com.speech-platform.service: stt
+      com.speech-platform.runtime-variant: cpu
     command:
       - services.stt.main
       - --config

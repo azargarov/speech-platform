@@ -9,3 +9,32 @@ No audio is written by skeletons. Inference providers must use bounded in-memory
 Stop via Compose down to signal processes. Go drains with its configured timeout. Python closes its listener after the configured polling interval (0.5 seconds in sample configs); active worker-request draining is deferred to M02/M03. Authentication configuration and enforcement are M04. Do not treat the reserved OpenAPI bearer scheme as enforced authentication.
 
 GET /metrics exposes a Prometheus readiness gauge. Inspect structured startup logs and health manually; do not log request bodies. GPU sizing and model cache mounts belong to inference milestones.
+
+## GHCR image publication
+
+M01C publishes image artifacts only; it does not deploy or change running
+services. Ordinary `make image` and pull-request verification do not publish.
+For a local release, authenticate first with Docker using an account/token that
+can write packages in `azargarov`, then explicitly run
+`make publish VERSION=vX.Y.Z` (or add `SERVICE=gateway`, `stt`, or `tts`). The
+target validates the version/service before building and pushes only the
+selected service images. Never put a token in a command argument or repository
+file. GitHub Actions uses the scoped `GITHUB_TOKEN` only in the publish job.
+
+`make image` defaults STT to CPU. Use `make image SERVICE=stt VARIANT=cuda`
+for the CUDA production build, or `make image VARIANT=cuda` to build all
+services with CUDA STT. The build never falls back to CPU after a CUDA error.
+Publication defaults STT to CUDA; use `make publish SERVICE=stt VARIANT=cpu
+VERSION=vX.Y.Z` only for an explicitly requested CPU publication. The variant
+is part of the repository name, not inferred from a mutable tag.
+
+Published repositories are `ghcr.io/azargarov/voiceservice-gateway`,
+`voiceservice-stt-cpu`, `voiceservice-stt-cuda`, and
+`voiceservice-tts-health-only`. The TTS image remains health-only. Each
+successful publish writes minimal metadata to `dist/release-metadata/`; retain
+that record with the actual `repository@digest` reference. Metadata includes
+service, runtime variant and applicable dependency-lock SHA-256. The publisher
+pulls that exact digest to verify `linux/amd64`, source revision, service,
+variant and role labels. No model artifacts, private configuration,
+credentials or local audio fixtures are release inputs. A version tag does not
+authorize installation: deployment is a separate milestone and operator action.

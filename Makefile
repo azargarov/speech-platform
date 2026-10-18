@@ -3,7 +3,19 @@ COMPOSE = docker compose -f deployments/compose/compose.yaml
 IMAGE_SERVICES := gateway stt tts
 IMAGE_SERVICE := $(strip $(SERVICE))
 IMAGE_SELECTION :=
+IMAGE_VARIANT := $(if $(strip $(VARIANT)),$(strip $(VARIANT)),cpu)
+IMAGE_COMPOSE_FILE := deployments/compose/compose.stt-cpu.yaml
+PUBLISH_SERVICE := $(strip $(SERVICE))
+PUBLISH_SELECTION :=
+PUBLISH_VERSION := $(strip $(VERSION))
+PUBLISH_VARIANT := $(if $(strip $(VARIANT)),$(strip $(VARIANT)),cuda)
 ifneq ($(filter image,$(MAKECMDGOALS)),)
+ifeq ($(filter $(IMAGE_VARIANT),cpu cuda),)
+$(error Unknown image VARIANT '$(IMAGE_VARIANT)'; choose cpu or cuda)
+endif
+ifneq ($(IMAGE_VARIANT),cpu)
+IMAGE_COMPOSE_FILE := deployments/compose/compose.stt-cuda-build.yaml
+endif
 ifeq ($(IMAGE_SERVICE),)
 IMAGE_SELECTION := $(IMAGE_SERVICES)
 else ifeq ($(IMAGE_SERVICE),gateway)
@@ -16,7 +28,23 @@ else
 $(error Unknown image service '$(SERVICE)'; choose gateway, stt, or tts)
 endif
 endif
-.PHONY: verify fmt lint config test build image compose-check bootstrap governance-check stt-lock-check stt-cpu-integration stt-cuda-http-integration
+ifneq ($(filter publish,$(MAKECMDGOALS)),)
+ifeq ($(filter $(PUBLISH_VARIANT),cpu cuda),)
+$(error Unknown publish VARIANT '$(PUBLISH_VARIANT)'; choose cpu or cuda)
+endif
+ifeq ($(PUBLISH_SERVICE),)
+PUBLISH_SELECTION := gateway stt tts
+else ifeq ($(PUBLISH_SERVICE),gateway)
+PUBLISH_SELECTION := gateway
+else ifeq ($(PUBLISH_SERVICE),stt)
+PUBLISH_SELECTION := stt
+else ifeq ($(PUBLISH_SERVICE),tts)
+PUBLISH_SELECTION := tts
+else
+$(error Unknown publish service '$(SERVICE)'; choose gateway, stt, or tts)
+endif
+endif
+.PHONY: verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check stt-cpu-integration stt-cuda-http-integration
 bootstrap:
 	$(PYTHON) -m pip install -r requirements-dev.txt
 	$(PYTHON) -m pip install --require-hashes -r services/requirements-stt-cpu.lock
@@ -36,7 +64,8 @@ config:
 compose-check:
 	$(COMPOSE) config --quiet
 	$(COMPOSE) config --format json | $(PYTHON) scripts/check_compose.py
-	STT_APPLICATION_CONFIG=$(CURDIR)/configs/stt-application-cpu.example.yaml STT_DEPLOYMENT_CONFIG=$(CURDIR)/configs/stt-deployment-cpu.example.yaml STT_MODEL_ROOT=/models docker compose -f deployments/compose/compose.yaml -f deployments/compose/compose.stt-cpu.yaml config --format json | $(PYTHON) scripts/check_compose.py
+	STT_CPU_LOCK_SHA256=$$(sha256sum services/requirements-stt-cpu.lock | cut -d' ' -f1) STT_APPLICATION_CONFIG=$(CURDIR)/configs/stt-application-cpu.example.yaml STT_DEPLOYMENT_CONFIG=$(CURDIR)/configs/stt-deployment-cpu.example.yaml STT_MODEL_ROOT=/models docker compose -f deployments/compose/compose.yaml -f deployments/compose/compose.stt-cpu.yaml config --format json | $(PYTHON) scripts/check_compose.py
+	SOURCE_REVISION=$$(git rev-parse HEAD) STT_CUDA_LOCK_SHA256=$$(sha256sum services/requirements-stt-cuda.lock | cut -d' ' -f1) STT_APPLICATION_CONFIG=$(CURDIR)/configs/stt-application-cpu.example.yaml STT_DEPLOYMENT_CONFIG=$(CURDIR)/configs/stt-deployment-cpu.example.yaml STT_MODEL_ROOT=/models docker compose -f deployments/compose/compose.yaml -f deployments/compose/compose.stt-cuda-build.yaml config --quiet
 	# Static-only sentinels for rendering validation; never use this command to start services.
 	STT_CUDA_STATIC_CHECK=1 STT_COMPOSE_PROJECT_NAME=speech-platform-static STT_CUDA_IMAGE=registry.example.invalid/static-check@sha256:0000000000000000000000000000000000000000000000000000000000000000 STT_IMAGE_IDENTITY_MODE=registry_digest STT_IMAGE_ID=sha256:0000000000000000000000000000000000000000000000000000000000000000 STT_PLATFORM=linux/amd64 STT_SOURCE_REVISION=0000000000000000000000000000000000000000 STT_CUDA_LOCK_SHA256=68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14 STT_APPLICATION_CONFIG=$(CURDIR)/configs/stt-application-cuda.example.yaml STT_DEPLOYMENT_CONFIG=$(CURDIR)/configs/stt-deployment-cuda.example.yaml STT_WORKER_CONFIG=$(CURDIR)/configs/stt.yaml STT_MODEL_HOST_ROOT=/models STT_ARTIFACT_GID=1000 STT_HOST_GPU_DEVICE_ID=0 STT_MEMORY_LIMIT_BYTES=12884901888 STT_CPU_LIMIT=4 STT_PIDS_LIMIT=128 STT_STOP_GRACE_PERIOD_SECONDS=15 STT_DEPLOYMENT_PROFILE_SHA256=0000000000000000000000000000000000000000000000000000000000000000 STT_MODEL_MANIFEST_SHA256=86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6 STT_MODEL_REVISION=0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf STT_APPLICATION_CONFIG_SHA256=0000000000000000000000000000000000000000000000000000000000000000 STT_DEPLOYMENT_CONFIG_SHA256=0000000000000000000000000000000000000000000000000000000000000000 STT_WORKER_CONFIG_SHA256=0000000000000000000000000000000000000000000000000000000000000000 STT_CONFIGURATION_SET_SHA256=0000000000000000000000000000000000000000000000000000000000000000 STT_HEALTHCHECK_INTERVAL_SECONDS=10 STT_HEALTHCHECK_TIMEOUT_SECONDS=3 STT_HEALTHCHECK_PROBE_TIMEOUT_SECONDS=2 STT_HEALTHCHECK_RETRIES=3 STT_HEALTHCHECK_START_PERIOD_SECONDS=130 STT_LISTEN_PORT=8081 docker compose -f deployments/compose/compose.yaml -f deployments/compose/compose.stt-cuda.yaml --profile cuda config --format json | $(PYTHON) scripts/check_compose.py
 test:
@@ -47,7 +76,9 @@ build:
 	go build ./...
 	$(PYTHON) -c 'import ast,pathlib; [ast.parse(p.read_text()) for p in pathlib.Path("services").rglob("*.py")]'
 image:
-	STT_APPLICATION_CONFIG="$(CURDIR)/configs/stt-application-cpu.example.yaml" STT_DEPLOYMENT_CONFIG="$(CURDIR)/configs/stt-deployment-cpu.example.yaml" STT_MODEL_ROOT=/models $(COMPOSE) -f deployments/compose/compose.stt-cpu.yaml build $(IMAGE_SELECTION)
+	SOURCE_REVISION="$(shell git rev-parse HEAD)" STT_CPU_LOCK_SHA256="$$(sha256sum services/requirements-stt-cpu.lock | cut -d' ' -f1)" STT_CUDA_LOCK_SHA256="$$(sha256sum services/requirements-stt-cuda.lock | cut -d' ' -f1)" STT_APPLICATION_CONFIG="$(CURDIR)/configs/stt-application-cpu.example.yaml" STT_DEPLOYMENT_CONFIG="$(CURDIR)/configs/stt-deployment-cpu.example.yaml" STT_MODEL_ROOT=/models $(COMPOSE) -f $(IMAGE_COMPOSE_FILE) build $(IMAGE_SELECTION)
+publish:
+	$(PYTHON) scripts/publish_images.py --version "$(PUBLISH_VERSION)" --services "$(PUBLISH_SELECTION)" --variant "$(PUBLISH_VARIANT)"
 governance-check:
 	$(PYTHON) scripts/validate_governance.py
 	$(PYTHON) -m unittest discover -s scripts -p 'test_governance.py' -v

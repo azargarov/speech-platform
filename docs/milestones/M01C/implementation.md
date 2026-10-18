@@ -1,0 +1,20 @@
+# M01C implementation record
+
+Status: implementation in progress; no image release or tag created.
+
+## Changes
+
+- Added `make publish VERSION=...` and optional service selection with Make-time unknown-service rejection.
+- Added a publisher that calls the existing `make image`, tags the Compose image, pushes to GHCR, resolves the registry digest with Buildx, pulls the digest and verifies the image platform and OCI source/role labels before emitting JSON metadata to ignored `dist/release-metadata/`.
+- Added OCI source-revision and service-role labels to existing Dockerfiles and passed role/revision build arguments through the existing Compose build definitions.
+- Added explicit CPU/CUDA STT selection to `make image`; default build behavior remains CPU. The CUDA build-only Compose override uses the existing `worker-stt-cuda.Dockerfile`, pinned Python base digest, CUDA lock hash and `linux/amd64`. The existing runtime CUDA overlay remains build-free.
+- Added explicit service and runtime-variant labels plus CPU/CUDA dependency-lock labels for STT images. CUDA publication is the default; CPU publication requires `VARIANT=cpu` and uses the distinct `voiceservice-stt-cpu` repository, while CUDA uses `voiceservice-stt-cuda`.
+- Extended publisher validation and metadata with service/runtime variant and dependency-lock SHA-256; it verifies local and registry service, variant, role, revision, platform and applicable lock labels. A CUDA build error stops publication without CPU fallback.
+- Updated the tag workflow to build the CPU default and an explicit CUDA variant before the dependent publish job; publication explicitly requests CUDA.
+- Pinned the existing Gateway and CPU worker base images by their observed OCI index digests to stabilize release build inputs.
+- Added a version-tag workflow. Verification and image builds are a prerequisite job; only the publish job has `packages: write` and logs in using the scoped `GITHUB_TOKEN`. Existing PR verification remains read-only.
+- Named the TTS package `voiceservice-tts-health-only` and labeled it `tts-health-only`.
+- Added tests for release version parsing, bounded service selection and GHCR auth configuration.
+- Updated the roadmap, operational documentation and releases README. Added proposed [ADR 0011](../../../docs/adr/0011-ghcr-publication.md).
+
+The previous release gate failed because the publisher selected CPU STT and the implementation was uncommitted. This change addresses variant selection. No tag was created, no package was pushed, no running service/server was changed, and `releases/stt-cuda-baseline-001.yaml` was not edited. The operational baseline is a compatibility reference only; it does not validate this new image.

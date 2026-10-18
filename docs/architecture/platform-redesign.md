@@ -1,6 +1,6 @@
 # VoiceService platform architecture and migration plan
 
-Status: planning proposal only. No deployment, release, or repository architecture has changed as a result of this document. The repository remains `speech-platform`; VoiceService is the intended product name.
+Status: canonical implementation roadmap; M01C–M01G are proposed and not accepted or closed. The project owner identifies GitHub as the primary Git host and GHCR as the distribution registry. No VoiceService image has been published to GHCR and the current CUDA STT smoke deployment is not a managed platform installation. Pre-existing uncommitted M01C-related worktree changes are not treated as accepted milestone evidence here. The repository remains `speech-platform`; VoiceService is the intended product name.
 
 ## Executive recommendation
 
@@ -14,7 +14,7 @@ The intended shape is:
 flowchart LR
     X[XMG workstation] -->|edit, make test / verify / build / image| G[Single Git repository]
     G --> C[CI: same Make targets]
-    C -->|versioned OCI digests + release manifest| R[GHCR or approved OCI registry]
+    C -->|versioned OCI digests + release manifest| R[GHCR]
     C -->|tests, build checks; no production deploy| G
     X -->|explicit make install / update / rollback| H[Ubuntu host]
     R --> H
@@ -33,12 +33,12 @@ Findings below come from the checked-out source and the baseline record. They do
 
 | Area | Current evidence | Design consequence |
 |---|---|---|
-| Source/repository | One Go/Python repository. The current local `origin` is `git@github.com:azargarov/speech-platform.git`; `memphis` retains `https://memphis.myftp.org/andrei/speech-platform.git`. `.github/workflows/verify.yaml` exists. The operator identifies GitHub as the approved private primary host; repository settings and workflow execution were not independently verified here. | Keep GitHub as canonical. Confirm repository access/settings and workflow execution before depending on hosted CI or package publication; do not split or rewrite history. |
-| Make | `test`, `verify`, `build`, `lint`, `config`, `compose-check`, governance and CUDA diagnostic targets exist. `verify` composes checks. `image`, `install`, `update`, `status`, `logs`, `rollback` and `plan` do not exist. `build` checks Go build and Python syntax, not OCI images. | Extend one Makefile. Keep recipes short; reuse existing checks and Compose. |
-| CI | One workflow runs on push and PR, bootstraps dependencies, runs `make verify`, then builds the generic Compose images. No release publication, image digest output, SBOM/provenance policy, or deployment job is present. | Keep PR checks read-only; add separately permissioned versioned publication only after registry approval. No CI-to-host deployment. |
+| Source/repository | One Go/Python repository. GitHub is the approved primary host; `memphis` remains a secondary remote. The existing verification workflow has passed on GitHub Actions (M01B evidence below). | Keep GitHub canonical; do not split or rewrite history. Confirm GHCR package write access before the first approved publication. |
+| Make | `test`, `verify`, `build`, `lint`, `config`, `compose-check`, governance, CUDA diagnostics and `image` exist in the accepted M01B baseline. `plan`, `install`, `update`, `status`, `logs`, `rollback` and `publish` are not part of that baseline. `build` checks Go build and Python syntax, not OCI images. | Extend one Makefile. Keep recipes short; reuse checks and Compose. |
+| CI/CD | M01B runs read-only verification and local image builds for pushes/PRs. No GHCR release has been published and no deployment job is part of CI. | Preserve read-only PR verification. Add tag-triggered publication with narrowly scoped `packages: write`; do not deploy automatically from Git push. |
 | Services | `cmd/gateway` and `internal/gateway` are health/readiness/metrics foundation; public API is not routed. `services/stt` is a production aiohttp application with admission, a supervised inference child, faster-whisper adapter, strict configs and tests. `services/tts/main.py` delegates to the health-only shared worker server. | Preserve STT boundaries and worker lifecycle. Implement TTS under M03 and public authenticated routing under M04; do not pretend either is available now. |
 | Container definitions | Generic Compose has Gateway/STT/TTS services, internal STT/TTS networks, non-root users, read-only roots, caps dropped and limits. Its base STT is CPU/foundation-oriented with a 256 MiB default. CUDA overlay has explicit device selection and profile validation. A separate ignored private Compose file produced the successful runtime. | Do not use generic Compose defaults as the production CUDA profile. Consolidate only after the tracked deployment can reproduce the accepted baseline. Keep the worker private and do not attach STT to Ollama/Dify networks. |
-| Images/dependencies | Separate CPU/CUDA locks and Dockerfiles exist. CUDA image uses pinned base digest, hash-locked dependencies, source/lock labels and UID 65532; current successful target image is local and has no registry digest. | Publish a new versioned image by digest. Keep the old local image and baseline as rollback until new digest deployment is accepted. |
+| Images/dependencies | Separate CPU/CUDA locks and Dockerfiles exist. The CUDA image definition requires explicit immutable base/source/lock inputs. The existing operational STT image is local to the target and has no GHCR digest. | Publish distinct, correctly selected service/runtime images by digest. Keep the operational image and baseline available for recovery until replacement is accepted. |
 | Configuration/artifacts | Strict YAML validation exists for STT app/deployment settings, artifact manifests and CUDA deployment identity. Config is split into worker, application and deployment concerns. Models are outside images and read-only. | Reuse existing schemas. A small host-level platform selection file may name release/enabled services, but service settings remain owned by existing per-service schemas. No second values source or implicit example fallback. |
 | Release/evidence | `releases/stt-cuda-baseline-001.yaml` records image, model, private configuration digests, host/runtime details, successful audio results and limitations. `releases/README.md` explains its use. It is an experiment baseline, not yet a platform release manifest or installable release. | Preserve it verbatim as historical evidence. Introduce any future release descriptor separately and link it to, rather than overwrite, the baseline. |
 | Operational tooling | Several validators, diagnostic launchers, resource sampling and the one-time containerd evidence collector support prior C.4/C.6 evidence. | Retain validators used by deployment and failure reporting. Keep experiment-only launchers and the `ctr` collector out of normal install/update paths; retire only after references and evidence are archived. |
@@ -90,6 +90,20 @@ One root Makefile remains the human/CI/server interface. `SERVICE` is optional: 
 | `make status [SERVICE=…]`, `make logs SERVICE=…` | Query exact VoiceService Compose project/service. Missing `SERVICE` shows all enabled services. Logs are bounded and must avoid audio/transcript data. |
 | `make rollback [SERVICE=…]` | Reapply the recorded previous immutable image/model/config release for the selected scope; fail if any required prior artifact is missing. |
 
+Planned operational forms are:
+
+```sh
+make plan
+make plan SERVICE=stt
+make install
+make install SERVICE=stt
+make install SERVICE=tts
+make update
+make update SERVICE=stt
+make rollback
+make rollback SERVICE=stt
+```
+
 Recipes remain thin wrappers around `docker compose` plus the existing validators. If installed-state journaling and atomic release selection cannot be expressed clearly with Compose/Make alone, introduce one narrowly scoped host script with tests, not a daemon or general controller. Keep that as a design decision at the install milestone. Never use whole-host `docker compose down`, broad prune, GPU reset, or `restart` of unrelated projects.
 
 For service-specific operations, use the same validated project and configuration file set but target only named Compose services (and explicit dependencies); do not recreate or restart unrelated services. `SERVICE=stt` must never restart Gateway, TTS, Ollama or Dify unless a future, reviewed dependency contract explicitly requires it.
@@ -99,13 +113,14 @@ For service-specific operations, use the same validated project and configuratio
 Keep the identifiers distinct:
 
 1. Git source revision: exact application/Dockerfile source commit.
-2. OCI image reference: repository-qualified immutable manifest digest, with platform-specific manifest recorded for `linux/amd64`. A tag is a human alias only.
-3. Model identity: upstream repository/revision plus canonical artifact-manifest digest and per-file SHA-256 values.
-4. Configuration identity: config schema versions and canonical digest of the deployment-relevant config set; private secret contents are mounted separately and not copied into image/labels/logs.
-5. Platform release identity: a versioned YAML descriptor binds the above per service and declares service dependencies and compatibility. The current STT baseline remains a separate experiment record and is not rewritten into this format.
-6. Installed state: private host record of release descriptor digest, exact image manifest digest, model release identity, active config-set digest, project/service/container IDs and previous known-good release. Do not include secrets.
+2. OCI image reference: repository-qualified immutable manifest digest, with supported platform/architecture recorded per image. A tag is a human alias only.
+3. Runtime variant: explicit service variant, such as STT CPU or STT CUDA; CUDA must never resolve to the CPU image. Gateway and TTS roles must also be identified truthfully, including health-only TTS until M03 inference exists.
+4. Model identity: upstream repository and pinned revision plus canonical artifact-manifest digest and per-file SHA-256 values. Keep model files outside images and Git.
+5. Configuration identity: schema compatibility/version and canonical digest of the deployment-relevant config set; private secret contents and host paths are referenced privately, not copied into image/labels/logs or public release metadata.
+6. Platform release identity: one versioned YAML descriptor binds per-service images, variants, models, config compatibility, dependencies and supported architectures. Reuse Compose for service definitions and existing artifact/config validators; do not duplicate a service registry. Keep `stt-cuda-baseline-001.yaml` as separate historical evidence.
+7. Installed state: private host record of release descriptor digest, exact image/model/config identities, enabled services, project/service/container IDs and previous known-good release. Do not include secret values.
 
-Registry images should be published under immutable release tags for discovery, then deployed by digest. Preserve the original target-local image, archive SHA and `stt-cuda-baseline-001` until the first registry image is running, healthy, ready and transcribes the approved smoke fixture. Tags can move; they never authorize deployment. Do not treat an image ID, OCI config digest, manifest digest or archive checksum as interchangeable.
+Publish versioned discovery tags, but install and update only by the recorded OCI manifest digest. Record CPU/CUDA variant and architecture independently of the tag. Preserve the original target-local image, archive SHA and `stt-cuda-baseline-001` until the managed STT installation passes the agreed acceptance and rollback checks. Tags can move; they never authorize deployment. Do not treat a Docker image ID, OCI config digest, manifest digest or archive checksum as interchangeable.
 
 For models, keep content-addressed/versioned host directories, read-only mounts and manifest verification. A fresh install may fetch only files from an immutable upstream revision or a separately approved private artifact store, into a new staging directory; verify every digest before promotion. Never download at worker startup. Reuse unchanged manifest-addressed artifacts on update. Model distribution location and license/source policy remain open decisions; a local model already present does not prove future-target provisioning.
 
@@ -122,6 +137,10 @@ Reproducible build means the same reviewed source, base digest, dependency lock,
 5. Start only requested services, wait separately for liveness and readiness, then run a bounded non-sensitive smoke test for the selected service. Record installed state only after success.
 6. On first STT installation, report that GPU headroom is an observed gate and another process can allocate VRAM between check and load. Do not claim an admission probe reserves resources.
 
+Fresh installation starts from no VoiceService installed-state record: validate the complete enabled service set, prepare only VoiceService-owned paths and networks, stage the selected release/config/models, then record state after acceptance. Adding a service to an existing host reads and validates the current installed state, computes the requested service's declared dependency closure, and applies only that closure. It must not reset the project, replace compatible services, or disturb unrelated Compose projects. Repeating either operation with unchanged identities is a no-op for already-correct services.
+
+With no `SERVICE`, plan/install/update/rollback select the services enabled in the private host configuration. With `SERVICE`, select that known service plus manifest dependencies. Unknown or disabled/unavailable service names fail before downloads, directory changes, image pulls, or container actions. A Gateway or TTS installation may currently provide only its health foundation; it must not be reported as public routing or TTS inference.
+
 ### Update
 
 1. Resolve an explicit release version or digest; no “latest” implicit deployment.
@@ -130,44 +149,37 @@ Reproducible build means the same reviewed source, base digest, dependency lock,
 4. With one 16 GB GPU, plan an in-place STT replacement: stop old STT, verify process/container shutdown as observable, then start new STT. Do not assume old/new model coexistence or zero downtime. The API may be unavailable during model loading and health checks.
 5. Require readiness plus a bounded inference smoke before marking the new release active. If unsuccessful, keep candidate evidence and invoke explicit rollback; no retry loop or automatic GPU reset.
 
+For a selective update, compare image, runtime variant, model manifest and config compatibility identities for the requested service and its dependency closure; leave unchanged services running. Persist both the previous and candidate release identities before activation. Preserve private config and compatible model data in place; model directories are content-addressed and reused only after checksum verification.
+
 ### Rollback and failure handling
 
-Rollback reselects the previous complete image, model and configuration identities. The old image/model/config remain retained until the candidate is accepted. Rollback has service downtime and model reload latency; if GPU cleanup is unconfirmed, do not start another worker. Stop and escalate rather than claiming recovery. Only exact VoiceService project/service/container identities are targeted. Ollama/Dify are not dependencies and remain untouched. Persist sanitized operation reports and installed-state history outside Git; never log audio/transcripts/secrets.
+Rollback reselects the previous complete image, runtime variant, model and configuration identities for the selected service and dependency closure. The old image/model/config remain retained until the candidate is accepted. If an update fails after only some services switched, restore changed services in reverse dependency order from the recorded previous release; do not roll back untouched services. If a required prior artifact is missing or restoration fails, stop, retain the candidate and failure state, and report exact operator recovery steps rather than claiming success. Rollback has service downtime and model reload latency; with one shared GPU, stop the old STT process and establish cleanup before starting its replacement. If GPU cleanup is unconfirmed, do not start another worker. Only exact VoiceService project/service/container identities are targeted. Ollama/Dify are not dependencies and remain untouched. Persist sanitized operation reports and installed-state history outside Git; never log audio/transcripts/secrets.
 
 ## CI/CD proposal
 
 ### Existing system
 
-The repository has a single `.github/workflows/verify.yaml` for push and pull request. It installs Go/Python dependencies, runs `make verify`, and invokes Docker Compose build. The current `origin` is GitHub, but a successful hosted workflow run and repository/package permissions have not been established by this review.
+The repository has a single `.github/workflows/verify.yaml` for push and pull request. It installs Go/Python dependencies, runs `make verify`, and invokes the existing Make image target. M01B records a successful hosted run. The project owner has selected GitHub and GHCR; package write permission remains to be confirmed before the first approved release.
 
 ### Minimal pipeline
 
 - **Pull request:** checkout; install pinned toolchains; run `make verify`; run image build validation using `make image` with no push. Use CPU-only build/test on hosted runners; tests use fakes and never require GPU/model artifacts.
 - **Main branch:** same checks; optional uniquely tagged development images, not production deployment. No credentials beyond read-only checkout unless publishing is explicitly enabled.
-- **Versioned release tag:** build one image per service from the tagged clean source; hash-locked dependencies and digest-pinned bases; publish to GHCR or the approved OCI registry. Capture per-platform manifest digest and source/base/lock provenance in the platform release descriptor. Use least-privilege token permissions (`contents: read`, `packages: write` only in the publish job); pin third-party Actions by full commit SHA and do not expose publish credentials to untrusted PR jobs.
+- **Versioned release tag:** after all verification and image-build jobs pass, publish Gateway, STT CPU, STT CUDA and health-only TTS image variants to GHCR from the exact tagged source. Reuse the Make image/build definitions; CUDA STT publication must explicitly select the CUDA Dockerfile, immutable base, `linux/amd64` platform and approved lock/source arguments. Capture each actual registry manifest digest, platform, source revision and workflow identity. Grant `packages: write` only to the release publication job through scoped `GITHUB_TOKEN`; PR jobs remain read-only. Pin third-party Actions by full commit SHA.
 - **GPU validation:** a separate manually approved workflow/job on an explicitly managed GPU runner or the target under a separately authorized operation. It runs the bounded CUDA HTTP integration, not a production deployment. Standard hosted build runners do not imply CUDA hardware or CUDA inference capability.
 - **Production host:** no CI SSH deployment in the initial design. An operator runs `make plan`, reviews it, then explicit `make install`/`update`; this avoids giving CI control of Ollama/Dify or the host Docker daemon.
 
 Standard GitHub-hosted Linux runners can perform CPU-side Docker builds of a Linux/amd64 CUDA image: assembling a filesystem and installing pinned CUDA user-space wheels does not itself require an NVIDIA GPU. They cannot establish that CUDA kernels or the driver/runtime work. Validate image build duration and disk use because runner storage is finite. GitHub's current runner reference lists standard x64 Linux runners and describes GPU-powered managed runner options separately; the latter are not the standard runner assumption. See [runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners) and [publishing Docker images](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images). GHCR publication requires package write permission; scope that permission to the release job. See [workflow permission syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax).
 
-Use build cache only as a performance optimization; cache contents never replace digest/hash verification. Avoid mutable base tags. Do not claim bit-for-bit rebuild determinism unless demonstrated. Publish immutable OCI digests and retain release metadata. GHCR remains a candidate; package ownership and write permissions still require confirmation.
+Use build cache only as a performance optimization; cache contents never replace digest/hash verification. Avoid mutable base tags. Do not claim bit-for-bit rebuild determinism unless demonstrated. Publish immutable OCI digests and retain release metadata. A tag-triggered workflow publishes artifacts only; no Git push triggers production deployment and no CI job connects to the Ubuntu host.
 
 ## Migration sequence
 
-These are proposed work packages, not started milestones. Keep the existing `M03` TTS and `M04` public gateway/authentication boundaries; do not renumber or mark them complete. No new milestone ID is assigned here.
+The implementation order is M01C → M01D → M01E → M01F → M01G. These are proposed work packages, not started or completed milestones. M02, M03 and M04 retain their existing IDs and acceptance scopes. The canonical objectives, dependencies and evidence are listed once below.
 
-| Order | Objective and deliverables | Dependencies | Acceptance and verification | Recovery / exclusions |
-|---|---|---|---|---|
-| 1. Canonical developer interface | Align `make test`, `verify`, `build`, and new `image` behavior; document local prerequisites; ensure CI calls the same targets. Keep current verification commands as compatibility aliases during transition. | Agree on canonical tool versions and whether existing `bootstrap` remains developer-only. | Clean workstation and CI produce the same test/check outcomes; `make verify` never starts services; `make image SERVICE=stt` builds the selected image only; unknown service fails. | No deployment changes or image publication. Existing working container unaffected. |
-| 2. CI and registry decision | Confirm canonical Git host; consolidate workflow; PR verification/build checks; tag-only GHCR/OCI publication; immutable digest output and release metadata. | Order 1; GitHub org/repository/registry permissions decision. | Pull-request job cannot publish or deploy; release image digest/platform/source/lock evidence is captured; no secrets exposed to PRs. Build on standard runner succeeds within disk/time envelope. | Keep current local image and baseline. No target login or production deploy. |
-| 3. Minimal release/artifact contract | Define one platform release YAML and private host selection input; bind per-service image digests, model manifest identities, config schema versions, enabled services and compatibility. Define approved model source/distribution and retention. | Registry choice and service config ownership. | Strict validation; digest changes when a bound artifact/config changes; missing or ambiguous identities fail; no private values in release metadata. | Do not replace `stt-cuda-baseline-001`; no artifact download at runtime. |
-| 4. STT fresh-install and status path | Add Make install/status/logs/plan for STT using existing Compose and validators; verify/reuse model and apply permanent least privilege; no direct public worker port in target Compose. | 1–3; target model access, Engine/image compatibility and reviewed resource limits. | Rehearsal on an isolated project; exact image/model/config identity; liveness + readiness + one approved inference; other project/container IDs unchanged. | Schedule an in-place cutover because GPU model overlap is unproven. Preserve baseline rollback. |
-| 5. STT update and rollback | Stage candidate first; record active/previous release; update only STT; bounded health/readiness/smoke; explicit rollback to immutable prior tuple. | 4 accepted and host state recording decision. | Inject failures before replacement and during readiness; verify unchanged artifacts reused, failed candidate retained for evidence, rollback restores prior model/API. Record downtime; no zero-downtime claim. | No auto restart/rollback loops; `cleanup_unconfirmed` requires operator escalation. |
-| 6. Gateway API/auth and TTS | Implement public authenticated Gateway routing (M04) and TTS inference provider/service (M03); version service contracts, release dependencies and resource ownership. | API contract/ADR review, M03/M04 approval, provider/model decisions. | Contract tests, fake-backed service tests, service-scoped container tests; later targeted TTS hardware validation. Gateway only is externally reachable; workers remain private. | Keep STT independently operable. Do not combine TTS or gateway migration with the first STT installation. |
+## M01A and M01B: completed Git hosting and CI work
 
-## M01A and M01B: Git hosting and CI roadmap
-
-These names are proposed roadmap work packages under the M01 foundation umbrella. They are not implementation status changes. M01A is repository migration only; M01B is CI/Make integration only. No application or deployment changes are part of M01A.
+M01A is repository migration only; M01B is Make/CI verification and local image builds only. Their acceptance records below are historical and remain unchanged. No deployment or GHCR publication was included in either completed scope.
 
 ### M01A — Establish GitHub as the primary repository
 
@@ -195,9 +207,53 @@ Only `main` was pushed to GitHub, without force. The resulting remote tip is `3a
 
 **Observed verification:** `make verify PYTHON=.venv/bin/python`, `make image SERVICE=stt`, and `make image` passed on the workstation. The unknown-service check exited during Makefile parsing with a clear error. Workflow YAML and the required branch/permission settings were inspected. The pushed commit `5489c637d80ef1ba24cd64168cdfc2886dfc2f94` passed the hosted `foundation` job, including `make bootstrap`, `make verify`, and `make image`: [GitHub Actions run 39156033629](https://github.com/azargarov/speech-platform/actions/runs/39156033629). A bare `make verify` using the host system Python initially failed because that interpreter lacked Ruff; the repository virtualenv invocation passed. No environment dependency was installed to resolve that local interpreter difference.
 
-**Deferred next step:** approve and implement a distinct release workflow for GHCR publication, immutable digest capture and release metadata. Production deployment remains a later explicit operator action. No GHCR permissions or credentials are granted in this milestone.
+## M01C-M01G: CI/CD and deployment lifecycle
 
-Milestones 4 and 5 are operationally separate: prove fresh STT install first, then prove update and rollback. Do not use the currently running smoke container as a test sandbox. Until cutover is separately approved, it remains the working reference.
+M01C implementation is in progress; M01D–M01G remain **planned only**. No M01 milestone is marked complete and no GHCR release is published. This work does not advance M02/M03/M04 or permit automatic deployment. GHCR package access and model-source policy must be resolved before the dependent work reaches publication or installation.
+
+### M01C — GHCR image publication
+
+- **Objective:** publish reviewed, versioned service images after successful GitHub Actions verification and image builds.
+- **Scope and deliverables:** retain CPU as the default for `make image` and `make image SERVICE=stt`; select CUDA with `VARIANT=cuda`. `make publish` defaults STT to CUDA; `VARIANT=cpu` explicitly selects CPU. Use the existing CPU/CUDA Dockerfiles and locks through tracked Compose definitions, with separate `voiceservice-stt-cpu` and `voiceservice-stt-cuda` repositories. Add a tag-triggered GitHub release workflow that explicitly builds and publishes CUDA STT. Record actual registry manifest digest, source commit, release version, service/runtime variant, dependency-lock SHA-256, architecture and workflow identity; inspect each pushed image by digest. Keep PR permissions read-only and scope `packages: write` to publication only. Do not deploy from CI.
+- **Dependencies:** M01B; GHCR package write access; implemented CUDA build and publisher variant checks. The first release tag is withheld until explicit approval.
+- **Acceptance and verification:** make publication rejects missing/invalid version and unknown service/variant before side effects; local publication requires explicit invocation and GHCR auth; tag workflow passes syntax/permission review and publishes only after verify/build; inspect registry images by digest and confirm architecture, source/role labels and no models, private config, credentials or audio fixtures.
+- **Exclusions:** host deployment, model transfer, Gateway inference routing, TTS inference, tag creation before explicit user approval.
+
+### M01D — Release manifest and model artifact management
+
+- **Objective:** define one immutable platform release contract that binds deployable images, model artifacts and compatibility without duplicating Compose service definitions.
+- **Scope and deliverables:** introduce a minimal versioned release descriptor with Git revision; per-service repository digest and CPU/GPU variant; model repository plus pinned revision, artifact manifest and per-file checksums where a service requires model artifacts; config schema compatibility; service dependencies; supported OS/architecture. Start with `linux/amd64`; add architectures only after build and runtime validation. Reuse existing artifact verification and strict service config loaders. Define where approved model artifacts are fetched and retained; stage content-addressed files outside Git and images. Keep private host paths/secrets in a private host config, not the public descriptor.
+- **Dependencies:** M01C digest metadata; approved model source/distribution, licensing and retention policy; existing STT artifact/config validators.
+- **Acceptance and verification:** strict validation rejects missing, mutable, mismatched or unsupported identities; schema fixtures cover valid CPU and CUDA STT descriptors and truthful health-only Gateway/TTS capabilities (with no model identity where none is used); artifact hashes are checked before promotion; release descriptor never contains private values or model bytes.
+- **Exclusions:** image build definitions or service registry duplication, runtime model downloads at startup, replacing `stt-cuda-baseline-001.yaml`.
+
+### M01E — Installation and deployment planning
+
+- **Objective:** provide read-only planning and idempotent, service-scoped installation through Make and the existing Compose project.
+- **Scope and deliverables:** implement `make plan [SERVICE=…]` and `make install [SERVICE=…]`. The private host config is the authority for enabled services; no `SERVICE` selects all enabled services, while a provided service selects it plus declared dependencies. Unknown or disabled services fail before side effects. Planning validates host/Engine/Compose prerequisites, release and configuration, image architecture, GPU availability/headroom as an observation, model hashes, mounts, networks, ports, resources and the exact Compose change set. Install resolves/pulls immutable digests, downloads models into staging, verifies checksums, reuses verified models, validates config, and changes only selected services and required dependencies. Document fresh installation separately from adding a service to an existing installation.
+- **Dependencies:** M01D; reviewed private host configuration and filesystem/GPU policy; current Compose constraints; preserve the original CUDA STT deployment until accepted cutover.
+- **Acceptance and verification:** plan is read-only; install is repeatable and leaves unchanged services untouched; unknown selection has no filesystem/network/container side effects; fresh install and selective add are rehearsed in an isolated VoiceService project; health and readiness are distinct. TTS and Gateway are reported as health-only/foundation services until M03/M04 deliver their behavior.
+- **Exclusions:** updating/removing existing services, CI-to-host access, changing Ollama/Dify, replacing the live baseline before acceptance.
+
+### M01F — Update and rollback
+
+- **Objective:** update only affected services and restore a known prior immutable release after failure.
+- **Scope and deliverables:** implement `make update [SERVICE=…]` and `make rollback [SERVICE=…]`; stage and verify release, image, model and config before stopping services; calculate changes across the selected dependency closure; retain current/previous release identity and compatible private config/data; reuse unchanged artifacts. Record operation state before activation. On partial failure, restore only changed services in reverse dependency order; if restoration fails, retain evidence and stop for explicit operator recovery. Include bounded readiness/inference checks and diagnostics. For shared GPU STT, enforce stop/cleanup before candidate start when concurrent model memory is unproven.
+- **Dependencies:** M01E accepted; M01D immutable release contract; validated prior release and recovery procedure.
+- **Acceptance and verification:** inject staging and post-activation failures; show no live change on staging failure; selective update leaves unrelated services untouched; rollback restores previous image/model/config identity and applicable functionality; report downtime and cleanup uncertainty; preserve original CUDA baseline recovery until migration acceptance.
+- **Exclusions:** zero-downtime claims, automatic retry/rollback loops, shared GPU concurrency assumptions, model/config garbage collection before retention policy.
+
+### M01G — End-to-end deployment validation
+
+- **Objective:** establish the complete artifact-to-host lifecycle on the real Ubuntu target without interfering with other host services.
+- **Scope and deliverables:** with separate target-operation authorization, validate fresh installation, repeated idempotent install, selective add, whole-platform and selective update, failure recovery and rollback; verify service/network isolation, resource limits, health/readiness and currently implemented inference. Exercise CUDA STT inference and model cleanup. Compare Ollama/Dify state before and after. Deliver concise operator instructions for install, update, status/diagnostics, recovery and preserved-baseline restoration. Reuse qualifying M02 evidence rather than repeat target work unnecessarily.
+- **Dependencies:** M01E and M01F accepted; an immutable M01D release; target host identity, approved maintenance window and recovery plan; M02 STT runtime behavior needed for CUDA inference checks. M03/M04 are not prerequisites.
+- **Acceptance and verification:** evidence covers all lifecycle cases, exact selected project/service changes, hashes/digests, dependency order, health/readiness, CUDA inference, resource bounds, rollback identity and Ollama/Dify non-interference. TTS and Gateway are judged only against capabilities implemented at validation time; do not require future inference/routing for deployment-infrastructure acceptance.
+- **Exclusions:** public TTS inference, authenticated Gateway routing, broad host changes, automated deployment on Git push, claims of zero downtime or multi-host support.
+
+### Relationship to functional milestones
+
+M02 remains incomplete and owns STT inference behavior and its accepted bounded runtime evidence. M01E/F may use the implemented STT configuration, artifact verifier and worker without waiting for unrelated M02 closeout. M01G's CUDA inference check must reuse or coordinate with the M02 target-validation scope so the shared host is not operated twice for duplicate evidence. The existing smoke baseline alone does not prove managed installation/update/rollback. M03 owns TTS inference; M04 owns authenticated Gateway routing. Neither is a prerequisite for M01C–M01G, and publishing/installing their current health foundations must not be described as those functional milestones being delivered.
 
 ## Preserve, simplify, defer, retire
 
@@ -209,14 +265,12 @@ Milestones 4 and 5 are operationally separate: prove fresh STT install first, th
 
 ## Open decisions
 
-1. Confirm GitHub repository visibility, default branch and write/admin permissions through an authenticated settings view. GHCR still requires package ownership and permissions.
-2. Which registry is approved (GHCR or another OCI registry), who owns package access, and what image retention/cleanup policy applies?
-3. Where are pinned model artifacts fetched from on a fresh host: upstream pinned repository revision or a private object/artifact store? Confirm license, availability and access policy.
-4. Which services are enabled by default? Until TTS and public Gateway are implemented, the practical initial platform remains STT-only.
-5. Should the current direct loopback STT API remain a temporary diagnostic interface, or be replaced only after M04 Gateway routing is ready?
-6. What system privilege boundary permits image pulls, restricted directory preparation, supplementary model-reader groups and exact Compose lifecycle while leaving Ollama/Dify untouched?
-7. What measured host headroom and maintenance window is acceptable for STT updates, given model reload downtime and shared GPU contention?
-8. Is installed-state journaling worth one narrowly scoped script, or can the first implementation use operator-selected immutable release files plus Compose and a protected state file?
+1. Confirm GHCR package ownership/write access and package retention before the first approved image publication.
+2. Where are pinned model artifacts fetched on a fresh host: an upstream pinned repository revision or a private artifact store? Confirm license, availability, credentials mechanism and retention.
+3. Which services and runtime variants are enabled in the private host configuration? Keep Gateway/TTS health-only unless M04/M03 functionality is implemented and accepted.
+4. What least-privilege host boundary permits image pulls, restricted directory preparation, model-reader access and exact Compose lifecycle while leaving Ollama/Dify untouched?
+5. What measured host headroom and maintenance window is acceptable for STT updates, given model reload downtime and shared GPU contention?
+6. At M01E design review, determine whether Compose/Make can safely represent installed-state transitions or one narrow tested host script is required; do not add a controller framework.
 
 ## References
 

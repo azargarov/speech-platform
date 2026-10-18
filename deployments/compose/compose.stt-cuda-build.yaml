@@ -1,0 +1,11 @@
+services:
+  stt:
+    image: speech-platform-stt-cuda:local
+    platform: linux/amd64
+    build:
+      context: ../..
+      dockerfile: deployments/compose/worker-stt-cuda.Dockerfile
+      args:
+        STT_CUDA_BASE_IMAGE: python:3.13.9-slim@sha256:326df678c20c78d465db501563f3492d17c42a4afe33a1f2bf5406a1d56b0e86
+        STT_SOURCE_REVISION: ${SOURCE_REVISION:?set the source revision}
+        STT_CUDA_LOCK_SHA256: ${STT_CUDA_LOCK_SHA256:?set the CUDA lock digest}
