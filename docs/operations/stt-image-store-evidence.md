@@ -7,7 +7,39 @@ used because the supported Docker Engine inspection API does not expose the
 containerd image-record association and content-store blob bytes needed by the
 existing `containerd_oci_manifest` evidence contract. Its CLI and output are
 version-dependent; the collector fails closed when the observed output does
-not match the expected structure.
+not match the expected structure. For the target's reported containerd 2.2.1,
+the collector uses `ctr images list --quiet` followed by `ctr images inspect
+<exact-reference>` for every listed record. It does not use `ctr images info`,
+which the target's read-only diagnosis found unavailable.
+
+The 2.2.1 `images inspect` command prints an image name and a descriptor tree.
+The collector requires the first line to equal the exact listed reference and
+parses exactly one root descriptor line in this form:
+
+```text
+└── <media-type> @sha256:<64 lowercase hex digits> (<positive decimal> bytes)
+```
+
+The byte count is the OCI descriptor's `Size` field as rendered by
+containerd's descriptor printer. The parser does not read the human-readable
+`images list` SIZE column, infer sizes, use loose matching, or accept changed
+formatting. Every record in the complete `--quiet` inventory is inspected;
+there must be exactly one whose root descriptor digest matches the approved
+manifest, and its media type and descriptor size must also match the approved
+archive. The collector then independently reads and verifies the exact raw
+manifest and all referenced content, including each stored layer digest and
+byte count.
+
+This interface is a narrowly pinned diagnostic compatibility path, not a
+stable machine-readable containerd API. The containerd v2.2.1 source defines
+`images inspect` and its output formatter ([command](https://github.com/containerd/containerd/blob/v2.2.1/cmd/ctr/commands/images/inspect.go),
+[descriptor printer](https://github.com/containerd/containerd/blob/v2.2.1/pkg/display/manifest_printer.go),
+[quiet image listing](https://github.com/containerd/containerd/blob/v2.2.1/cmd/ctr/commands/images/images.go)).
+The prior target diagnosis established that `images inspect` is available,
+but this code change has not run the collector or verified the target's exact
+rendered output. The next separately authorized operator run must therefore
+confirm that it matches this strict grammar; otherwise collection stops with a
+safe diagnostic code and no evidence is finalized.
 
 ## Authority and effects
 

@@ -402,22 +402,41 @@ def _validate_socket(path: str):
         raise CollectionError("containerd_socket_inaccessible")
 
 
-def _parse_info(raw: str, reference: str):
-    try:
-        info = json.loads(raw)
-    except json.JSONDecodeError:
-        raise CollectionError("image_record_info_invalid") from None
-    if not isinstance(info, dict) or info.get("Name") != reference:
-        raise CollectionError("image_record_info_invalid")
-    target = info.get("Target")
-    if not isinstance(target, dict):
-        raise CollectionError("image_record_info_invalid")
-    if set(target) != {"mediaType", "digest", "size"}:
+_INSPECT_ROOT_DESCRIPTOR = re.compile(
+    r"^└── (?P<media_type>[A-Za-z0-9][A-Za-z0-9./+_-]*) "
+    r"@(?P<digest>sha256:[0-9a-f]{64}) \((?P<size>[1-9][0-9]*) bytes\)$"
+)
+
+
+def _parse_inspect_output(raw: str, reference: str):
+    """Parse the root descriptor from containerd 2.2.x `images inspect` output.
+
+    This is a deliberately narrow parser for the versioned display format, not
+    a general-purpose parser for arbitrary `ctr` output. A changed format fails
+    closed instead of falling back to human-readable image-size columns.
+    """
+    lines = raw.splitlines()
+    if not lines or lines[0] != reference:
+        raise CollectionError("image_record_inspect_invalid")
+    roots = [line for line in lines[1:] if line.startswith("└── ")]
+    if not roots:
+        raise CollectionError("image_record_descriptor_missing")
+    if len(roots) != 1:
+        raise CollectionError("image_record_descriptor_ambiguous")
+    match = _INSPECT_ROOT_DESCRIPTOR.fullmatch(roots[0])
+    if match is None:
         raise CollectionError("image_record_descriptor_invalid")
-    _sha256_digest(target.get("digest"), "image_record_descriptor_invalid")
-    if type(target.get("size")) is not int or target["size"] <= 0:
+    size_text = match.group("size")
+    if len(size_text) > len(str(MAX_RAW_MANIFEST_BYTES)):
         raise CollectionError("image_record_descriptor_invalid")
-    return target
+    size = int(size_text)
+    if size > MAX_RAW_MANIFEST_BYTES:
+        raise CollectionError("image_record_descriptor_invalid")
+    return {
+        "mediaType": match.group("media_type"),
+        "digest": match.group("digest"),
+        "size": size,
+    }
 
 
 def _small_blob(runner, argv, deadline: float, expected_size: int, max_size: int):
@@ -532,8 +551,10 @@ def collect_evidence(
     matches = []
     for reference in references:
         _validate_image_record_reference(reference)
-        raw_info = runner.run_text(ctr_prefix + ["images", "info", reference], deadline)
-        target = _parse_info(raw_info, reference)
+        raw_inspect = runner.run_text(
+            ctr_prefix + ["images", "inspect", reference], deadline
+        )
+        target = _parse_inspect_output(raw_inspect, reference)
         if target["digest"] == manifest_digest:
             if target["mediaType"] != approved["manifest_media_type"] or target[
                 "size"

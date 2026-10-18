@@ -20,6 +20,7 @@ from scripts.collect_stt_image_store_evidence import (
     CollectionError,
     SubprocessReader,
     _atomic_private_json,
+    _parse_inspect_output,
     collect_evidence,
 )
 from scripts.stt_deployment_profile import validate_local_artifact_identity
@@ -156,34 +157,48 @@ class FakeRunner:
     def __init__(self, fixture: Fixture):
         self.fixture = fixture
         self.references = ["speech-platform/stt-cuda:approved"]
-        self.targets = {ref: fixture.manifest_digest for ref in self.references}
         self.blobs = {
             fixture.manifest_digest: fixture.raw_manifest,
             fixture.config_digest: fixture.raw_config,
             **dict(zip(fixture.layer_digests, fixture.layers, strict=True)),
         }
         self.command_failure = None
-        self.malformed_info = False
+        self.inspect_output = {}
+        self.malformed_inspect = False
         self.stdout_rootfs = fixture.config["rootfs"]["diff_ids"]
+        for reference in self.references:
+            self.inspect_output[reference] = {
+                "mediaType": OCI_MANIFEST,
+                "digest": fixture.manifest_digest,
+                "size": len(fixture.raw_manifest),
+            }
+        self.commands = []
 
     def run_text(self, argv, deadline):
+        self.commands.append(tuple(argv))
         if self.command_failure == tuple(argv):
             raise CollectionError("command_failed")
         if "namespaces" in argv:
             return "moby\n"
         if "images" in argv and "list" in argv:
             return "".join(f"{ref}\n" for ref in self.references)
-        if "images" in argv and "info" in argv:
+        if "images" in argv and "inspect" in argv:
             reference = argv[-1]
-            if self.malformed_info:
-                return "{invalid"
-            digest = self.targets[reference]
-            target = {
-                "mediaType": OCI_MANIFEST,
-                "digest": digest,
-                "size": len(self.fixture.raw_manifest),
-            }
-            return json.dumps({"Name": reference, "Target": target, "Labels": {}})
+            if self.malformed_inspect:
+                return f"{reference}\n└── not-a-descriptor\n"
+            target = self.inspect_output[reference]
+            return (
+                f"{reference}\n"
+                "│ Created: 2026-01-01T00:00:00Z\n"
+                "│ Updated: 2026-01-01T00:00:00Z\n"
+                '│ Label "example": "sanitized"\n'
+                f"└── {target['mediaType']} @{target['digest']} "
+                f"({target['size']} bytes)\n"
+            )
+        if "images" in argv and "info" in argv:
+            # The supported target CLI reports this legacy subcommand as an
+            # unsuccessful command; the collector must not depend on it.
+            raise CollectionError("command_failed")
         if "image" in argv and "inspect" in argv:
             return (
                 f"{self.fixture.manifest_digest}|linux/amd64|"
@@ -229,6 +244,32 @@ class CollectorTests(unittest.TestCase):
         }
         options.update(overrides)
         return collect_evidence(**options)
+
+    def test_parser_accepts_observed_target_root_and_ignores_child_descriptors(self):
+        reference = (
+            "moby-dangling@sha256:"
+            "7f710bf8fca9307d387a5d61ab84361756efa9c3e18a6d60e07b9c42b60eb45c"
+        )
+        output = (
+            f"{reference}\n"
+            "└── application/vnd.oci.image.manifest.v1+json @sha256:"
+            "7f710bf8fca9307d387a5d61ab84361756efa9c3e18a6d60e07b9c42b60eb45c "
+            "(1772 bytes)\n"
+            "    ├── application/vnd.oci.image.config.v1+json @sha256:"
+            "3780e43b86717c877d82bb65c9944c8df7d497efd8446263dbd22b5092f1f406 "
+            "(10673 bytes)\n"
+        )
+
+        self.assertEqual(
+            _parse_inspect_output(output, reference),
+            {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": (
+                    "sha256:7f710bf8fca9307d387a5d61ab84361756efa9c3e18a6d60e07b9c42b60eb45c"
+                ),
+                "size": 1772,
+            },
+        )
 
     def test_valid_evidence_matches_existing_typed_contract(self):
         evidence = self._collect()
@@ -332,13 +373,41 @@ class CollectorTests(unittest.TestCase):
 
     def test_multiple_matching_image_records_fail_closed(self):
         self.runner.references.append("other/stt:second-record")
-        self.runner.targets[self.runner.references[-1]] = self.fixture.manifest_digest
+        self.runner.inspect_output[self.runner.references[-1]] = {
+            "mediaType": OCI_MANIFEST,
+            "digest": self.fixture.manifest_digest,
+            "size": len(self.fixture.raw_manifest),
+        }
         with self.assertRaisesRegex(CollectionError, "matching_image_record_ambiguous"):
             self._collect()
 
     def test_missing_matching_image_record_fails_closed(self):
-        self.runner.targets[self.runner.references[0]] = "sha256:" + "a" * 64
+        self.runner.inspect_output[self.runner.references[0]]["digest"] = (
+            "sha256:" + "a" * 64
+        )
         with self.assertRaisesRegex(CollectionError, "matching_image_record_missing"):
+            self._collect()
+
+    def test_uses_supported_inspect_instead_of_unsupported_info(self):
+        evidence = self._collect()
+        self.assertEqual(evidence["image_record_reference"], self.runner.references[0])
+        image_commands = [
+            command for command in self.runner.commands if "images" in command
+        ]
+        self.assertTrue(any("inspect" in command for command in image_commands))
+        self.assertFalse(any("info" in command for command in image_commands))
+
+    def test_descriptor_size_and_media_type_must_match_approved_manifest(self):
+        self.runner.inspect_output[self.runner.references[0]]["size"] += 1
+        with self.assertRaisesRegex(CollectionError, "image_record_manifest_mismatch"):
+            self._collect()
+
+        self.runner.inspect_output[self.runner.references[0]] = {
+            "mediaType": "application/octet-stream",
+            "digest": self.fixture.manifest_digest,
+            "size": len(self.fixture.raw_manifest),
+        }
+        with self.assertRaisesRegex(CollectionError, "image_record_manifest_mismatch"):
             self._collect()
 
     def test_unexpected_media_type_fails_closed(self):
@@ -356,11 +425,24 @@ class CollectorTests(unittest.TestCase):
                 runner=FakeRunner(fixture),
             )
 
-    def test_command_failure_and_malformed_json_fail_closed(self):
-        self.runner.malformed_info = True
-        with self.assertRaisesRegex(CollectionError, "image_record_info_invalid"):
+    def test_command_failure_and_malformed_inspect_output_fail_closed(self):
+        self.runner.malformed_inspect = True
+        with self.assertRaisesRegex(CollectionError, "image_record_descriptor_invalid"):
             self._collect()
-        self.runner.malformed_info = False
+        self.runner.malformed_inspect = False
+        self.runner.command_failure = (
+            "ctr",
+            "--address",
+            self.socket_path,
+            "--namespace",
+            "moby",
+            "images",
+            "inspect",
+            self.runner.references[0],
+        )
+        with self.assertRaisesRegex(CollectionError, "command_failed"):
+            self._collect()
+        self.runner.command_failure = None
         self.runner.command_failure = (
             "ctr",
             "--address",
@@ -372,6 +454,39 @@ class CollectorTests(unittest.TestCase):
             "--quiet",
         )
         with self.assertRaisesRegex(CollectionError, "command_failed"):
+            self._collect()
+
+    def test_missing_or_duplicate_root_descriptor_fails_closed(self):
+        reference = self.runner.references[0]
+        self.runner.inspect_output[reference] = {
+            "mediaType": OCI_MANIFEST,
+            "digest": self.fixture.manifest_digest,
+            "size": len(self.fixture.raw_manifest),
+        }
+        original_run = self.runner.run_text
+
+        def missing_descriptor(argv, deadline):
+            if "images" in argv and "inspect" in argv:
+                return f"{reference}\nimage metadata only\n"
+            return original_run(argv, deadline)
+
+        self.runner.run_text = missing_descriptor
+        with self.assertRaisesRegex(CollectionError, "image_record_descriptor_missing"):
+            self._collect()
+
+        def duplicate_descriptor(argv, deadline):
+            if "images" in argv and "inspect" in argv:
+                descriptor = (
+                    f"└── {OCI_MANIFEST} @{self.fixture.manifest_digest} "
+                    f"({len(self.fixture.raw_manifest)} bytes)"
+                )
+                return f"{reference}\n{descriptor}\n{descriptor}\n"
+            return original_run(argv, deadline)
+
+        self.runner.run_text = duplicate_descriptor
+        with self.assertRaisesRegex(
+            CollectionError, "image_record_descriptor_ambiguous"
+        ):
             self._collect()
 
     def test_missing_namespace_and_invalid_socket_fail_closed(self):
