@@ -70,10 +70,16 @@ class FakeLoadedModel:
         )
         self.behavior = behavior
         self.duration_seconds = duration_seconds
+        self._failed_once = False
 
     def transcribe(self, request, context):
         if self.behavior == "crash":
             os._exit(17)
+        if self.behavior == "resource_failure_once" and not self._failed_once:
+            self._failed_once = True
+            raise SpeechFailure(
+                FailureCode.RESOURCE_EXHAUSTED, "injected allocation failure"
+            )
         deadline = time.monotonic() + self.duration_seconds
         while time.monotonic() < deadline:
             if self.behavior != "unresponsive":

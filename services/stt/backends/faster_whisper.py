@@ -200,7 +200,12 @@ def _decode_audio(audio_bytes, options, context, modules):
     )
     if maximum_samples < 1:
         raise SpeechFailure(FailureCode.RESOURCE_EXHAUSTED)
-    output = modules.numpy.empty(maximum_samples, dtype="float32")
+    try:
+        output = modules.numpy.empty(maximum_samples, dtype="float32")
+    except MemoryError as exc:
+        raise SpeechFailure(
+            FailureCode.RESOURCE_EXHAUSTED, "decoded audio allocation failed"
+        ) from exc
     written = 0
     try:
         with modules.av.open(io.BytesIO(audio_bytes), mode="r") as container:

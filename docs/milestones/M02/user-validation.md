@@ -1,4 +1,4 @@
-# M02 user validation — M02-A/B/C.2b bounded smoke PASS
+# M02 user validation — M02-A/B/C.2b/C.3/C.4 PASS for accepted scopes
 
 User validation and explicit closeout approvals for M02-A and M02-B were received 2026-10-17. The user formally accepted M02-C.2b as PASS for the bounded CUDA smoke-test scope on 2026-10-17. Overall M02 remains incomplete.
 
@@ -64,3 +64,28 @@ OBSERVED from the accepted target evidence:
 OBSERVED: Attempt `cuda-http-20261017-01` failed in the HTTP integration stage but did not persist status/code. Attempt `cuda-http-20261017-02` recorded HTTP 415 / `unsupported_media_type`; the extensionless mounted path resulted in an `application/octet-stream` part, which the production handler rejected before inference. Neither attempt established CUDA inference through HTTP. Evidence remains in operator-private staging outside Git.
 
 LIMITATIONS / NOT ESTABLISHED: no instrumented peak VRAM, concurrency or sustained-load validation, production latency/throughput claim, persistent deployment, or Ollama/Dify coexistence under active inference load. The acceptance is limited to the approved one-request C.3 scope. No shared service was modified. Overall M02 remains incomplete.
+
+## M02-C.4 target-model experiment acceptance — PASS for bounded scope
+
+The user accepted Phase B as PASS for one bounded `large-v3-turbo` CUDA HTTP request and authorized Phase C for exactly three sequential requests through one production worker. The user then authorized C.4 closeout and C.5 readiness planning on 2026-10-18. C.4 is recorded PASS only for artifact integrity, the bounded Phase B/C HTTP executions, sampled observations, and confirmed cleanup.
+
+OBSERVED in the retained target evidence:
+
+- Approved model `dropbox-dash/faster-whisper-large-v3-turbo`, immutable revision `0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf`; canonical manifest `86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6`.
+- Approved image `sha256:b25af1309e1e51e8ce72c227028727cb26014fef512b716fbd11cf8f9fb16540`, CUDA dependency lock SHA-256 `68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14`, explicit CUDA device 0 / float16, no CPU fallback.
+- Three sequential requests each returned HTTP 200, language `ru`, six segments and valid timestamp bounds. Readiness was 8.664 s; full HTTP request durations were 1.180 s, 0.702 s and 0.784 s for 21.205333 s audio, with RTF 0.055663, 0.033087 and 0.036972.
+- Twelve one-second resource samples reported a device-wide sampled maximum of 2,795,962,368 bytes used GPU memory. cgroup memory high-water was 1,775,648,768 bytes. Child NVML memory was not visible and descendant RSS aggregated to zero, so child-specific memory attribution is not established.
+- Shutdown and child exit/reaping were confirmed; sampler stopped; container exited 0 and exact inspection confirmed it was removed. Original model directory modes `2700`/`2700` were restored after temporary `2710`/`2750`. Ollama and Dify checks were satisfactory before and after.
+- Sanitized evidence is preserved outside Git at `/home/master/speech-platform-staging/M02/M02-C/M02-C.4/attempts/large-v3-turbo-http-phase-c-20261018-01/`. Phase B evidence is preserved under the same C.4 staging root at `attempts/large-v3-turbo-http-20261018-03/`; the first artifact-permission failure and separate permission diagnostic remain under `attempts/large-v3-turbo-http-20261018-01/` and `attempts/c4-artifact-permission-20261018-01/`.
+
+Historical failure records remain preserved. Phase B's first attempt failed before model loading because the non-root container could not enumerate the artifact directory with its original permissions; the separate non-GPU diagnostic confirmed that cause, and the successful run used a bounded temporary permission change with exact restoration. Phase C had two host-wrapper preflight failures before container launch (staged import path ordering, then omitted environment in dry-run subprocess); neither changed model permissions or started a container. The corrected wrapper performed one successful Phase C attempt.
+
+NOT ESTABLISHED: concurrency capacity, sustained-load performance, exact peak VRAM, child-specific GPU/RSS, active Ollama/Dify GPU workload coexistence, forced CUDA-child cleanup under real GPU failure, and persistent deployment. Shared-service pre/post health does not prove behavior under simultaneous active GPU load. Overall M02 remains INCOMPLETE.
+
+## M02-C.5A offline fault-injection validation — PASS
+
+The user accepted C.5A as PASS for deterministic offline fault-injection coverage. The accepted evidence includes 40 focused tests, 105 repository script tests, 60 STT tests, passing governance checks, the decoded-buffer `MemoryError` mapping correction, and proof that CUDA construction failure does not fall back to CPU. This acceptance does not establish real CUDA fault cleanup or GPU OOM recovery. Overall M02 remains INCOMPLETE; overall C.5 became PASS after C.5B acceptance below.
+
+## M02-C.5B recovery/operator procedure — PASS for accepted offline scope
+
+The user accepted C.5B on 2026-10-18 as PASS for the documented deterministic offline recovery-procedure scope. Evidence is recorded in [implementation](implementation.md) and [verification](verification.md). This does not establish target-host recovery, real CUDA fault cleanup, GPU OOM recovery, active workload coexistence or deployment. C.5 and overall M02 remain bounded/incomplete respectively.

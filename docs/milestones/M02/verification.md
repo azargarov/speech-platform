@@ -1,6 +1,6 @@
 # M02 verification
 
-Status: M02-A remediation locally verified and user-accepted as PASS on 2026-10-17. Overall M02 remains incomplete.
+Status: M02-A/B/C.2b/C.3 and bounded M02-C.4/C.5 evidence is PASS for accepted scopes. C.5A and C.5B are accepted for deterministic offline fault handling and operator-procedure scope. Overall M02 remains INCOMPLETE; C.6 is planning only.
 
 ## M02-A audit remediation verification
 
@@ -145,3 +145,113 @@ NOT ESTABLISHED at that point: the corrected multipart request on the target, re
 INTERPRETATION: this is user-accepted evidence for one isolated CUDA transcription through the production aiohttp application and adapter. It does not establish general performance, capacity, persistent deployment, or active-load coexistence.
 
 NOT ESTABLISHED: instrumented peak VRAM, concurrency, sustained-load behavior, production latency/throughput, persistent deployment, and coexistence under active Ollama/Dify inference load. Overall M02 remains incomplete.
+
+## M02-C.4A target-model provisioning and offline integrity — OBSERVED 2026-10-17
+
+OBSERVED on the workstation, using the approved immutable source identity:
+
+- Repository: `dropbox-dash/faster-whisper-large-v3-turbo`; revision: `0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf`. Hugging Face Hub metadata resolved the requested repository and exact revision before transfer and reported MIT licensing. No mutable `main` reference was used for provisioning.
+- Private artifact root: `private/models/faster-whisper-large-v3-turbo/`. Manifest: `private/models/faster-whisper-large-v3-turbo-manifest.yaml`. Both paths are ignored by Git.
+- Manifest SHA-256 (canonical project digest): `86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6`.
+- Artifact format: `ctranslate2-whisper`. The manifest records the upstream repository, immutable revision, family, conversion format, source conversion metadata, normalized relative paths, byte sizes and SHA-256 for each required file. The upstream card does not state a converter version.
+- `config.json`: 2,263 bytes; SHA-256 `b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e`.
+- `model.bin`: 1,617,884,929 bytes; SHA-256 `e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da`, matching the approved published digest.
+- `preprocessor_config.json`: 340 bytes; SHA-256 `7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711`.
+- `tokenizer.json`: 2,710,337 bytes; SHA-256 `297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd`.
+- `vocabulary.json`: 1,068,114 bytes; SHA-256 `c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1`.
+- Total artifact size: 1,621,665,983 bytes. The production `services.stt.artifacts.verify_artifact` verifier passed against the generated manifest and exact five-file artifact set. `git check-ignore -v` confirmed both the model root and manifest are ignored.
+
+INTERPRETATION: this establishes local provenance and byte integrity for the provisioned CTranslate2 artifact. It does not establish successful model loading, CUDA compatibility, inference, resource use, or target-host availability.
+
+NOT ESTABLISHED at the time of C.4A provisioning: model load or transcription behavior, GPU memory requirements, performance, transcription quality, and deployment compatibility. No model was loaded; no GPU, Docker, target host, or shared service was accessed. The later C.4B harness work was then offline-only; C.4 had not yet passed. Later Phase B/C target evidence is recorded below.
+
+## M02-C.4B offline measurement harness — OBSERVED 2026-10-17
+
+OBSERVED in the workstation repository:
+
+- `.venv/bin/python -m unittest scripts.test_stt_cuda_http_smoke scripts.test_stt_resource_sampling -v` — PASS; 25 tests passed. Coverage includes the one-request default, validated sequential requests and ordering, count/deadline/sample-interval bounds, request timing and RTF, audio-duration metadata, sanitized partial reports, sampled peak aggregation, cgroup/RSS separation, unavailable measurement sources, and one bounded sampler thread.
+- `make governance-check PYTHON=.venv/bin/python` — PASS; governance structure validation and 2 tests passed.
+- `make verify PYTHON=.venv/bin/python` — PASS; Go vet/race tests/build, Ruff, configuration validation, Compose static checks, 97 repository script tests, 56 STT tests, governance checks, dependency-lock checks and Python AST parsing passed.
+- `git diff --check` — PASS.
+- `make -n stt-cuda-http-integration` with synthetic experiment variables — PASS as a dry-run inspection. It confirmed the request count, explicit maximum, overall deadline and optional sample interval reach the maintained in-container harness. The target was not executed.
+- No target host, Docker container, model load, audio decode, CUDA initialization, inference, or Ollama/Dify service was accessed.
+
+INTERPRETATION: offline tests establish deterministic harness logic and allowlisted report behavior. The C.3 one-request default and existing production HTTP route remain in use. The verifier does not establish that NVML, `/proc` process attribution, or cgroup memory files will be available in a future target container; those sources are reported as missing when unavailable.
+
+NOT ESTABLISHED at the time of the C.4B offline verification: large-v3-turbo loading/transcription, CUDA HTTP operation for that model, cold/warm performance, request RTF, memory use, instrumented peak GPU memory, sustained behavior, resource thresholds, or capacity. Later target experiments are recorded below.
+
+## M02-C.4 Phase A — target artifact staging — PASS for integrity scope
+
+OBSERVED: the approved model identity was `dropbox-dash/faster-whisper-large-v3-turbo`, immutable revision `0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf`, CTranslate2 faster-whisper format. Canonical manifest SHA-256 was `86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6`; `model.bin` SHA-256 matched the approved value `e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da`. The five-file artifact inventory totaled 1,621,665,983 bytes. The production artifact verifier passed on the staged release. No model was loaded and no inference was performed during Phase A.
+
+INTERPRETATION: Phase A establishes verified artifact staging for this immutable release. It does not establish CUDA compatibility, model behavior, performance or resource use.
+
+## M02-C.4 Phase B — one-request large-model CUDA HTTP validation — PASS for bounded scope
+
+OBSERVED: approved image `sha256:b25af1309e1e51e8ce72c227028727cb26014fef512b716fbd11cf8f9fb16540` (`linux/amd64`) and CUDA lock digest `68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14` were used. The successful attempt used the approved model revision and manifest, explicit CUDA device 0 / float16 and no CPU fallback. The HTTP response was 200, language `ru`, six segments with valid timestamp bounds; reported model load was 9.163265 s and request duration was 1.262039 s. Shutdown and child exit were confirmed; launcher exit was 0 and the container was removed. Evidence is preserved outside Git at `/home/master/speech-platform-staging/M02/M02-C/M02-C.4/attempts/large-v3-turbo-http-20261018-03/`.
+
+Historical Phase B failure: attempt `large-v3-turbo-http-20261018-01` passed startup/configuration checks but failed artifact validation before model load because the non-root process lacked group read/execute permission to enumerate the artifact directory. The separate non-GPU diagnostic `c4-artifact-permission-20261018-01` passed the production verifier after the minimal temporary directory permission adjustment. The successful retry used temporary mounted model-root/artifact modes `2710`/`2750`, then restored original `2700`/`2700`. No inference occurred in the failed attempt.
+
+## M02-C.4 Phase C — three sequential large-model CUDA HTTP measurements — PASS for bounded scope
+
+OBSERVED on 2026-10-18: one container ran exactly three sequential requests through the production STT HTTP application and the same loaded worker. Image, lock, model revision, canonical manifest and audio checksum validation passed. Effective limits were 4 CPUs, 12 GiB memory, 128 PIDs, a 180-second overall deadline, one-second sampling and a 14,336 MiB pre-launch free-VRAM gate. Preflight measured GPU 0 at 14,909 MiB free of 15,360 MiB with no compute process, and host available RAM at 61,996,523,520 bytes. Ollama HTTP returned 200 and Dify proxy/core health checks passed before the run.
+
+- Model/runtime: `dropbox-dash/faster-whisper-large-v3-turbo`, revision `0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf`; manifest `86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6`; faster-whisper 1.2.1, CTranslate2 4.8.3, PyAV 19.0.1, CUDA libraries per the approved lock (cuBLAS 12.9.2.10, cuDNN 9.27.0.42, NVRTC 12.9.86). Explicit `cuda`, device 0, `float16`; `cpu_fallback: false`.
+- Worker readiness took 8.663653 s from process startup. This process-cold measure is start-to-readiness, not an isolated model-loader timer. All three requests returned HTTP 200, detected `ru`, produced six segments, and passed timestamp-bound checks for the 21.205333 s fixture.
+- Request 1: 1.180356 s, RTF 0.055663. Request 2: 0.701624 s, RTF 0.033087. Request 3: 0.783993 s, RTF 0.036972. The worker contract does not expose inference-only duration; reported values are full HTTP request durations.
+- Resource sampling: 12 samples at one-second interval. Sampled maximum device-wide used GPU memory was 2,795,962,368 bytes; sampled device-free memory is not a reservation. cgroup memory high-water was 1,775,648,768 bytes from one observation. Sampled process-tree/harness RSS maximum was 104,189,952 bytes. NVML process memory was unavailable (`process_not_visible`) and descendant RSS aggregated to zero; child-specific memory attribution is therefore NOT ESTABLISHED. No instrumented peak VRAM measurement was taken.
+- Shutdown report: `completed_and_confirmed`, child exit confirmed, worker no longer ready; sampler stopped. Launcher exit 0 and exact-container inspection confirmed removal. Temporary directory modes were restored exactly to the original `2700`/`2700`. Postflight GPU free memory was 14,909 MiB with no compute process. Ollama returned HTTP 200; Dify proxy returned 307 and core API/database/Redis/sandbox health remained satisfactory.
+- Evidence remains outside Git at `/home/master/speech-platform-staging/M02/M02-C/M02-C.4/attempts/large-v3-turbo-http-phase-c-20261018-01/`: `launcher-report.json`, `harness/harness-report.json`, `harness/shutdown-report.json`, `operator-postflight.json`, and sanitized stdout/stderr classifications.
+
+Historical Phase C preflight-only failures: one wrapper began Python imports before changing to the staged source root (`ModuleNotFoundError`); a later dry-run check omitted the configured environment from its subprocess and falsely rejected the effective command. Neither changed permissions or launched a container. The wrapper was corrected and preflight rerun before the single successful Phase C experiment.
+
+INTERPRETATION: C.4 PASS covers artifact integrity, one bounded CUDA HTTP request, three sequential requests against one worker, response metadata validation, sampled resource observations and confirmed normal cleanup under the recorded configuration. The three requests are too few to establish capacity or stable performance thresholds.
+
+NOT ESTABLISHED: concurrency capacity, sustained-load performance, exact peak VRAM, child-specific GPU/RSS, transcription-only latency, active GPU workload coexistence with Ollama/Dify, forced CUDA-child cleanup, production latency/throughput and persistent deployment. Shared-service health before/after does not establish behavior under simultaneous active GPU workloads. Overall M02 remains incomplete.
+
+## M02-C.5A offline fault-injection verification — OBSERVED
+
+- Focused command `.venv/bin/python -m unittest services.stt.tests.test_faster_whisper services.stt.tests.test_runtime services.stt.tests.test_http -v` — PASS; 40 tests passed after the C.5A changes.
+- `make governance-check PYTHON=.venv/bin/python` — PASS; governance structural validation and 2 tests passed.
+- `make verify PYTHON=.venv/bin/python` — PASS; Ruff, formatting check, Go vet/race tests/build, configuration validation, rendered Compose and static topology checks, 105 repository script tests, 60 STT tests, governance and dependency-lock checks passed. Compose was rendered only; no containers were started.
+- `git diff --check` — PASS.
+- No target host, Docker daemon, model artifact, CUDA runtime, GPU, inference, or shared Ollama/Dify service was accessed.
+
+The new tests directly cover explicit CUDA construction failure without CPU fallback; bounded decoded-audio allocation failure as `resource_exhausted`; safe HTTP 503 mapping; admission release and readiness after a recoverable resource failure followed by a successful request; and exact `model_load_failed` classification for an unresponsive load timeout. Existing named tests continue to cover overload, disconnect/cancellation, request deadlines, child crash, bounded forced termination, no replacement under unconfirmed cleanup, readiness fault latching, resource ownership, and shutdown diagnostic classifications.
+
+INTERPRETATION: deterministic fault injection verifies these software contracts and application-visible outcomes. It does not establish native CUDA driver behavior, actual cgroup OOM handling, GPU memory release after forced termination, or shared-GPU behavior under simultaneous active load.
+
+NOT ESTABLISHED: real CUDA failure cleanup or OOM behavior, persistent deployment, and active GPU workload coexistence. No target experiment was justified by the offline gaps. C.5A was accepted for its deterministic offline scope; overall C.5 PASS was recorded after the separate C.5B user acceptance below.
+
+## M02-C.5B offline recovery-procedure review — OBSERVED
+
+- Reviewed supervisor, application, lifecycle, HTTP readiness, diagnostic shutdown-report and launcher exact-container behavior. The documentation-only update records those current semantics and points out which deployment procedures cannot yet be exact because persistent C.6 deployment is not established.
+- Focused suites and fakes verify the observable application states: `test_child_crash_and_load_failure_are_latched`, `test_unresponsive_child_is_terminated_reaped_and_fault_latched`, `test_cleanup_unconfirmed_is_bounded_and_blocks_replacement`, `test_unconfirmed_cleanup_keeps_admission_bytes_and_readiness_latched`, `test_shutdown_during_fault_is_repeatable_and_keeps_accounting_nonnegative`, `test_http_health_readiness_and_metrics_follow_lifecycle`, `test_health_and_readiness_are_distinct`, `test_shutdown_report_distinguishes_unconfirmed_and_failed_or_timed_out`, and launcher exact-container timeout tests. The review found one gap: an unconfirmed child exit during model-load timeout was surfaced as generic `not_ready`; startup now preserves `cleanup_unconfirmed`. Added a deterministic process-control regression test and HTTP readiness assertion for the exact code.
+- No Docker, target host, CUDA, inference, process killing, or shared-service access occurred for this review.
+- Focused command `.venv/bin/python -m unittest services.stt.tests.test_runtime services.stt.tests.test_http scripts.test_stt_cuda_http_smoke scripts.test_stt_cuda_launcher -v` — PASS; 73 tests passed, including the added startup-timeout cleanup-state and readiness-code regressions.
+- `make verify PYTHON=.venv/bin/python` — PASS; included Go vet/race tests/build, Ruff/format checks, configuration and Compose checks, 105 repository script tests, 61 STT tests, governance validation and dependency-lock checks.
+- `make governance-check PYTHON=.venv/bin/python` — PASS; structural validation and 2 tests passed. `git diff --check` — PASS.
+
+INTERPRETATION: deterministic tests now cover the application’s fault latch, readiness, no-replacement and shutdown-report contracts, including the corrected startup cleanup state. Documentation requires exact identity and evidence before operator actions and defers actual persistent restart/rollback commands to C.6.
+
+NOT ESTABLISHED: target-host recovery, Docker behavior for a persistent worker, real GPU process visibility/context release, real CUDA fault cleanup, GPU OOM recovery, or active Ollama/Dify workload coexistence. These are not required for C.5 closure; intentional OOM or shared GPU exhaustion is excluded. User accepted C.5A and C.5B as PASS on 2026-10-18 for the documented offline scope.
+
+## M02-C.6 deployment readiness — static review only
+
+OBSERVED: Compose topology has Gateway attached to the two private internal networks, STT and TTS isolated from each other, no worker host ports, and a loopback-bound Gateway port. Workers use UID/GID 65532, read-only roots, dropped capabilities and no-new-privileges. STT health/readiness routes exist, but Compose does not consume them. The CUDA overlay uses `gpus: all`; STT's base limits are 256 MiB and 1 CPU; no explicit restart policy exists. CUDA model mounts are read-only, but permanent artifact permissions for the service identity are not validated. CUDA Dockerfiles use hash-locked Python dependencies atop a mutable image tag.
+
+INTERPRETATION: C.6A needs a validated versioned deployment profile shared by config validation and Compose selection, GPU 0 only, permanent least-privilege model read access, configurable reviewed resource limits, a digest-pinned platform image, Compose liveness healthcheck, explicit project identity, and static/rollback checks. C.6B must separately validate target startup, artifact/device access, readiness and bounded shutdown. C.6C must separately validate a private-path request and exact project-scoped rollback. No C.6 implementation or execution occurred in this review.
+
+NOT ESTABLISHED: real Compose GPU-0 exposure, production image build identity, persistent model load/readiness, deployed resource limits, restart behavior, actual shutdown/GPU release, rollback behavior, and runtime isolation from shared GPU workloads. Existing C.4 pre/post health checks do not establish simultaneous Ollama/Dify workload coexistence.
+
+## M02-C.5 closeout verification — OBSERVED
+
+- User acceptance on 2026-10-18 closed C.5A and C.5B as PASS for their deterministic offline scope.
+- `make governance-check PYTHON=.venv/bin/python` — PASS; seven skill structures/references validated and 2 governance tests passed.
+- `make verify PYTHON=.venv/bin/python` — PASS; Go vet, race tests and build; Ruff checks and formatting; configuration checks; rendered Compose/static checks; 105 repository script tests; 61 STT tests; governance and lock checks passed. Compose was rendered only; no containers were started.
+- `git diff --check` — PASS.
+- C.6 was a static configuration/documentation review only; no Docker, target host, GPU, inference or service was accessed.
+
+INTERPRETATION: C.5 is closed only for accepted offline fault handling and operator-procedure scope. C.6 findings are planning evidence, not deployment validation.
+
+NOT ESTABLISHED: real CUDA fault cleanup, GPU OOM recovery, active GPU workload coexistence, persistent deployment, production resource envelope, rollback, or deployed GPU selection/readiness.

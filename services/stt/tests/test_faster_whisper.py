@@ -184,6 +184,52 @@ class AdapterContractTests(unittest.TestCase):
                 )
         self.assertEqual(caught.exception.code, FailureCode.DEVICE_UNAVAILABLE)
 
+    def test_cuda_initialization_failure_is_typed_without_cpu_fallback(self):
+        calls = []
+
+        def construct(_path, **kwargs):
+            calls.append(kwargs["device"])
+            raise RuntimeError("CUDA initialization failed")
+
+        modules = SimpleNamespace(
+            ctranslate2=SimpleNamespace(
+                get_supported_compute_types=lambda device, _index=0: {"float16"}
+                if device == "cuda"
+                else {"int8"},
+                get_cuda_device_count=lambda: 1,
+            ),
+            faster_whisper=SimpleNamespace(WhisperModel=construct),
+        )
+        backend = FasterWhisperBackend(options(), modules=modules)
+        identity = ModelIdentity("whisper", "a" * 40)
+        selection = ModelSelection(
+            "small", identity, "small", ArtifactIdentity("b" * 64, "ct2")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tokenizer.json").write_text("{}")
+            with self.assertRaises(SpeechFailure) as caught:
+                backend.load(
+                    selection,
+                    VerifiedArtifact(selection.artifact_identity, root),
+                    DeviceCapabilities("cuda", "0"),
+                    OperationContext(),
+                )
+        self.assertEqual(caught.exception.code, FailureCode.MODEL_LOAD_FAILED)
+        self.assertEqual(calls, ["cuda"])
+
+    def test_decoded_audio_allocation_failure_is_resource_exhausted(self):
+        class FailingNumpy:
+            @staticmethod
+            def empty(*_args, **_kwargs):
+                raise MemoryError("private allocator diagnostic")
+
+        modules = SimpleNamespace(numpy=FailingNumpy())
+        with self.assertRaises(SpeechFailure) as caught:
+            _decode_audio(b"audio", options(), OperationContext(), modules)
+        self.assertEqual(caught.exception.code, FailureCode.RESOURCE_EXHAUSTED)
+        self.assertNotIn("private allocator", caught.exception.safe_message)
+
     def test_transcription_maps_language_timestamps_and_fatal_native_errors(self):
         class FakeModel:
             def __init__(self, *, fail=False):

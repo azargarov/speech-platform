@@ -91,10 +91,14 @@ class STTApplication:
             self.startup_failure = exc
             self.lifecycle.set_model(ModelState.FAULTED)
             self.runner.shutdown(self.config.lifecycle.process_exit_timeout_seconds)
+            if self.runner.cleanup_unconfirmed:
+                self.lifecycle.set_model(ModelState.CLEANUP_UNCONFIRMED)
             return False
         except Exception:
             self.lifecycle.set_model(ModelState.FAULTED)
             self.runner.shutdown(self.config.lifecycle.process_exit_timeout_seconds)
+            if self.runner.cleanup_unconfirmed:
+                self.lifecycle.set_model(ModelState.CLEANUP_UNCONFIRMED)
             raise
 
     def acquire_upload(self):

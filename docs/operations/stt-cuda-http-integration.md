@@ -4,9 +4,13 @@ Status: M02-C.3 was accepted PASS for the bounded one-request CUDA HTTP integrat
 
 ## What the check exercises
 
-`scripts/stt_cuda_http_smoke.py` starts the production `create_http_app()` in an aiohttp `TestServer`, waits for health/readiness, sends exactly one multipart request through `/internal/v1/transcriptions`, validates the response and closes the test client. The route uses the existing application, admission controller, inference supervisor and faster-whisper adapter. The server binds only the test server's loopback socket; it is not a persistent worker or a public endpoint.
+`scripts/stt_cuda_http_smoke.py` starts the production `create_http_app()` in an aiohttp `TestServer`, waits for health/readiness, sends one multipart request by default through `/internal/v1/transcriptions`, validates the response and closes the test client. Its measurement mode can send a configured bounded sequence through that same worker instance. Each complete response is schema/timestamp validated before the next request starts. The route uses the existing application, admission controller, inference supervisor and faster-whisper adapter. The server binds only the test server's loopback socket; it is not a persistent worker or a public endpoint.
 
-The harness reuses strict application/deployment loaders, the worker configuration loader, the CUDA profile validator, the installed-lock check, the artifact manifest verifier, the shared audio checksum verifier, and the existing atomic sanitized report runner. It validates the response text in memory but reports no transcript or segment text. Reports contain identity digests, selected config values, status codes, allowlisted public error codes, fixed failure categories and request stages, timings, language, segment count, timestamp validation and shutdown state. Error response bodies and messages are never persisted. A separate `shutdown-report.json` records whether TestClient shutdown completed with child exit and worker readiness confirmed, was attempted but remains unconfirmed, or failed/exceeded its configured deadline. Container removal alone does not establish child cleanup.
+The harness reuses strict application/deployment loaders, the worker configuration loader, the CUDA profile validator, the installed-lock check, the artifact manifest verifier, the shared audio checksum verifier, and the existing atomic sanitized report runner. It validates each response text in memory but reports no transcript or segment text. Reports contain identity digests, selected config values, statuses, allowlisted public error codes, fixed failure categories, per-request duration, fixture audio duration, request-level real-time factor, response language/segment metadata, resource summaries and shutdown state. The process-cold model-load measurement is the interval from test-server startup until readiness; it includes harness/server setup and is not a model-loader-only timer. The first and subsequent request durations cover full HTTP round trips. The production worker contract does not expose inference-only timing, so that field is null with an explicit reason code. Legacy C.3 fields `model_load_seconds` and `transcription_seconds` remain as aliases; the latter is explicitly tagged as the first request's full HTTP duration. Error response bodies and messages are never persisted. A separate `shutdown-report.json` records whether TestClient shutdown completed with child exit and worker readiness confirmed, was attempted but remains unconfirmed, or failed/exceeded its configured deadline. Container removal alone does not establish child cleanup.
+
+Optional resource sampling uses one bounded daemon thread and constant-space aggregation. NVML records device memory and, when available and visible in the container PID namespace, memory attributed to worker-descendant PIDs. `/proc` RSS sampling follows the harness process and its descendants. The sampler performs observations and cgroup v2 `memory.peak` or v1 high-water reads on that same thread. Shutdown waits only for the remaining experiment deadline; if the thread has not exited, the report says `stop_unconfirmed` and retains the samples already collected. It never performs a synchronous final NVML or RSS query after the wait. GPU and RSS maxima are labelled `sampled_peak`; periodic samples may miss short peaks. The cgroup high-water value is a cgroup measurement, not process RSS. Reports include interval, sample counts and fixed missing-data codes. Resource sampling is disabled unless its interval is configured; the default one-request C.3 behavior remains intact.
+
+The overall deadline is established before diagnostic stages begin and is also enforced by the host launcher's timeout around the Docker command. Worker startup and sequential requests share one absolute deadline; each request is limited by both the configured per-request timeout and the remaining shared work budget. A portion of that budget is reserved for bounded worker/client shutdown and sampler termination. The launcher's outer timeout includes in-container shutdown and diagnostic report writes. A timed-out launcher process does not establish that Docker removed the daemon-side container.
 
 ## Configuration sources and precedence
 
@@ -16,7 +20,7 @@ There is no additional C.3 YAML schema. Values have one source each:
 2. **Deployment config (schema v2)** owns artifact filesystem references, CUDA device index and minimum free-memory gate. The existing CUDA profile validator rejects a missing or below-approved gate; the value used by the host preflight and worker is read from this config.
 3. **Worker config** supplies the already validated readiness poll interval. The in-process test server does not bind the configured service port.
 4. **Approved artifact metadata** supplies the expected tiny-model revision/manifest, CUDA lock digest, image digest/platform and audio SHA-256. The model and lock identities are compared with strict config/source files; the audio path is only a local file reference, and host/container checks use the same checksum metadata.
-5. **Experiment command settings** supply the approved identities, report root, attempt identity, shared group, overall deadline, termination grace and container CPU/RAM/PID limits. Docker flags are parsed and validated by the maintained launcher. No environment variable can override application or deployment settings.
+5. **Experiment command settings** supply the approved identities, report root, attempt identity, shared group, overall deadline, termination grace and container CPU/RAM/PID limits. `STT_CUDA_HTTP_REQUEST_COUNT` selects the number of sequential requests (default `1`); `STT_CUDA_HTTP_MAX_REQUEST_COUNT` is the explicit bound (default `1`). Both are positive integers, the count cannot exceed the configured bound, and the report safety limit caps the bound at 1,000 requests. The independent overall deadline bounds execution time. `STT_CUDA_RESOURCE_SAMPLE_INTERVAL_SECONDS` enables sampling; values below 0.1 seconds or above the overall deadline are rejected. The deadline bounds sample count. Docker flags are parsed and validated by the maintained launcher. No environment variable can override application or deployment settings.
 
 The launcher compares the Docker GPU selector with the validated deployment GPU index. The CUDA HTTP profile also checks that deployment artifact/manifest paths are under the read-only `/models` mount and that the app config names the approved model revision and manifest. It requires an immutable image ID, matching platform, `--pull=never`, `--network=none`, no published ports, read-only root and input mounts, a non-root identity, and exactly one writable `/results` bind mount. It also requires explicit CPU, memory and PID limits. The profile rejects CPU/auto mode, a non-faster-whisper backend, a non-float16 CUDA setting, an unapproved device index, a changed model/lock identity or an insufficient configured memory gate. Missing or malformed settings fail before Docker starts.
 
@@ -81,13 +85,41 @@ docker run --rm --network none --platform linux/amd64 --pull never --read-only
   --memory 8589934592 --cpus 4 --pids-limit 128
 ```
 
-There are no published ports. The image is the approved immutable image; the harness invokes the current read-only repository source and the approved local model/audio artifacts. Runtime model downloads are disabled. A single HTTP request is sent; no warm-up or retry occurs. `make verify` does not run this target or start containers.
+There are no published ports. The image is the approved immutable image; the harness invokes the current read-only repository source and the approved local model/audio artifacts. Runtime model downloads are disabled. One HTTP request is sent by default; no warm-up or retry occurs. For a separately authorized measurement run, set both request-count variables, for example `STT_CUDA_HTTP_REQUEST_COUNT=3 STT_CUDA_HTTP_MAX_REQUEST_COUNT=3`, and optionally `STT_CUDA_RESOURCE_SAMPLE_INTERVAL_SECONDS=1`. Requests remain sequential in one worker process and model instance. `make verify` does not run this target or start containers.
 
 ## Evidence and cleanup
 
 The host launcher report and captured-output classifications remain in the attempt directory. The container harness report is atomically written under that attempt's `/results` directory. Neither report stores audio, transcript text, raw stderr or private absolute paths. The launcher enforces bounded output capture and does not delete attempt evidence when the container exits. Docker `--rm` removes only the one test container.
 
 Review stage outcomes for report-mount verification, dependency inventory, strict configuration parsing, CUDA profile validation, artifact verification, HTTP worker integration, output validation and shutdown. Confirm health is alive, readiness becomes ready, the request succeeds, the supervised child is confirmed stopped, and the worker is no longer ready after close. Review `shutdown-report.json` even when HTTP integration fails; it separately records close completion, child-exit confirmation, readiness state and a fixed failure category. Recheck GPU state and Ollama/Dify health after the run. A successful TestServer request validates the production HTTP path in-container, not a listening service on the host or a production Compose deployment.
+
+If the launcher report indicates a timeout and `exact_container_postflight_required: true`, inspect and clean up only the recorded container ID. Read the 64-character ID from that attempt's `launcher-report.json`; do not use `docker ps -aq`, `docker rm -f` without an ID, or any prune command. The following bounded sequence uses that exact ID:
+
+```sh
+CID="$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1]))["container"]["id"]; print(v if isinstance(v,str) and len(v)==64 and all(c in "0123456789abcdef" for c in v) else "")' "$ATTEMPT_DIR/launcher-report.json")"
+test -n "$CID" || { echo "no verified container ID; stop for operator investigation" >&2; exit 1; }
+if docker container inspect "$CID" >/dev/null 2>&1; then
+  RUNNING="$(docker container inspect --format '{{.State.Running}}' "$CID")"
+  if [ "$RUNNING" = true ]; then
+    timeout 10s docker stop --time 5 "$CID"
+  fi
+  if docker container inspect "$CID" >/dev/null 2>&1; then
+    RUNNING="$(docker container inspect --format '{{.State.Running}}' "$CID")"
+    if [ "$RUNNING" = true ]; then
+      timeout 10s docker kill "$CID"
+    fi
+    RUNNING="$(docker container inspect --format '{{.State.Running}}' "$CID")"
+    if [ "$RUNNING" = false ]; then
+      docker container rm "$CID"
+    else
+      echo "container exit remains unconfirmed; stop for operator investigation" >&2
+      exit 1
+    fi
+  fi
+fi
+```
+
+If inspection shows the container is already absent, record that observed state. If stop/kill does not confirm exit, preserve the attempt evidence and stop; do not broaden cleanup. A `stop_unconfirmed` sampler report likewise means sampler-thread termination was not observed before its deadline. Container removal may end that daemon thread, but it is not evidence that the sampler stopped cleanly or that GPU memory was released before container exit.
 
 ## Accepted run evidence
 
@@ -105,3 +137,31 @@ git diff --check
 ```
 
 These tests use fake applications and configuration objects. They do not load a model, access a GPU, start Docker or establish runtime CUDA behavior.
+
+## STT worker fault and recovery procedure
+
+This section records the current application recovery contract and a conservative operator procedure. It is not a deployment recipe: persistent STT deployment and its exact Compose project/service identifiers are not established until the separately gated C.6 work. Do not run recovery commands against the C.3/C.4 diagnostic containers except during a separately authorized attempt.
+
+### Observed recovery semantics
+
+- **Unexpected inference-child exit or fatal backend failure:** the supervisor latches `faulted`, confirms/reaps the child when possible, and the application latches the model as `faulted`. `/healthz` can remain 200 while the worker process is serving; `/readyz` is 503 and transcription is rejected with the existing safe `not_ready` response. The child is not automatically restarted or reused.
+- **Model-load failure or timeout:** startup readiness is not reached. A timed-out child is terminated/reaped within the configured bounds; if exit is confirmed, startup remains failed/not ready. If exit is unconfirmed, the application exposes `/readyz` as 503 `cleanup_unconfirmed` and rejects work. There is no automatic reload loop or CPU fallback.
+- **Request deadline or client cancellation:** cancellation is first cooperative. When the child returns cooperatively, the worker can remain ready. If execution does not stop within the configured grace, the supervisor escalates termination and latches the worker/model fault. The active slot and retained audio stay owned until child exit is confirmed.
+- **`cleanup_unconfirmed`:** `/readyz` returns 503 with the fixed `cleanup_unconfirmed` code. Admission remains fault-latched, readiness does not automatically recover, and no replacement child is started. A bounded background reaper may later observe exit, but it does not reset application lifecycle/admission state. Operator action and a controlled worker restart are required after process exit is independently confirmed.
+- **Worker shutdown:** normal close requests cooperative shutdown then uses bounded termination escalation. The supervisor's child state and lifecycle determine whether close is confirmed, faulted, or cleanup-unconfirmed. Diagnostic `shutdown-report.json` reports `completed_and_confirmed`, `attempted_but_unconfirmed`, or a fixed failed/timed-out category. Container exit/removal alone does not prove child reaping or GPU-memory release.
+
+These statements describe current code/tests: `services/stt/supervisor.py`, `services/stt/application.py`, `services/stt/lifecycle.py`, and `services/stt/http_server.py`. The injected process-control tests do not prove kernel behavior for uninterruptible tasks or native CUDA context cleanup.
+
+### Operator steps for an authorized persistent deployment
+
+1. **Preserve evidence first.** Copy the exact attempt's `launcher-report.json`, harness report, `shutdown-report.json` when present, bounded stdout/stderr classifications, and postflight observations to the approved private evidence location. Preserve timestamps and hashes. Do not copy audio or transcript data into reports or Git.
+2. **Identify one worker.** Use the approved deployment's configured Compose project and STT service labels to list candidates. Match the image digest, project/service labels, creation time, and the recorded container ID. Require exactly one intended worker. If the identity is ambiguous, stop. Do not use global process selection, `docker ps -aq`, wildcard removal, or pruning.
+3. **Check lifecycle.** Query `/healthz` and `/readyz` through the existing private route. Health 200 means the HTTP worker process is live; it does not mean the model is usable. Readiness 200 is required before sending work. Readiness 503 `not_ready` means the model is unavailable; `cleanup_unconfirmed` means child exit has not been established. Inspect the sanitized attempt/shutdown report and exact container state.
+4. **Distinguish a live child from a stale PID.** Do not trust a PID value alone; PIDs can be reused and container PIDs differ from host PIDs. Inspect the exact container's process list (`docker top <exact-container-id>`) and state (`docker inspect <exact-container-id>`), correlate the process with the container namespace and current start time, and compare with supervisor evidence. The platform does not maintain a PID file as recovery authority. If process identity or exit cannot be established, stop and escalate; do not signal a host PID.
+5. **Handle uncertain cleanup conservatively.** While `cleanup_unconfirmed` is reported, do not submit more requests, start a replacement inference child, or restart the worker. Allow only the configured bounded process-control/reaper interval to report exit. If still uncertain, preserve evidence and escalate to the host operator. Do not kill unrelated processes, reset the GPU, or infer memory release from a termination request.
+6. **Stop only the exact worker if authorized.** For a recorded exact container ID, request a bounded stop using the deployment's configured grace and inspect that same ID. If it remains running after the bound, a bounded kill may target only that ID under the deployment's approved procedure. Remove it only after Docker reports it stopped. Never use `docker compose down`, broad `docker kill`, or Docker prune for recovery. If exact exit/removal cannot be confirmed, stop and escalate.
+7. **Check GPU visibility without disturbing workloads.** Use the host's approved NVIDIA process and memory inventory before and after the exact worker cleanup. A visible Speech Platform process disappearing is supporting evidence only; NVML process visibility may be incomplete, and free VRAM does not prove a context was released or reserve capacity. Do not terminate other GPU processes or perform a GPU reset. If a Speech Platform process remains, attribution is unclear, or Ollama/Dify health degrades, stop and escalate.
+8. **Recover only after cleanup is confirmed.** Start/recreate only the named STT service using the reviewed deployment mechanism once C.6 defines it; do not restart Ollama, Dify, Docker, or the whole Compose project. Check `/healthz`, then wait for `/readyz` 200 and verify the configured model identity/readiness report before permitting requests. A 200 health response by itself is insufficient. If readiness does not return within the configured startup deadline, preserve evidence and leave the worker unavailable for operator review.
+9. **Verify shared services and close the incident.** Repeat the established Ollama and Dify health checks and compare GPU process/resource observations with pre-recovery evidence. Record only sanitized statuses, exact worker identity, lifecycle result and cleanup evidence. Any unexplained GPU allocation, child/container uncertainty, repeated model-load failure, OOM indication, or shared-service degradation requires operator escalation; do not retry automatically.
+
+For a diagnostic attempt, the launcher timeout procedure above remains exact-container scoped. Do not adapt this section into persistent deployment commands until C.6 approval establishes the project, service, restart policy, and rollback procedure.

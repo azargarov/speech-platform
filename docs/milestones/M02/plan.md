@@ -1,6 +1,6 @@
 # M02 STT inference plan
 
-Status: M02-A and M02-B are PASS following user validation and explicit closeout approval on 2026-10-17. **M02-C.2b: PASS for the bounded CUDA smoke-test scope only**, accepted on 2026-10-17. Overall M02 remains incomplete. No persistent target service deployment was performed. The accepted architecture is documented in [m02-stt-design.md](../../architecture/m02-stt-design.md) and its network boundary in [ADR 0009](../../adr/0009-worker-network-reachability.md).
+Status: M02-A, M02-B, M02-C.2b, M02-C.3, bounded M02-C.4, and M02-C.5 deterministic offline scope are PASS after user acceptance. Overall M02 remains INCOMPLETE. No persistent target service deployment was performed. C.6 implementation and runtime validation are not started; the bounded deployment plan below is proposed for review. The accepted architecture is documented in [m02-stt-design.md](../../architecture/m02-stt-design.md) and its network boundary in [ADR 0009](../../adr/0009-worker-network-reachability.md).
 
 ## Scope
 
@@ -36,17 +36,11 @@ Verification commands: `make verify PYTHON=.venv/bin/python`; `make stt-cpu-inte
 
 User validation: completed 2026-10-17. User accepted pinned-model CPU HTTP smoke evidence, artifact provenance/digests, logs/privacy, cleanup and limitations. No target deployment.
 
-### M02-C — Authorized `llm` GPU validation and closeout
+### M02-C — CUDA validation and operational closeout
 
-Entry gate: M02-B is implemented, verified and explicitly user-accepted. **C.2b bounded CUDA smoke-test scope: PASS.** This did not authorize or perform persistent deployment or validate CUDA through the HTTP worker. Remaining C work, including C.3, requires its own approval gate. Exit gate: all broader host evidence and rollback review pass and the user explicitly approves M02 closeout.
+Entry gates satisfied: M02-A and M02-B are PASS. **C.2b bounded CUDA smoke and C.3 bounded CUDA HTTP integration are PASS for their accepted scopes.** C.3 supersedes the earlier statement that CUDA-through-HTTP evidence was absent; C.2b remains a separately accepted adapter smoke. Overall M02 remains INCOMPLETE. No persistent deployment has occurred.
 
-Prepare a dedicated deployment profile/runbook and rollback. Only after separate host/deployment authorization, validate the exact `large-v3-turbo` artifact and image/library pins on CUDA, measure resource use, and test cancellation/shutdown/recovery while leaving Ollama/Dify untouched.
-
-Acceptance: approved CUDA device and compute type observed; model manifest digest verified; load, transcription and segment timestamps succeed; no CPU fallback; cold/warm load and request timing recorded; peak RSS and VRAM measured separately from estimates; overload, OOM/fault-latch and forced child exit behavior meet documented bounds; active and queued audio is released as specified; no shared service was modified; rollback commands address only the Speech Platform Compose project; evidence is reviewed and M02 closeout is explicitly approved.
-
-Verification commands: `make verify PYTHON=.venv/bin/python`; `make stt-gpu-integration PYTHON=.venv/bin/python` (planned target, requires explicitly authorized host GPU and service startup); rendered Compose check; documented project-scoped smoke/rollback commands. No command in this phase may prune, restart or alter Ollama/Dify.
-
-User validation: review measured results and limitations, inspect service status and logs for privacy, confirm shared services remain unchanged, run or review project-scoped rollback, then explicitly approve M02 closeout. Do not start M03 automatically.
+The former broad C acceptance is divided into the following proposed work packages. Identifiers C.1, C.2a, C.2b and C.3 are retained for their existing completed records; new work uses C.4, C.5 and C.6. These are planning proposals only and are not implementation or target-host authorization.
 
 #### M02-C.3 — Real CUDA transcription through the STT HTTP worker
 
@@ -70,7 +64,7 @@ Implementation and validation artifacts:
 3. `make stt-cuda-http-integration` requires operator-provided experiment inputs and calls the maintained launcher. The launcher verifies the local image/platform, app/deployment profile, configured free-VRAM gate, audio checksum, immutable image selector, non-root/no-network/no-port/root-readonly mounts, and explicit CPU/RAM/PID limits.
 4. `docs/operations/stt-cuda-http-integration.md` documents source precedence, proposed resource bounds, exact invocation, preflight, retained evidence and cleanup. No Compose service or persistent deployment behavior was changed.
 
-Acceptance criteria for C.3 PASS (not yet established):
+Acceptance criteria for C.3 PASS (satisfied for the approved one-request scope; evidence below and in verification/user-validation records):
 
 - Before launch: approved immutable image and linux/amd64 identity, lock/dependency inventory, config/model/audio integrity, GPU 0 and explicit float16 policy, free-VRAM gate, no unexpected GPU process, and Ollama/Dify health are recorded. Any failed prerequisite stops the attempt.
 - One non-root, network-isolated, no-published-port container starts the current STT HTTP application using read-only inputs and bounded resources. `/healthz` is alive and `/readyz` transitions to ready after model load.
@@ -89,10 +83,120 @@ Acceptance evidence (OBSERVED on 2026-10-17; user accepted): one multipart reque
 
 Limitations (NOT ESTABLISHED): instrumented peak VRAM, concurrency, sustained load, production latency or throughput, persistent deployment, and active-load coexistence. The user accepted C.3 only for this one-request integration scope. M02 overall remains incomplete.
 
-## Verification baseline
+#### M02-C.4 — Target-model CUDA validation and resource/performance measurements — PASS for bounded experiment scope
 
-OBSERVED at M01 closeout: `make verify PYTHON=.venv/bin/python` passed at commit `734e223a249988a93df668a857831db7c2a43852`; this is historical and does not verify M02. OBSERVED for C.2b: the approved tiny artifact completed one bounded CUDA float16 transcription; see [verification](verification.md). Phase commands above are proposed; targets that do not exist yet must be added during their authorized phase. Broader GPU resource behavior and deployment remain NOT ESTABLISHED.
+Objective: validate the configured target model (currently designed as `large-v3-turbo`) through the production STT worker path and measure resource/performance behavior on the approved host.
+
+Acceptance gate:
+
+- Before execution, approve the exact immutable model revision, converted-artifact manifest/digest, image/platform, dependency lock, audio fixture identity, CUDA device/compute type, and validated configuration. Keep all paths and operational limits configuration-driven; no workstation or operator paths enter tracked application logic.
+- Exercise the production worker HTTP path with bounded requests. Verify readiness, model identity, language/result schema, segment timestamps, explicit CUDA execution and absence of CPU fallback. Keep audio and transcript content out of logs/reports.
+- Record cold readiness and warm request measurements with sample count and fixture durations. Record RSS, cgroup high-water and GPU observations with their measurement method; distinguish instrumented peaks from periodic samples and configured estimates. If a metric source is unavailable, retain that limitation explicitly rather than treating it as a blocker for the bounded experiment or claiming a value. Report results as observations, not guarantees.
+- Define any operational acceptance thresholds in approved experiment configuration before execution. If no threshold is approved, report measurements without claiming capacity or performance acceptance.
+- Enforce the configured GPU admission threshold immediately before launch, bounded CPU/RAM/PID/request/deadline limits, no network/published ports, non-root execution and read-only artifact mounts. Stop on resource pressure or shared-service degradation; make no retries or automatic fallback.
+- Verify artifact integrity, cleanup, GPU state and available Ollama/Dify health before/after. No persistent services or shared-service changes.
+
+Evidence: sanitized launcher/harness reports, exact artifact/config/image/lock identities, timing and resource measurement method, sample counts, health checks, cleanup outcome, limitations, and user review. Local verification remains `make governance-check PYTHON=.venv/bin/python`, `make verify PYTHON=.venv/bin/python`, and `git diff --check`; target execution requires separate authorization.
+
+Dependencies and safety: C.4 depends on an available, license-reviewed, manifest-verified target-model artifact and operator-approved resource thresholds and experiment bounds. Free VRAM is advisory, not reserved. No deliberate GPU exhaustion or concurrent load generation is allowed. Coexistence under active Ollama/Dify inference remains outside this package unless separately designed and approved.
+
+Closeout scope (OBSERVED; user accepted 2026-10-18): Phase A verified and staged the approved immutable artifact; Phase B completed one bounded production HTTP CUDA request; Phase C completed exactly three sequential requests through one worker without model reload. The harness verified response structure, language, segment count and timestamp bounds, and recorded cold readiness, each HTTP duration/RTF, sampled device memory and cgroup high-water data. No performance threshold was approved or inferred; results are observations only. The PASS applies to these bounded experiments and their integrity/cleanup evidence; it does not assert a capacity threshold or persistent operating envelope. See [verification](verification.md) and [user validation](user-validation.md).
+
+NOT ESTABLISHED: concurrent capacity, sustained load, exact peak VRAM, child-specific GPU memory/RSS, production latency/throughput, active GPU workload coexistence, or deployment.
+
+#### M02-C.5 — Admission, cancellation, fault recovery and bounded behavior
+
+Status: **PASS for deterministic offline admission, cancellation, failure, readiness, resource-release and operator-procedure scope.** User acceptance received 2026-10-18. This does not establish real CUDA fault cleanup, GPU OOM recovery, active GPU workload coexistence, or deployment behavior. No target fault injection was performed or is required for this bounded closeout.
+
+Objective: close the gap between deterministic application invariants and behavior observed at the worker boundary, without unsafe GPU fault experiments.
+
+Acceptance gate:
+
+- Run deterministic tests for FIFO/capacity boundaries, upload and retained-byte release, queued and active cancellation, deadlines, shutdown, malformed/failing IPC, child crash, repeated cleanup, fault latch, `cleanup_unconfirmed`, and no replacement before confirmed child exit. Assert no double release or negative accounting.
+- Exercise bounded worker HTTP behavior for overload, invalid input, timeout/cancellation and sanitized errors using fakes; prove queue saturation does not flap readiness and shutdown remains bounded.
+- Where a real worker check is needed, use only a separately approved, bounded request and cooperative cancellation/normal shutdown path. Record lifecycle and child-reap evidence. Do not induce a real CUDA OOM, exhaust shared GPU memory, kill unrelated processes, or claim GPU memory release from a termination request alone.
+- Keep operator recovery manual after uncertain child/GPU cleanup. Define and document the safe recovery decision and project-scoped actions; do not add restart loops, OOM retries or automatic precision fallback.
+- Run focused suites and canonical local verification; distinguish fake/injected results from target-runtime observations.
+
+Evidence: named deterministic tests and actual command results, sanitized worker lifecycle reports for any authorized target check, ownership/accounting assertions, readiness/liveness outcomes, recovery procedure, and unresolved real-GPU failure behavior. No target execution is implied by this plan.
+
+Dependencies and safety: current fake/process-control and target C.4 normal-execution evidence cover most invariants; C.5 should add only uncovered cases established by the matrix below. GPU OOM testing is not a gate. Any target access requires separate authorization.
+
+##### C.5 coverage and evidence matrix (OBSERVED by source/test inspection)
+
+| Scenario | Existing implementation and tests | Missing evidence / expected observable behavior | Offline sufficiency, target need and risk |
+|---|---|---|---|
+| Admission and overload | `AdmissionController`/`UploadGate`; `test_fifo_and_exact_queue_item_byte_and_retained_boundaries`, `test_queue_byte_budget_and_request_limit`, `test_queue_expiration_releases_bytes_while_active_work_continues`, `test_upload_gate_has_exact_concurrency_bound_and_closes`; HTTP `test_upload_admission_limit_is_enforced_over_http`; readiness stability in runtime tests. | No identified core gap. Preserve prompt 429 `overloaded`, bounded queue, stable readiness and exact release accounting. | Offline tests are sufficient. No target fault test; no added shared-resource risk. |
+| Client cancellation | HTTP `test_request_disconnect_cancels_inference_context`; admission `test_queued_client_cancellation_releases_exactly_once`, `test_completion_cancel_race_releases_once_and_uncertain_cleanup_retains_owner`; supervisor `test_cooperative_cancellation_keeps_child_healthy`, `test_explicit_client_cancellation_is_cooperative` and `test_simultaneous_completed_response_and_cancellation_returns_cancelled`. | Real CUDA cancellation during a native call and driver/GPU release latency are not established. Expected behavior: cancel queued work immediately; active work cooperates or is boundedly terminated; do not release ownership before confirmed child exit. | Deterministic offline tests suffice for contract/lifecycle. A real CUDA cancellation test is optional only if that runtime property is required; it can terminate a child during native work and leave GPU cleanup uncertain, so it needs separate risk review and authorization. |
+| Request/model-load timeouts | HTTP `test_request_deadline_cancels_work_and_returns_gateway_timeout`; admission `test_active_deadline_and_graceful_shutdown_release_resources`; runtime `test_child_crash_and_load_failure_are_latched` includes an unresponsive load; aggregate experiment deadline in `scripts/test_stt_cuda_http_smoke.py::test_aggregate_deadline_prevents_a_later_sequential_request`. | CUDA kernel calls may not observe cancellation promptly. Expected behavior: request timeout is HTTP 504 / `deadline_exceeded`; failed model load leaves readiness false; no new work after a latched fault. | Offline tests suffice for timeout propagation. Do not use a long CUDA call as a timeout probe by default; no target test is required. |
+| Forced child termination | Runtime `test_unresponsive_child_is_terminated_reaped_and_fault_latched`, `test_cleanup_unconfirmed_is_bounded_and_blocks_replacement`, `test_unconfirmed_cleanup_keeps_admission_bytes_and_readiness_latched`; real child fake backend with injected process-control behavior. | Kernel uninterruptible states and actual GPU context/memory release after kill remain unproven. Expected behavior: bounded escalation; retain active slot/audio while exit is unconfirmed; block readiness and replacement. | Offline tests suffice for state/accounting. Never kill unrelated processes or deliberately induce stuck GPU work. Real forced termination is not required. |
+| CUDA initialization/inference failures | Faster adapter `test_unsupported_cuda_compute_type_fails_without_cpu_fallback`, new `test_cuda_initialization_failure_is_typed_without_cpu_fallback`, `test_transcription_maps_language_timestamps_and_fatal_native_errors`; runtime `test_fatal_child_fault_latches_model_without_killing_worker_liveness`, `test_child_crash_and_load_failure_are_latched`; C.4 proves successful CUDA initialization/inference for the approved artifact. | Injected constructor failure is typed as model-load failure; it does not fall back to CPU. Native CUDA errors during actual inference remain runtime-specific and untested. | Deterministic adapter and supervisor tests suffice for C.5A. No real CUDA error injection; it can poison the context and shared GPU state. |
+| Memory exhaustion and container limits | Admission/decoded-result bounds and C.4 bounded container limits/resource sampling; launcher `test_cuda_http_invocation_requires_explicit_configured_limits`, `test_cuda_http_invocation_rejects_gpu_override_and_missing_resource_limit`; new `test_decoded_audio_allocation_failure_is_resource_exhausted`, `test_recoverable_resource_failure_releases_admission_for_next_request`; HTTP `test_resource_exhaustion_uses_bounded_safe_http_error`; backend result-limit tests. | A decoded-buffer `MemoryError` maps to existing `resource_exhausted` / HTTP 503 without exposing diagnostics; the fake child remains usable, releases admission ownership and serves a subsequent request. Real cgroup OOM behavior and model-specific ceiling thresholds remain unestablished. | Offline deterministic tests suffice. Do not exhaust host/GPU memory or intentionally OOM the shared host. |
+| Worker recovery/readiness | Separate worker/model states in `lifecycle.py`; runtime `test_startup_load_failure_keeps_worker_live_but_not_ready`, `test_fatal_child_fault_latches_model_without_killing_worker_liveness`, `test_queue_saturation_does_not_flap_readiness`; HTTP `test_health_and_readiness_are_distinct`; C.4 confirmed normal ready and shutdown transitions. | Manual recovery after `cleanup_unconfirmed` is an operator decision, not an automated transition; process restart/recovery in deployment is not established. Expected behavior: worker may remain live but unready; no in-process restart loop or fallback. | Offline state-machine tests and a recovery runbook are sufficient for C.5. Deployment recovery belongs to C.6 if approved. |
+| Resource release/exact-container cleanup | Admission ownership/repeated-close tests; launcher `test_confirmed_timeout_still_requires_inspection_of_recorded_container` and `test_timeout_forced_termination_and_unconfirmed_exit`; C.4 confirmed normal child/sampler shutdown, container removal and permission restoration. | A timed-out daemon-side container and sampler/child behavior under forced container stop are not target-observed. Expected behavior: preserve exact ID/evidence; inspect/clean only that ID; never infer child/GPU release from `--rm`. | Fake-runner tests plus documented exact-ID operator procedure suffice. No container timeout experiment is necessary. |
+| Ollama/Dify protection | Launcher rejects networking/ports and uses resource/device bounds; C.4 health checks passed before/after. | Health under simultaneous active Ollama/Dify GPU load is not established; memory admission is advisory and cannot reserve VRAM. Expected behavior: no platform changes, stop on degradation, no claims of active-load coexistence. | Static/offline checks plus pre/post health are sufficient for C.5. Do not create competing GPU load; any coexistence study is a separate approved experiment. |
+
+##### Proposed C.5 stages and gate
+
+1. **C.5A — Offline gap closure:** the CUDA constructor failure, decoded-buffer allocation failure, public resource error, and recovery-after-resource-failure assertions were implemented and accepted PASS for deterministic offline coverage.
+2. **C.5B — Recovery and operator evidence:** document exact worker identity, liveness/readiness interpretation, stale PID caution, `cleanup_unconfirmed` handling, bounded exact-container stop/kill/removal, GPU visibility limits, post-recovery readiness, escalation and evidence preservation. No automatic cleanup/restart behavior. The procedure is recorded in [the STT CUDA HTTP operations guide](../../operations/stt-cuda-http-integration.md); user accepted C.5B and the overall C.5 scope on 2026-10-18.
+3. **Conditional target validation:** no target run is required by default because C.4 has already demonstrated the normal CUDA HTTP request and confirmed graceful child/sampler/container cleanup. If a specifically identified runtime-only risk remains, propose one bounded, non-destructive check with pre/post health and GPU observations for separate authorization. Real CUDA OOM, shared-GPU exhaustion and unrelated-process termination remain excluded.
+
+Exit evidence: deterministic cases pass, actual commands are recorded, behavior and safety boundaries are documented, and user acceptance is recorded. **C.5 PASS is bounded to this evidence.** C.5 does not establish kernel cleanup under uninterruptible conditions, actual GPU memory release after forced termination, GPU OOM recovery, or active-load coexistence.
+
+#### M02-C.6 — Deployment profile, health/readiness, resource isolation and rollback
+
+Status: **PLANNING ONLY; not started.** This plan does not authorize implementation or host activity. C.6 validates a project-scoped persistent STT deployment, subject to a separate implementation approval and a further target-execution approval.
+
+Objective: validate a project-scoped persistent deployment using the approved model/profile and rollback procedure while leaving existing Ollama and Dify services untouched.
+
+### Current implementation inventory (OBSERVED)
+
+- Compose already gives the Gateway both internal networks, STT only `stt_private`, and TTS only `tts_private`. Only Gateway publishes a host port, bound by default to loopback. Workers run as UID/GID 65532, with a read-only root filesystem, dropped capabilities and `no-new-privileges`.
+- STT `/healthz` reports process liveness; `/readyz` reports model-serving readiness and distinguishes `cleanup_unconfirmed`. Saturation does not flap readiness. These are application endpoints; Compose currently has no healthcheck wiring.
+- CPU and CUDA Compose overlays mount configuration and model roots read-only. The CUDA overlay currently requests `gpus: all`; this conflicts with the approved GPU-0-only deployment intent. The STT base memory default is 256 MiB and CPU default is 1.0; neither is an accepted model-serving resource profile. No service has an explicit restart policy.
+- The CUDA example configuration carries a CUDA device index and mandatory deployment memory-admission setting. The host diagnostic launcher validates config and applies a GPU selector for bounded diagnostics, but Compose does not derive its GPU selector from the validated YAML. CUDA Dockerfiles install the pinned hash lock and use a non-root user, but their Python base is a mutable tag rather than a digest-pinned image reference.
+- Artifact verification and C.4 target measurements exist. The C.4 sample is not a guaranteed resource peak or a production limit. Previous target runs required a temporary permission change to read the model; permanent least-privilege artifact access for the service identity is not yet configured or validated.
+
+### Required changes and runtime-only evidence (INTERPRETATION)
+
+- Create a versioned, strict deployment profile that names the approved model alias/revision/manifest and device policy, then use one validated source to drive both application device selection and Compose GPU exposure. Compose must expose device 0 only, never all GPUs; reject disagreement before start.
+- Before creating or updating containers, validate the application and deployment schemas, the complete immutable artifact manifest and file digests, the pinned image/platform identity, effective Compose rendering, and the configuration-to-GPU/resource mapping. Fail closed before any service start if an identity or rendered setting differs.
+- Define permanent artifact ownership/group/modes and mount only the model and manifest read-only. Ensure every parent directory is traversable by the service identity. Validate the production verifier as UID/GID 65532 with only the required supplementary group. Do not use temporary chmod as the deployment procedure.
+- Replace the 256 MiB/1 CPU defaults for STT with reviewed, configurable CPU, memory and PID limits informed by C.4 measurements plus explicit operator headroom. Measurements are observations; limits still require host resource review. Do not intentionally consume memory to test the ceiling.
+- Wire Compose healthcheck to liveness without treating model loading as liveness failure; expose readiness separately for deployment orchestration/operator gating. Healthcheck timing and startup grace must come from validated deployment configuration or a documented deployment profile, not duplicate hardcoded timeouts.
+- Pin the Python base image by immutable platform-specific digest and record the built image digest. Keep application dependencies hash-locked. Use no automatic restart initially; recovery remains manual and exact-service scoped until restart policy is separately justified and bounded.
+- Assign an explicit Compose project name and stable labels, preserve exact container/network identity in reports, and document project-scoped start, inspect, stop, rollback and evidence retention. Keep immutable, versioned image/config/model release identities available for rollback; switch the approved release as one reviewed unit and target only Speech Platform resources.
+- Runtime validation must establish actual GPU-0 visibility, artifact read access, model load/readiness, health/readiness transitions, bounded shutdown and child exit, exact project resource cleanup, and Ollama/Dify health before/after. A free-VRAM check is advisory and does not reserve VRAM. Do not claim GPU release without process/lifecycle evidence.
+
+### Bounded work packages and gates
+
+1. **C.6A — Deployment profile and static safety (implementation approval required):** implement the versioned deployment profile, validated config-to-GPU mapping, permanent least-privilege artifact access, digest-pinned image base, explicit configurable resource limits, project identity/labels, liveness check wiring and static Compose regression checks. No container or host execution. Exit evidence: strict config tests; rendered Compose asserts only GPU 0, no worker ports, existing private network separation, non-root/read-only mounts, reviewed resource fields, no automatic restart loop; verifier access tests for deployment UID/GID; documented rollback plan.
+2. **C.6B — Bounded target startup and shutdown (separate target authorization):** after C.6A review, start only the versioned STT service under its explicit project name. Validate artifact integrity, device visibility, model loading, `/healthz`, `/readyz`, configured limits, bounded stop, child shutdown, exact-container/network cleanup or retained approved service state, and Ollama/Dify pre/post health. No inference unless separately included in approved test criteria.
+3. **C.6C — Bounded deployed request and rollback rehearsal (separate authorization):** after C.6B passes, send one approved request over the private worker path (without publishing STT), verify response and lifecycle, then exercise rollback to the previous approved Speech Platform release. Inspect only project-labeled resources and confirm Ollama/Dify remain untouched.
+
+Out of scope: public Gateway inference routing/authentication (M04), TTS changes (M03), multi-host scheduling, automatic restart loops, active shared-GPU load tests, deliberate OOM, and capacity claims.
+
+Acceptance gate:
+
+- Reconcile CUDA Compose GPU selection and worker CPU/RAM/PID limits with validated deployment configuration and measured C.4 resource evidence. Keep limits configurable; do not treat C.3's one-off 4 CPU / 8 GiB / 128 PID experiment envelope as production defaults.
+- Validate rendered topology and security: Gateway is the only published application entry point; workers have no published ports; STT/TTS private-network separation remains; CUDA selection is explicit; no CPU fallback; read-only model/config mounts, least privilege and bounded resources.
+- Prepare an operator-reviewed deployment/runbook with preflight, health versus readiness semantics, logs/metrics privacy, startup/shutdown expectations, project name/volume/network ownership and exact rollback commands. Commands must target only Speech Platform resources and must not prune, restart, or reconfigure Ollama or Dify.
+- After separate deployment authorization, perform a bounded start/health/readiness/smoke/stop/rollback exercise. Confirm only intended Speech Platform containers/networks/resources were created and removed, and verify Ollama/Dify health before and after.
+- Record whether the deployment image was built from the approved locked sources and distinguish that evidence from C.3's source-mounted validation image.
+
+Evidence: static Compose validation, reviewed effective configuration and resource limits, sanitized runtime/service state, health/readiness and rollback results, resource ownership, shared-service before/after checks, and user validation. No deployment is authorized by this plan.
+
+Dependencies and safety: the user has authorized C.6 deployment planning, not implementation or deployment. C.6A requires separate implementation approval; C.6B and C.6C each require separate target-execution approval. Deployment model/profile, host headroom, image provenance, artifact permissions, project ownership and rollback operator must be explicitly reviewed. Do not touch Ollama/Dify or their networks/configuration. Runtime GPU passthrough, persistent model lifecycle, resource envelope and actual rollback behavior remain NOT ESTABLISHED.
+
+#### M02-C closeout gate
+
+M02 remains incomplete until the user explicitly accepts the agreed C.4-C.6 scope or approves documented exclusions. Closeout evidence must distinguish functional STT acceptance, operational deployment (if included), performance/resource observations, and NOT ESTABLISHED items. M03 TTS and M04 public Gateway routing/authentication remain separate milestones and are not prerequisites for M02 closeout.
+
+## Verification record references
+
+Historical M01 verification is not evidence for M02. OBSERVED M02-A/B/C.2b/C.3 and bounded C.4/C.5 verification and user acceptance are recorded in [verification](verification.md), [implementation](implementation.md), and [user-validation](user-validation.md). C.4 is PASS for artifact integrity, one bounded large-model request and three sequential requests with sampled observations. C.5 is PASS for deterministic offline fault handling and the operator recovery procedure. C.6 remains planning only and not started. Persistent deployment is not established.
 
 ## Decisions and risks
 
-Accepted decisions are in ADRs 0006-0009. Remaining M02 implementation details include async STT multipart/disconnect transport dependency, exact model/upstream revision and manifest digest, dependency/image lock, decoded-audio limits, operationally acceptable manual recovery, and performance/quality measurements during authorized design/implementation review. Estimates are not measurements. No GPU or deployment guarantee is established by this design closeout.
+Accepted decisions are in ADRs 0006-0009. The user approved `large-v3-turbo` as the required C.4 target. C.4A artifact provisioning, C.4B offline measurement harness, and C.4C target measurements are accepted for their bounded scopes. These observed measurements do not establish resource thresholds or production capacity. C.5A and C.5B are accepted as PASS for deterministic offline fault handling and documented operator recovery; real CUDA failure cleanup, GPU OOM recovery and active workload coexistence remain NOT ESTABLISHED. C.6 planning is now proposed as C.6A/C.6B/C.6C, but implementation and runtime validation remain unstarted. No CUDA OOM or active-load test is planned.

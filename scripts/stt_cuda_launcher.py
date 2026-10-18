@@ -631,6 +631,9 @@ class DiagnosticLauncher:
                     report["container_created"] = True
             elif outcome.started:
                 report["container_created"] = False
+            report["exact_container_postflight_required"] = bool(
+                outcome.timed_out and report["container_created"] is True
+            )
             harness_path = harness_dir / harness_report_name
             if harness_path.is_file() and not harness_path.is_symlink():
                 report["harness_report"]["present"] = True

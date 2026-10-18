@@ -148,6 +148,7 @@ def load_app_config(
     backend="fake",
     max_queued=2,
     queue_wait=1,
+    load_timeout=2,
     cancel_grace=0.1,
     exit_timeout=0.5,
 ):
@@ -155,6 +156,7 @@ def load_app_config(
     data["backend"]["id"] = backend
     data["admission"]["max_queued"] = max_queued
     data["admission"]["queue_wait_timeout_seconds"] = queue_wait
+    data["lifecycle"]["model_load_timeout_seconds"] = load_timeout
     data["lifecycle"]["cooperative_cancel_grace_seconds"] = cancel_grace
     data["lifecycle"]["process_exit_timeout_seconds"] = exit_timeout
     path = Path(directory) / "app.yaml"
@@ -170,15 +172,18 @@ def make_application(
     duration=0,
     max_queued=2,
     queue_wait=1,
+    load_timeout=2,
     auto=True,
     timestamps=True,
     cancel_grace=0.1,
     exit_timeout=0.5,
+    process_control=None,
 ):
     config = load_app_config(
         directory,
         max_queued=max_queued,
         queue_wait=queue_wait,
+        load_timeout=load_timeout,
         cancel_grace=cancel_grace,
         exit_timeout=exit_timeout,
     )
@@ -190,13 +195,30 @@ def make_application(
             )
         }
     )
-    app = create_application(
-        config,
-        deployment,
-        {"fake": factory},
-        FakeDeviceProbe(),
-        FakeArtifactStore(),
-    )
+    if process_control is None:
+        app = create_application(
+            config,
+            deployment,
+            {"fake": factory},
+            FakeDeviceProbe(),
+            FakeArtifactStore(),
+        )
+    else:
+
+        def create_test_runner(*args, **kwargs):
+            return InferenceSupervisor(*args, **kwargs, process_control=process_control)
+
+        with patch(
+            "services.stt.application.InferenceSupervisor",
+            side_effect=create_test_runner,
+        ):
+            app = create_application(
+                config,
+                deployment,
+                {"fake": factory},
+                FakeDeviceProbe(),
+                FakeArtifactStore(),
+            )
     self_backend = factory()
     app.start(self_backend.capabilities())
     return app
@@ -513,8 +535,9 @@ class SupervisorTests(unittest.TestCase):
         failed.shutdown(0.1)
 
         timed_out = supervisor("load_unresponsive", load_timeout=0.1)
-        with self.assertRaises(SpeechFailure):
+        with self.assertRaises(SpeechFailure) as caught:
             timed_out.start()
+        self.assertEqual(caught.exception.code, FailureCode.MODEL_LOAD_FAILED)
         self.assertTrue(timed_out.faulted)
         self.assertFalse(timed_out.child_alive)
         timed_out.shutdown(0.1)
@@ -546,6 +569,23 @@ class ApplicationTests(unittest.TestCase):
                 with self.assertRaises(SpeechFailure) as caught:
                     app.transcribe(request)
                 self.assertEqual(caught.exception.code, FailureCode.UNSUPPORTED_OPTION)
+            app.close()
+
+    def test_recoverable_resource_failure_releases_admission_for_next_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory, behavior="resource_failure_once")
+            with self.assertRaises(SpeechFailure) as caught:
+                app.transcribe(TranscriptionRequest(b"audio", "audio/wav"))
+            self.assertEqual(caught.exception.code, FailureCode.RESOURCE_EXHAUSTED)
+            snapshot = app._admission.snapshot()
+            self.assertFalse(snapshot["active"])
+            self.assertEqual(snapshot["queued"], 0)
+            self.assertEqual(snapshot["retained_bytes"], 0)
+            self.assertTrue(app.lifecycle.ready())
+
+            result = app.transcribe(TranscriptionRequest(b"audio", "audio/wav"))
+            self.assertIn("fake transcription", result.text)
+            self.assertEqual(app._admission.snapshot()["retained_bytes"], 0)
             app.close()
 
     def test_media_size_deadline_and_upload_limits(self):
@@ -624,6 +664,32 @@ class ApplicationTests(unittest.TestCase):
             self.assertFalse(app.lifecycle.ready())
             self.assertEqual(app.startup_failure.code, FailureCode.MODEL_LOAD_FAILED)
             self.assertFalse(app.runner.child_alive)
+            app.close()
+
+    def test_model_load_timeout_with_unconfirmed_exit_reports_cleanup_unconfirmed(self):
+        process_control = ControlledProcess()
+        process_control.hold_exit_confirmation = True
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(
+                directory,
+                behavior="load_unresponsive",
+                load_timeout=0.05,
+                exit_timeout=0.03,
+                process_control=process_control,
+            )
+            self.assertEqual(app.startup_failure.code, FailureCode.MODEL_LOAD_FAILED)
+            self.assertTrue(app.lifecycle.live())
+            self.assertFalse(app.lifecycle.ready())
+            self.assertTrue(app.lifecycle.cleanup_unconfirmed())
+            self.assertTrue(app.runner.cleanup_unconfirmed)
+            with self.assertRaises(SpeechFailure) as caught:
+                app.transcribe(TranscriptionRequest(b"audio", "audio/wav"))
+            self.assertEqual(caught.exception.code, FailureCode.NOT_READY)
+
+            process_control.hold_exit_confirmation = False
+            self.assertTrue(app.runner.cleanup_event.wait(1))
+            self.assertFalse(app.runner.cleanup_unconfirmed)
+            self.assertFalse(app.lifecycle.ready())
             app.close()
 
     def test_fatal_child_fault_latches_model_without_killing_worker_liveness(self):

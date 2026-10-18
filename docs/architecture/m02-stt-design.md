@@ -1,6 +1,6 @@
 # M02 STT architecture design
 
-Status: accepted architecture baseline. M02-A, M02-B and the bounded M02-C.2b CUDA smoke scope are PASS. M01 remains PASS and overall M02 is incomplete; broader M02-C deployment and CUDA worker acceptance remain open. See [M02 plan](../milestones/M02/plan.md) and ADRs [0006](../adr/0006-stt-alias-ownership.md), [0007](../adr/0007-stt-execution-lifecycle.md), [0008](../adr/0008-stt-artifacts-devices-configuration.md) and accepted [0009](../adr/0009-worker-network-reachability.md).
+Status: accepted architecture baseline. M02-A, M02-B, bounded M02-C.2b, C.3 and C.4 scopes, and M02-C.5's deterministic offline fault-handling and operator-procedure scope are PASS. M01 remains PASS and overall M02 is INCOMPLETE. C.6 deployment design is proposed; implementation and runtime validation have not started. See [M02 plan](../milestones/M02/plan.md) and ADRs [0006](../adr/0006-stt-alias-ownership.md), [0007](../adr/0007-stt-execution-lifecycle.md), [0008](../adr/0008-stt-artifacts-devices-configuration.md) and accepted [0009](../adr/0009-worker-network-reachability.md).
 
 ## Evidence and assumptions
 
@@ -8,7 +8,9 @@ Status: accepted architecture baseline. M02-A, M02-B and the bounded M02-C.2b CU
 
 **INTERPRETATION:** M02 can prove model and backend replaceability with one real backend plus a fake. The same faster-whisper adapter can accept CPU or CUDA device selections without changing the application layer. Limiting a worker instance to one model and active job keeps resource ownership clear on a shared GPU; it does not make these permanent architecture limits.
 
-**NOT ESTABLISHED:** production large-v3-turbo behavior; peak VRAM (only before/after state is recorded); concurrency, sustained performance, CUDA HTTP worker integration, cancellation/driver release latency during CUDA inference, and persistent deployment. The tiny-model smoke does not establish an operating envelope or coexistence under active shared-service load.
+**OBSERVED (M02-C.4, bounded scope):** the approved large-v3-turbo artifact completed one and then three sequential requests through the production STT HTTP application using CUDA device 0 and float16, without CPU fallback. See the M02 verification record for provenance, timings and sampled resource observations.
+
+**NOT ESTABLISHED:** concurrency capacity, sustained performance, exact peak VRAM, child-specific GPU/RSS attribution, cancellation/driver release latency during CUDA inference, active GPU workload coexistence with Ollama/Dify, and persistent deployment. The bounded C.4 runs do not establish an operating envelope or production performance guarantee.
 
 ## Boundaries and data flow
 
@@ -406,7 +408,7 @@ Free VRAM checks are sampled facts, not locks. Ollama/Dify can allocate memory b
 
 **OBSERVED (historical, user-reported):** M00 reports median transcription 0.666 s and RTF 0.0314 over ten warm runs for a 21.205 s Russian recording, with faster-whisper 1.2.1 and `large-v3-turbo`. Scripts/config were not recovered; no reproduction claim exists.
 
-**NOT ESTABLISHED:** concurrency, cold start, other audio, transcript accuracy, CTranslate2/dependency versions, peak RSS/VRAM, behavior alongside active Ollama load or production latency. These are M02 validation measurements, not guaranteed objectives.
+**NOT ESTABLISHED:** concurrency, other audio, transcript accuracy, exact peak RSS/VRAM, behavior alongside active Ollama load or production latency. M02-C.4 now provides bounded cold-readiness, sequential request and sampled-resource observations for one approved model/audio combination. These measurements do not establish capacity or guarantees.
 
 ## Failure-mode summary
 

@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import re
 import stat
@@ -143,6 +144,13 @@ def _exception_record(exc: BaseException) -> dict:
         "message": _safe_message(exc),
         "frames": _safe_traceback(exc),
     }
+    safe_resources = getattr(exc, "safe_resource_observations", None)
+    if isinstance(safe_resources, dict):
+        filtered = _safe_result({"resource_observations": safe_resources}).get(
+            "resource_observations"
+        )
+        if filtered is not None:
+            record["resource_observations"] = filtered
     code = getattr(exc, "diagnostic_code", None)
     if code in SAFE_DIAGNOSTIC_CODES:
         record["diagnostic_code"] = code
@@ -174,6 +182,16 @@ def _exception_record(exc: BaseException) -> dict:
                 r"[a-z][a-z0-9_]{0,63}", public_error_code
             ):
                 record["public_error_code"] = public_error_code
+            safe_measurements = _safe_result(
+                {"request_measurements": http_metadata.get("request_measurements", [])}
+            ).get("request_measurements", [])
+            if safe_measurements:
+                record["request_measurements"] = safe_measurements
+            resources = _safe_result(
+                {"resource_observations": http_metadata.get("resource_observations")}
+            ).get("resource_observations")
+            if resources is not None:
+                record["resource_observations"] = resources
     causes = []
     cause = exc.__cause__ or exc.__context__
     while cause is not None and len(causes) < 3:
@@ -310,6 +328,12 @@ def _safe_result(value: dict) -> dict:
         "ready_status",
         "model_load_seconds",
         "transcription_seconds",
+        "process_cold_model_load_seconds",
+        "legacy_transcription_seconds_semantics",
+        "audio_duration_seconds",
+        "request_count",
+        "request_measurements",
+        "resource_observations",
         "child_alive",
         "ready",
     }
@@ -325,6 +349,63 @@ def _safe_result(value: dict) -> dict:
                 if _SAFE_ATOM.fullmatch(str(name))
                 and _SAFE_ATOM.fullmatch(str(version))
             }
+        elif key == "request_measurements" and isinstance(item, list):
+            safe_measurements = []
+            for measurement in item[:1000]:
+                if not isinstance(measurement, dict):
+                    continue
+                duration = measurement.get("request_duration_seconds")
+                audio_duration = measurement.get("audio_duration_seconds")
+                rtf = measurement.get("request_real_time_factor")
+                numeric = (duration, audio_duration, rtf)
+                if not all(
+                    type(number) in (int, float)
+                    and math.isfinite(number)
+                    and number >= 0
+                    for number in numeric
+                ):
+                    continue
+                index = measurement.get("request_index")
+                phase = measurement.get("phase")
+                status = measurement.get("http_status")
+                language = measurement.get("language")
+                segments = measurement.get("segment_count")
+                timestamps = measurement.get("timestamp_bounds_valid")
+                if not (
+                    type(index) is int
+                    and 1 <= index <= 1000
+                    and isinstance(phase, str)
+                    and phase in {"first_request", "subsequent_warm_request"}
+                    and type(status) is int
+                    and 100 <= status <= 599
+                    and isinstance(language, str)
+                    and re.fullmatch(r"[A-Za-z-]{2,16}", language)
+                    and type(segments) is int
+                    and segments >= 0
+                    and type(timestamps) is bool
+                    and measurement.get("transcription_duration_seconds") is None
+                    and measurement.get("transcription_duration_status")
+                    == "not_exposed_by_worker_contract"
+                ):
+                    continue
+                safe_measurements.append(
+                    {
+                        "request_index": index,
+                        "phase": phase,
+                        "http_status": status,
+                        "request_duration_seconds": round(float(duration), 6),
+                        "transcription_duration_seconds": None,
+                        "transcription_duration_status": "not_exposed_by_worker_contract",
+                        "audio_duration_seconds": round(float(audio_duration), 6),
+                        "request_real_time_factor": round(float(rtf), 6),
+                        "language": language,
+                        "segment_count": segments,
+                        "timestamp_bounds_valid": timestamps,
+                    }
+                )
+            result[key] = safe_measurements
+        elif key == "resource_observations" and isinstance(item, dict):
+            result[key] = _safe_resource_observations(item)
         elif (
             key == "model_alias"
             and isinstance(item, str)
@@ -379,12 +460,121 @@ def _safe_result(value: dict) -> dict:
             type(item) is int and 100 <= item <= 599
         ):
             result[key] = item
-        elif key in {"model_load_seconds", "transcription_seconds"} and (
-            type(item) in (int, float) and 0 <= item < float("inf")
-        ):
+        elif key in {
+            "model_load_seconds",
+            "transcription_seconds",
+            "process_cold_model_load_seconds",
+            "audio_duration_seconds",
+        } and (type(item) in (int, float) and math.isfinite(item) and 0 <= item):
             result[key] = round(float(item), 6)
+        elif key == "request_count" and type(item) is int and 0 <= item <= 1000:
+            result[key] = item
+        elif (
+            key == "legacy_transcription_seconds_semantics"
+            and item == "first_request_http_duration"
+        ):
+            result[key] = item
         elif key in {"child_alive", "ready"} and type(item) is bool:
             result[key] = item
+    return result
+
+
+def _safe_resource_observations(value: dict) -> dict:
+    statuses = {
+        "available",
+        "unavailable",
+        "pending",
+        "not_started",
+        "start_failed",
+        "stopped",
+        "running",
+        "stop_unconfirmed",
+    }
+    status = value.get("status")
+    nvml_status = value.get("nvml_status")
+    rss_status = value.get("process_rss_status")
+    result = {
+        "status": status
+        if isinstance(status, str) and status in statuses
+        else "unavailable",
+        "sampled_peak_label": "sampled_peak",
+        "nvml_status": nvml_status
+        if isinstance(nvml_status, str) and nvml_status in statuses
+        else "unavailable",
+        "process_rss_status": rss_status
+        if isinstance(rss_status, str) and rss_status in statuses
+        else "unavailable",
+    }
+    device_index = value.get("device_index")
+    if type(device_index) is int and device_index >= 0:
+        result["device_index"] = device_index
+    interval = value.get("sampling_interval_seconds")
+    count = value.get("sample_count")
+    if type(interval) in (int, float) and math.isfinite(interval) and interval >= 0:
+        result["sampling_interval_seconds"] = round(float(interval), 6)
+    if type(count) is int and count >= 0:
+        result["sample_count"] = count
+    counts = value.get("sample_counts_by_metric", {})
+    if isinstance(counts, dict):
+        result["sample_counts_by_metric"] = {
+            name: metric_count
+            for name, metric_count in counts.items()
+            if re.fullmatch(r"[a-z_]{1,64}", str(name))
+            and type(metric_count) is int
+            and metric_count >= 0
+        }
+    peaks = value.get("sampled_peaks", {})
+    if isinstance(peaks, dict):
+        result["sampled_peaks"] = {
+            name: number
+            for name, number in peaks.items()
+            if re.fullmatch(r"sampled_peak_[a-z_]{1,64}", str(name))
+            and type(number) is int
+            and number >= 0
+        }
+    cgroup = value.get("cgroup_memory", {})
+    if isinstance(cgroup, dict):
+        peak = cgroup.get("peak_bytes")
+        cgroup_status = cgroup.get("status")
+        result["cgroup_memory"] = {
+            "status": cgroup_status
+            if isinstance(cgroup_status, str)
+            and cgroup_status in {"available", "unavailable", "not_sampled"}
+            else "unavailable",
+            "peak_bytes": peak if type(peak) is int and peak >= 0 else None,
+            "observation_count": cgroup.get("observation_count")
+            if type(cgroup.get("observation_count")) is int
+            and cgroup.get("observation_count") in {0, 1}
+            else 0,
+        }
+    missing = value.get("missing_data", {})
+    if isinstance(missing, dict):
+        result["missing_data"] = {
+            key: code
+            for key, code in missing.items()
+            if key
+            in {
+                "nvml",
+                "nvml_process_memory",
+                "process_rss",
+                "cgroup_memory_peak",
+            }
+            and code
+            in {
+                "dependency_unavailable",
+                "permission_denied",
+                "interface_unavailable",
+                "invalid_observation",
+                "query_failed",
+                "not_supported",
+                "process_not_visible",
+            }
+        }
+    result["limitations"] = [
+        "GPU and RSS maxima are periodic samples, not instrumented peaks.",
+        "cgroup memory peak is a cgroup high-water mark, not process RSS.",
+        "NVML process attribution is limited to visible worker descendants.",
+    ]
     return result
 
 

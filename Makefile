@@ -84,5 +84,9 @@ stt-cuda-http-integration:
 	      --approved-lock-sha256 "$(STT_CUDA_LOCK_SHA256)" \
 	      --model-revision "$(STT_CUDA_MODEL_REVISION)" \
 	      --model-manifest-sha256 "$(STT_CUDA_MODEL_MANIFEST_SHA256)" \
-	      --report /results/harness-report.json
+	      --report /results/harness-report.json \
+	      --request-count "$(if $(STT_CUDA_HTTP_REQUEST_COUNT),$(STT_CUDA_HTTP_REQUEST_COUNT),1)" \
+	      --maximum-request-count "$(if $(STT_CUDA_HTTP_MAX_REQUEST_COUNT),$(STT_CUDA_HTTP_MAX_REQUEST_COUNT),1)" \
+	      --overall-deadline-seconds "$(STT_CUDA_HTTP_DEADLINE_SECONDS)" \
+	      --resource-sample-interval-seconds "$(if $(STT_CUDA_RESOURCE_SAMPLE_INTERVAL_SECONDS),$(STT_CUDA_RESOURCE_SAMPLE_INTERVAL_SECONDS),disabled)"
 verify: lint config compose-check test build governance-check stt-lock-check

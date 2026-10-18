@@ -20,12 +20,13 @@ from services.stt.http_server import create_http_app
 class FakeLifecycle:
     def __init__(self):
         self.is_ready = True
+        self.is_cleanup_unconfirmed = False
 
     def ready(self):
         return self.is_ready
 
     def cleanup_unconfirmed(self):
-        return False
+        return self.is_cleanup_unconfirmed
 
 
 class FakeApplication:
@@ -181,6 +182,28 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret-value", json.dumps(body))
         self.assertNotIn("transcript text", json.dumps(body))
 
+    async def test_resource_exhaustion_uses_bounded_safe_http_error(self):
+        await self.client.close()
+        self.application = FakeApplication(
+            failure=SpeechFailure(
+                FailureCode.RESOURCE_EXHAUSTED,
+                "allocator at /private/audio/russian.m4a token=secret-value",
+            )
+        )
+        self.client = TestClient(TestServer(create_http_app(self.application)))
+        await self.client.start_server()
+        response = await self.client.post(
+            "/internal/v1/transcriptions",
+            data=self.form(),
+            headers={"X-Request-Timeout-Ms": "4000"},
+        )
+        body = await response.json()
+        self.assertEqual(response.status, 503)
+        self.assertEqual(body["code"], "resource_exhausted")
+        self.assertEqual(body["message"], "service resource limit was exceeded")
+        self.assertNotIn("allocator", json.dumps(body))
+        self.assertNotIn("secret-value", json.dumps(body))
+
     async def test_upload_admission_limit_is_enforced_over_http(self):
         await self.client.close()
         self.application = FakeApplication(block_until_cancel=True, max_uploads=1)
@@ -241,6 +264,12 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         ready = await self.client.get("/readyz")
         self.assertEqual(health.status, 200)
         self.assertEqual(ready.status, 503)
+        self.assertEqual((await ready.json())["code"], "not_ready")
+        self.application.lifecycle.is_cleanup_unconfirmed = True
+        cleanup = await self.client.get("/readyz")
+        self.assertEqual(cleanup.status, 503)
+        self.assertEqual((await cleanup.json())["code"], "cleanup_unconfirmed")
+        self.application.lifecycle.is_cleanup_unconfirmed = False
         self.application.lifecycle.is_ready = True
         self.assertEqual((await self.client.get("/readyz")).status, 200)
 

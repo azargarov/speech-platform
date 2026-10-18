@@ -1,6 +1,6 @@
 # M02 implementation
 
-Status: M02-A, M02-B and M02-C.2b bounded CUDA smoke-test scope are PASS. Overall M02 remains incomplete; persistent deployment and broader C acceptance are not complete.
+Status: M02-A, M02-B, M02-C.2b, M02-C.3, M02-C.4 and M02-C.5 are PASS for their accepted bounded scopes. C.5 covers deterministic offline failure behavior and the operator recovery procedure; it does not establish real CUDA cleanup, GPU OOM recovery or active GPU workload coexistence. Overall M02 remains INCOMPLETE. C.6 deployment planning is proposed; no deployment implementation or runtime validation has begun.
 
 ## M02-A implementation record
 
@@ -145,3 +145,66 @@ OBSERVED on 2026-10-17 during the third user-authorized attempt:
 INTERPRETATION: this demonstrates one accepted end-to-end multipart HTTP transcription through the production application and CUDA adapter in an isolated ephemeral container. It does not establish general service performance or production deployment behavior.
 
 NOT ESTABLISHED: instrumented peak VRAM, concurrency, sustained load, production latency/throughput, persistent deployment, or Ollama/Dify coexistence under active inference load. C.3 PASS is limited to the accepted one-request test. Overall M02 remains incomplete.
+
+## M02-C.4B offline measurement harness — implemented
+
+OBSERVED in the local repository workspace:
+
+- Extended the existing production-HTTP smoke harness with a validated sequential request count and explicit maximum. The defaults remain one request. Each HTTP response is fully read and schema/timestamp validated before the next request is sent to the same TestServer worker.
+- Reports now distinguish process-cold start-to-readiness time, first request and later warm request timings, fixture audio duration and request-level real-time factor. Inference-only duration is reported as unavailable because the worker contract does not expose it; the harness adds no production API dependency.
+- Added an optional single-thread resource sampler with constant-space aggregation for NVML device and visible worker-process GPU memory, harness/descendant RSS from `/proc`, and the cgroup v1/v2 memory high-water counter where present. GPU/RSS values are labeled sampled peaks; cgroup memory is kept distinct from process RSS. Missing interfaces use fixed diagnostic codes.
+- Sanitized success and partial-failure reports retain only allowlisted counts, timings, statuses, language/segment metadata and resource summaries. Audio and transcript contents, private paths and raw exception details are not included. Existing independent shutdown evidence and lifecycle cleanup remain in place.
+- The C.3 Make target defaults to one request and accepts configured request-count, maximum-count, overall-deadline and optional sample-interval settings. No CUDA, Docker, model load, inference, target access or shared-service operation was performed for this implementation.
+
+INTERPRETATION: the extension enabled bounded, repeatable sequential measurement through the existing application path without changing production inference behavior. It was used for the later C.4 target experiments recorded below.
+
+NOT ESTABLISHED at the time of this C.4B implementation record: the large-v3-turbo model had not been loaded or run; no cold/warm inference timings, RTF, VRAM/RSS values, resource thresholds, CUDA HTTP behavior for this model, quality results or capacity conclusions were established. The later bounded C.4 target experiments are recorded below.
+
+## M02-C.4 target-model experiments — PASS for bounded scope
+
+OBSERVED on 2026-10-18; user accepted the bounded scope:
+
+- Phase A verified and staged the exact `dropbox-dash/faster-whisper-large-v3-turbo` artifact at revision `0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf`, with canonical manifest digest `86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6` and model.bin SHA-256 `e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da`. The production artifact verifier passed. See Phase A evidence in [verification](verification.md).
+- Phase B completed one request through the production HTTP application and explicit CUDA device 0 / float16 with CPU fallback disabled. Phase C repeated the same path for exactly three sequential requests through one worker and one model instance; each response was fully consumed and validated before the next request.
+- Runtime identity: immutable image `sha256:b25af1309e1e51e8ce72c227028727cb26014fef512b716fbd11cf8f9fb16540` (`linux/amd64`); CUDA lock SHA-256 `68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14`; faster-whisper 1.2.1, CTranslate2 4.8.3, PyAV 19.0.1, cuBLAS 12.9.2.10, cuDNN 9.27.0.42 and NVRTC 12.9.86.
+- Phase C reported 8.664 s process-cold startup-to-readiness. Three HTTP 200 responses detected `ru`; each had six segments with valid timestamp bounds. Full HTTP durations were 1.180 s, 0.702 s and 0.784 s; RTF was 0.055663, 0.033087 and 0.036972. Audio duration was 21.205333 s. Inference-only timing is not exposed by the worker contract.
+- Resource sampler collected 12 one-second samples. Sampled maximum device-wide used memory was 2,795,962,368 bytes; cgroup memory high-water was 1,775,648,768 bytes. These are sampled device memory and cgroup high-water observations, not exact peak VRAM or process RSS. NVML child attribution was `process_not_visible`; descendant RSS samples were zero, so child-specific memory use is not established.
+- Shutdown report confirmed worker close, inference-child exit/reaping, and readiness false. Container exited 0 and exact identity inspection confirmed removal. Temporary model-root/artifact modes were restored from `2710`/`2750` to original `2700`/`2700`. Ollama HTTP health and Dify proxy/core checks were satisfactory before and after. No service was modified.
+
+Historical failures retained: the first Phase B target attempt stopped at artifact verification because the non-root container could not enumerate the model artifact directory. A separate non-GPU permission check confirmed the diagnosis; the bounded retry succeeded with temporary group traversal/read modes. During Phase C preparation, two host-side preflight scripts stopped before any container launch: one imported staged code before selecting its repository path, and one omitted the environment from its dry-run subprocess. Both wrapper issues were corrected before the single successful Phase C container run. These were harness/preflight failures, not CUDA inference failures.
+
+INTERPRETATION: evidence supports successful bounded large-model CUDA HTTP execution and sequential first/warm request observations for the approved model, audio and image. It is not a capacity or production performance guarantee.
+
+NOT ESTABLISHED: concurrency capacity, sustained-load behavior, exact peak VRAM, child-specific GPU memory/RSS, CUDA cancellation/driver cleanup after forced termination, active GPU workload coexistence with Ollama/Dify, or persistent deployment. Overall M02 remains incomplete.
+
+## M02-C.5A offline fault-injection coverage — PASS for accepted scope
+
+OBSERVED in the workstation repository:
+
+- Review mapped C.5 scenarios to existing tests before adding coverage. Existing tests already exercise admission saturation and readiness stability (`test_queue_saturation_does_not_flap_readiness`, HTTP `test_upload_admission_limit_is_enforced_over_http`), disconnect and deadline cancellation, model-load timeout and load failure, unexpected child exit, fatal-child readiness latch, bounded forced termination and `cleanup_unconfirmed`, exact resource ownership/release, sanitized HTTP failures, launcher timeout evidence, and sanitized shutdown outcomes. These were retained rather than duplicated.
+- Fixed one confirmed typed-error gap in `services/stt/backends/faster_whisper.py`: `MemoryError` from bounded decoded-audio buffer allocation now maps to `resource_exhausted`. No CUDA fallback, retry or production configuration change was added.
+- Added `test_cuda_initialization_failure_is_typed_without_cpu_fallback` to assert an explicit CUDA constructor error becomes `model_load_failed` and the adapter never attempts CPU construction.
+- Added `test_decoded_audio_allocation_failure_is_resource_exhausted`, `test_resource_exhaustion_uses_bounded_safe_http_error`, and `test_recoverable_resource_failure_releases_admission_for_next_request`. The last test observes zero active/queued/retained ownership after the injected failure, readiness remains true, and a following request succeeds through the same supervised child.
+- Tightened `test_child_crash_and_load_failure_are_latched` to assert the unresponsive model-load timeout returns the existing `model_load_failed` code and the child is reaped.
+
+INTERPRETATION: deterministic tests establish the current typed failure, HTTP mapping, no-fallback decision and recoverable admission release for these injected paths. Existing process-control tests establish application ownership and cleanup state transitions under their fake seam.
+
+NOT ESTABLISHED: real CUDA driver initialization/inference errors, native allocator failure semantics, actual cgroup OOM behavior, CUDA context/memory release after forced termination, kernel-uninterruptible child behavior, active GPU workload coexistence, and persistent deployment. No target host, Docker, GPU, CUDA runtime, model artifact or inference was used. C.5A PASS is limited to offline deterministic coverage; C.5 overall was accepted only after the separate C.5B procedure review, and M02 remains incomplete.
+
+## M02-C.5B recovery/operator procedure — PASS for accepted offline scope
+
+OBSERVED: added a bounded recovery section to [the existing CUDA HTTP operations guide](../../operations/stt-cuda-http-integration.md). It describes the actual fault/recovery semantics, exact-worker identification, readiness versus liveness, stale-PID precautions, preservation of sanitized reports, `cleanup_unconfirmed` escalation, exact-container bounded stop/kill/removal, GPU-process visibility limitations, post-recovery readiness checks, and conditions requiring operator escalation. The guidance explicitly defers persistent service restart commands until C.6 defines the deployment identity and rollback procedure. Review also found that startup model-load failure could report generic `not_ready` even when child cleanup was unconfirmed; `STTApplication.start()` now preserves the more precise `CLEANUP_UNCONFIRMED` lifecycle state after bounded shutdown.
+
+Existing tests were reviewed and retained; no duplicate recovery framework or production API was added. Added `test_model_load_timeout_with_unconfirmed_exit_reports_cleanup_unconfirmed` with the injected process-control seam to verify startup failure remains unready, rejects a later request, reports uncertain cleanup, and does not recover readiness merely when the reaper later confirms exit. The HTTP readiness fake now asserts 503 with `cleanup_unconfirmed` distinctly from generic `not_ready`. Existing runtime tests cover fault latching, no replacement, forced reap and uncertain cleanup; diagnostic tests cover confirmed/unconfirmed/failed shutdown reporting.
+
+INTERPRETATION: code and fake-process tests support the documented application-level state transitions. The operator procedure is conservative and does not claim host process or CUDA context cleanup beyond observed evidence.
+
+NOT ESTABLISHED: actual target-host recovery, Docker daemon/container behavior under persistent deployment, process visibility for a real inference child, GPU context release after forced termination, GPU OOM recovery, and recovery while Ollama/Dify run active GPU workloads. The user accepted C.5A and C.5B as PASS on 2026-10-18 for deterministic offline scope; no target experiment was performed.
+
+## M02-C.6 deployment readiness — planning only
+
+OBSERVED: base Compose already separates internal Gateway/STT/TTS networks, publishes only Gateway by default on loopback, runs workers non-root with read-only root filesystems, and has private `/healthz` and `/readyz` contracts. CPU/CUDA overlays mount artifacts read-only. The CUDA overlay currently exposes all GPUs, STT defaults to 256 MiB/1 CPU, Compose has no healthcheck/restart policy, and the CUDA Dockerfile uses a mutable Python tag. The previous artifact test required temporary permission changes, so permanent read access for the service identity is not established.
+
+INTERPRETATION: proposed C.6A should add a strict deployment profile driving both configured CUDA device and Compose GPU exposure, permanent least-privilege model permissions, reviewed configurable CPU/RAM/PID limits, digest-pinned base image, Compose liveness wiring, explicit project identity, and exact rollback documentation/static checks. C.6B would separately validate bounded target startup/readiness/shutdown and shared-service health. C.6C would separately validate one private-path request and rollback. Each execution phase requires separate approval; none is implemented here.
+
+NOT ESTABLISHED: persistent target service behavior, device-0-only Compose passthrough, deployed image provenance, permanent artifact access, service resource envelope, restart/recovery behavior, shutdown/GPU resource release, or rollback. Ollama and Dify were not accessed or modified.

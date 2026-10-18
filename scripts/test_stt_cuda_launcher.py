@@ -156,6 +156,16 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue(report["process"]["termination_requested"])
         self.assertTrue(report["process"]["kill_requested"])
         self.assertFalse(report["process"]["exit_confirmed"])
+        self.assertEqual(report["container"]["id"], "c" * 64)
+        self.assertTrue(report["exact_container_postflight_required"])
+
+    def test_confirmed_timeout_still_requires_inspection_of_recorded_container(self):
+        report = self.launch(
+            FakeRunner(exit_code=137, timed_out=True, exit_confirmed=True)
+        )
+        self.assertEqual(report["outcome"], "timeout")
+        self.assertEqual(report["container"]["id"], "c" * 64)
+        self.assertTrue(report["exact_container_postflight_required"])
 
     def test_docker_exit_codes_have_conservative_failure_layers(self):
         for exit_code, expected in (

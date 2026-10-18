@@ -1,4 +1,4 @@
-"""Exercise the production STT HTTP application with one CUDA request."""
+"""Exercise the production STT HTTP application with bounded CUDA requests."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import math
 import re
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from aiohttp import FormData
@@ -34,6 +35,9 @@ from services.stt.domain import FailureCode
 from services.stt.http_server import create_http_app
 from services.stt.service import DeferredSTTApplication
 from services.worker.server import load_config as load_worker_config
+from scripts.stt_resource_sampling import ResourceSampler
+
+MAXIMUM_MEASUREMENT_REQUESTS = 1000
 
 
 STAGES = (
@@ -57,10 +61,47 @@ _AUDIO_FORMATS = {
 }
 
 
+@dataclass(frozen=True)
+class MeasurementSettings:
+    request_count: int
+    maximum_request_count: int
+    overall_deadline_seconds: float
+    resource_sample_interval_seconds: float | None
+
+    @classmethod
+    def from_args(cls, args):
+        request_count = getattr(args, "request_count", 1)
+        maximum = getattr(args, "maximum_request_count", 1)
+        deadline = getattr(args, "overall_deadline_seconds", 180.0)
+        interval = getattr(args, "resource_sample_interval_seconds", None)
+        if type(request_count) is not int or request_count < 1:
+            raise ValueError("request count must be a positive integer")
+        if type(maximum) is not int or maximum < 1:
+            raise ValueError("maximum request count must be a positive integer")
+        if request_count > maximum:
+            raise ValueError("request count exceeds configured maximum")
+        if maximum > MAXIMUM_MEASUREMENT_REQUESTS:
+            raise ValueError("maximum request count exceeds report safety bound")
+        if (
+            type(deadline) not in (int, float)
+            or not math.isfinite(deadline)
+            or deadline <= 0
+        ):
+            raise ValueError("overall deadline must be a positive finite number")
+        if interval is not None and (
+            type(interval) not in (int, float)
+            or not math.isfinite(interval)
+            or interval < 0.1
+            or interval > deadline
+        ):
+            raise ValueError("resource sample interval is outside configured bounds")
+        return cls(request_count, maximum, float(deadline), interval)
+
+
 class HTTPIntegrationFailure(RuntimeError):
     """Safe metadata for a non-success response from the test HTTP request."""
 
-    def __init__(self, status: int, error_body: object):
+    def __init__(self, status: int, error_body: object, measurements=None):
         super().__init__("transcription HTTP request failed")
         self.http_status = (
             status if type(status) is int and 100 <= status <= 599 else None
@@ -85,6 +126,7 @@ class HTTPIntegrationFailure(RuntimeError):
             "public_error_code": self.public_error_code,
             "request_stage": self.request_stage,
             "failure_category": self.failure_category,
+            "request_measurements": list(measurements or []),
         }
 
 
@@ -126,6 +168,17 @@ def _shutdown_timeout_seconds(app) -> float:
     return lifecycle.shutdown_drain_timeout_seconds + (
         3 * lifecycle.process_exit_timeout_seconds
     )
+
+
+def _remaining_seconds(deadline: float, clock=time.monotonic) -> float:
+    return max(0.0, deadline - clock())
+
+
+async def _await_with_deadline(awaitable, deadline: float, clock=time.monotonic):
+    remaining = _remaining_seconds(deadline, clock)
+    if remaining <= 0:
+        raise asyncio.TimeoutError
+    return await asyncio.wait_for(awaitable, timeout=remaining)
 
 
 async def _close_and_record(client, application, state, report_path, timeout_seconds):
@@ -210,7 +263,44 @@ def _validate_response(body: object, maximum_duration: float) -> dict:
     }
 
 
-def build_operations(args, loop, state):
+def _audio_duration_seconds(path: Path, av_module=None) -> float:
+    """Read duration metadata only; audio bytes and decoder objects are not retained."""
+    if av_module is None:
+        import av as av_module
+    with av_module.open(str(path), mode="r") as container:
+        streams = [stream for stream in container.streams if stream.type == "audio"]
+        if (
+            streams
+            and streams[0].duration is not None
+            and streams[0].time_base is not None
+        ):
+            duration = float(streams[0].duration * streams[0].time_base)
+        elif container.duration is not None:
+            duration = float(container.duration / av_module.time_base)
+        else:
+            raise ValueError("audio duration metadata is unavailable")
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError("audio duration metadata is invalid")
+    return duration
+
+
+def _request_measurement(index, elapsed, audio_duration, response_metadata):
+    duration = round(max(0.0, float(elapsed)), 6)
+    audio_seconds = round(float(audio_duration), 6)
+    return {
+        "request_index": index,
+        "phase": "first_request" if index == 1 else "subsequent_warm_request",
+        "http_status": 200,
+        "request_duration_seconds": duration,
+        "transcription_duration_seconds": None,
+        "transcription_duration_status": "not_exposed_by_worker_contract",
+        "audio_duration_seconds": audio_seconds,
+        "request_real_time_factor": round(duration / audio_seconds, 6),
+        **response_metadata,
+    }
+
+
+def build_operations(args, loop, state, *, clock=time.monotonic):
     def dependency_check(_):
         lock = Path(args.lock)
         lock_sha256 = _sha256(lock)
@@ -222,11 +312,17 @@ def build_operations(args, loop, state):
         }
 
     def parse_configuration(_):
+        measurement = MeasurementSettings.from_args(args)
         app, deployment = load_configurations(
             args.application_config, args.deployment_config
         )
         worker = load_worker_config(args.worker_config, "stt")
-        state.update(app=app, deployment=deployment, worker=worker)
+        state.update(
+            app=app,
+            deployment=deployment,
+            worker=worker,
+            measurement=measurement,
+        )
         return {
             "application_device_mode": app.device_mode,
             "model_alias": app.default_model,
@@ -263,85 +359,186 @@ def build_operations(args, loop, state):
             artifact=artifact,
             audio_path=audio_path,
             audio_sha256=audio_digest,
+            audio_duration_seconds=_audio_duration_seconds(audio_path),
         )
         return {
             "model_alias": model.alias,
             "model_revision": model.identity.upstream_revision,
             "manifest_sha256": model.manifest_sha256,
             "audio_sha256": audio_digest,
+            "audio_duration_seconds": state["audio_duration_seconds"],
         }
 
     async def exercise_http():
         app = state["app"]
+        measurement = state["measurement"]
         application = DeferredSTTApplication(app, state["deployment"])
         client = TestClient(TestServer(create_http_app(application)))
-        started = time.monotonic()
+        overall_deadline = state["experiment_deadline"]
+        shutdown_budget = _shutdown_timeout_seconds(app)
+        work_deadline = overall_deadline - (2 * shutdown_budget)
         result = None
+        sampler = None
+        if measurement.resource_sample_interval_seconds is not None:
+            sampler = ResourceSampler(
+                measurement.resource_sample_interval_seconds,
+                state["deployment"].cuda_device_index,
+                maximum_samples=math.ceil(
+                    measurement.overall_deadline_seconds
+                    / measurement.resource_sample_interval_seconds
+                )
+                + 1,
+            )
+        request_measurements = []
         try:
-            await client.start_server()
-            health = await client.get("/healthz")
+            if sampler is not None:
+                sampler.start()
+            worker_started = clock()
+            await _await_with_deadline(client.start_server(), work_deadline, clock)
+            health = await _await_with_deadline(
+                client.get("/healthz"), work_deadline, clock
+            )
             if health.status != 200 or (await health.json()).get("status") != "alive":
                 raise RuntimeError("worker health check failed")
-            initial_ready = await client.get("/readyz")
+            initial_ready = await _await_with_deadline(
+                client.get("/readyz"), work_deadline, clock
+            )
             initial_ready_status = initial_ready.status
             if initial_ready_status not in {200, 503}:
                 raise RuntimeError("worker readiness response is invalid")
-            deadline = started + app.lifecycle.model_load_timeout_seconds
+            model_load_deadline = min(
+                worker_started + app.lifecycle.model_load_timeout_seconds,
+                work_deadline,
+            )
             while True:
-                ready = await client.get("/readyz")
+                ready = await _await_with_deadline(
+                    client.get("/readyz"), model_load_deadline, clock
+                )
                 if ready.status == 200:
                     break
-                if ready.status != 503 or time.monotonic() >= deadline:
+                if ready.status != 503 or clock() >= model_load_deadline:
                     raise RuntimeError(
                         "worker did not become ready within configured limit"
                     )
-                await asyncio.sleep(state["worker"]["poll_interval_seconds"])
-            load_seconds = time.monotonic() - started
+                await _await_with_deadline(
+                    asyncio.sleep(state["worker"]["poll_interval_seconds"]),
+                    model_load_deadline,
+                    clock,
+                )
+            load_seconds = clock() - worker_started
 
-            request_started = time.monotonic()
-            response = await client.post(
-                "/internal/v1/transcriptions",
-                data=_form(
-                    state["audio_path"].read_bytes(),
-                    state["audio_path"],
-                    app.default_model,
-                    args.audio_media_type,
-                ),
-                headers={
-                    "X-Request-Timeout-Ms": str(
-                        int(app.admission.request_timeout_seconds * 1000)
+            audio_bytes = state["audio_path"].read_bytes()
+            if len(audio_bytes) > app.admission.max_request_bytes:
+                raise ValueError("audio exceeds configured request limit")
+            for request_index in range(1, measurement.request_count + 1):
+                request_deadline = min(
+                    work_deadline,
+                    clock() + app.admission.request_timeout_seconds,
+                )
+                request_started = clock()
+                response = await _await_with_deadline(
+                    client.post(
+                        "/internal/v1/transcriptions",
+                        data=_form(
+                            audio_bytes,
+                            state["audio_path"],
+                            app.default_model,
+                            args.audio_media_type,
+                        ),
+                        headers={
+                            "X-Request-Timeout-Ms": str(
+                                int(app.admission.request_timeout_seconds * 1000)
+                            )
+                        },
+                    ),
+                    request_deadline,
+                    clock,
+                )
+                elapsed = clock() - request_started
+                if clock() >= work_deadline:
+                    raise asyncio.TimeoutError("overall diagnostic deadline exceeded")
+                state["response_status"] = response.status
+                if response.status != 200:
+                    try:
+                        error = await _await_with_deadline(
+                            response.json(), work_deadline, clock
+                        )
+                    except asyncio.TimeoutError:
+                        raise
+                    except Exception:
+                        error = None
+                    raise HTTPIntegrationFailure(
+                        response.status, error, request_measurements
                     )
-                },
-            )
-            state["response_status"] = response.status
-            if response.status != 200:
-                # Read only enough to validate the public error schema. The body
-                # and message are never copied to state or the diagnostic report.
                 try:
-                    error = await response.json()
+                    body = await _await_with_deadline(
+                        response.json(), work_deadline, clock
+                    )
+                    if clock() >= work_deadline:
+                        raise asyncio.TimeoutError(
+                            "overall diagnostic deadline exceeded"
+                        )
+                    response_metadata = _validate_response(
+                        body, app.audio_limits.max_duration_seconds
+                    )
+                except asyncio.TimeoutError:
+                    raise
                 except Exception:
-                    error = None
-                raise HTTPIntegrationFailure(response.status, error)
-            try:
-                state["response_body"] = await response.json()
-            except Exception:
-                raise HTTPIntegrationFailure(response.status, None) from None
+                    raise HTTPIntegrationFailure(
+                        response.status, None, request_measurements
+                    ) from None
+                # The full response was consumed and validated before the next
+                # request. Do not retain transcript or segment text.
+                request_measurements.append(
+                    _request_measurement(
+                        request_index,
+                        elapsed,
+                        state["audio_duration_seconds"],
+                        response_metadata,
+                    )
+                )
+                del body
+            state["request_measurements"] = request_measurements
             state["http_metadata"] = {
                 "health_status": health.status,
                 "initial_ready_status": initial_ready_status,
                 "ready_status": ready.status,
+                "process_cold_model_load_seconds": round(load_seconds, 6),
                 "model_load_seconds": round(load_seconds, 6),
-                "transcription_seconds": round(time.monotonic() - request_started, 6),
+                "request_count": len(request_measurements),
+                "transcription_seconds": request_measurements[0][
+                    "request_duration_seconds"
+                ],
+                "legacy_transcription_seconds_semantics": "first_request_http_duration",
             }
-            result = {"request_status": response.status}
+            result = {"request_status": 200}
         finally:
-            await _close_and_record(
-                client,
-                application,
-                state,
-                Path(args.report).with_name("shutdown-report.json"),
-                _shutdown_timeout_seconds(app),
+            active_error = sys.exc_info()[1]
+            try:
+                await _close_and_record(
+                    client,
+                    application,
+                    state,
+                    Path(args.report).with_name("shutdown-report.json"),
+                    _remaining_seconds(overall_deadline, clock),
+                )
+            finally:
+                if sampler is not None:
+                    state["resource_observations"] = sampler.stop(
+                        _remaining_seconds(overall_deadline, clock)
+                    )
+                if active_error is not None and sampler is not None:
+                    try:
+                        active_error.safe_resource_observations = state.get(
+                            "resource_observations"
+                        )
+                    except Exception:
+                        pass
+        if state.get("request_measurements"):
+            state["request_measurements"][0]["process_cold_model_load_seconds"] = round(
+                load_seconds, 6
             )
+        state["measurement_settings"] = measurement
         if result is None:
             raise RuntimeError("HTTP integration ended without a result")
         return result
@@ -350,11 +547,21 @@ def build_operations(args, loop, state):
         return loop.run_until_complete(exercise_http())
 
     def output_validation(_):
-        metadata = _validate_response(
-            state["response_body"], state["app"].audio_limits.max_duration_seconds
-        )
+        if clock() >= state["experiment_deadline"]:
+            raise asyncio.TimeoutError("overall diagnostic deadline exceeded")
+        measurements = state.get("request_measurements", [])
+        if len(measurements) != state["measurement"].request_count:
+            raise ValueError("experiment did not complete the configured request count")
+        first = measurements[0]
         return {
-            **metadata,
+            "language": first["language"],
+            "segment_count": first["segment_count"],
+            "timestamp_bounds_valid": all(
+                item["timestamp_bounds_valid"] for item in measurements
+            ),
+            "audio_duration_seconds": state["audio_duration_seconds"],
+            "request_measurements": measurements,
+            "resource_observations": state.get("resource_observations"),
             **state["http_metadata"],
             "device": "cuda",
             "compute_type": state["compute_type"],
@@ -367,6 +574,8 @@ def build_operations(args, loop, state):
         }
 
     def shutdown_validation(_):
+        if clock() >= state["experiment_deadline"]:
+            raise asyncio.TimeoutError("overall diagnostic deadline exceeded")
         shutdown = state.get("shutdown_evidence", {})
         if shutdown.get("status") != "completed_and_confirmed":
             raise RuntimeError("worker shutdown was not confirmed")
@@ -376,6 +585,20 @@ def build_operations(args, loop, state):
             "worker_not_ready": shutdown["worker_not_ready"],
         }
 
+    state["experiment_started_at"] = clock()
+    try:
+        state["measurement"] = MeasurementSettings.from_args(args)
+    except ValueError:
+        # Preserve diagnostic-stage attribution when command settings are invalid.
+        state["measurement"] = None
+    raw_deadline = getattr(args, "overall_deadline_seconds", 180.0)
+    if (
+        type(raw_deadline) not in (int, float)
+        or not math.isfinite(raw_deadline)
+        or raw_deadline <= 0
+    ):
+        raw_deadline = 180.0
+    state["experiment_deadline"] = state["experiment_started_at"] + float(raw_deadline)
     return {
         "report_mount_validation": _report_mount_operation(args.report),
         "dependency_check": dependency_check,
@@ -403,6 +626,13 @@ def main(argv=None) -> int:
     parser.add_argument("--lock", required=True)
     parser.add_argument("--approved-lock-sha256", required=True)
     parser.add_argument("--report", required=True)
+    parser.add_argument("--request-count", type=int, default=1)
+    parser.add_argument("--maximum-request-count", type=int, default=1)
+    parser.add_argument("--overall-deadline-seconds", type=float, default=180.0)
+    parser.add_argument(
+        "--resource-sample-interval-seconds",
+        type=lambda value: None if value == "disabled" else float(value),
+    )
     args = parser.parse_args(argv)
 
     loop = asyncio.new_event_loop()
