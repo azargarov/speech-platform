@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import copy
+import base64
 import errno
 import hashlib
+import io
 import json
 import os
 import tempfile
+import tarfile
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -20,6 +23,7 @@ from scripts.stt_deployment_profile import (
     validate_rendered_compose,
     validate_created_container_inspection,
     validate_local_image_inspection,
+    validate_local_artifact_identity,
     validate_local_image_runtime_versions,
     verify_created_container_with_docker,
     verify_local_image_with_docker,
@@ -187,6 +191,49 @@ class DeploymentProfileTests(unittest.TestCase):
         runtime["identity_mode"] = "local_image_id"
         runtime.pop("image")
         runtime.pop("image_reference_verified")
+        runtime["image_id"] = "sha256:" + "6" * 64
+        archive_path = self.root / "approved-image.tar"
+        layer_data = b"fixture layer data"
+        diff_id = "sha256:" + hashlib.sha256(layer_data).hexdigest()
+        raw_config = json.dumps(
+            {
+                "architecture": "amd64",
+                "os": "linux",
+                "config": {"User": "65532:65532", "Entrypoint": ["python", "-m"]},
+                "rootfs": {"type": "layers", "diff_ids": [diff_id]},
+                "history": [{"created_by": "fixture"}],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        config_digest = "sha256:" + hashlib.sha256(raw_config).hexdigest()
+        config_path = f"blobs/sha256/{config_digest.split(':', 1)[1]}"
+        layer_path = "layers/fixture/layer.tar"
+        manifest = json.dumps(
+            [{"Config": config_path, "RepoTags": None, "Layers": [layer_path]}],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        with tarfile.open(archive_path, "w:") as archive:
+            for name, data in (
+                ("manifest.json", manifest),
+                (config_path, raw_config),
+                (layer_path, layer_data),
+            ):
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                info.mtime = 0
+                archive.addfile(info, io.BytesIO(data))
+        runtime["image_id"] = config_digest
+        identity = {
+            "identity_kind": "docker_config_digest",
+            "archive_sha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+            "config_digest": config_digest,
+            "raw_config_sha256": config_digest,
+            "rootfs_diff_ids": [diff_id],
+        }
+        runtime["artifact_identity"] = identity
+        runtime["image_store_evidence_sha256"] = "0" * 64
         runtime["build_evidence_sha256"] = "0" * 64
         labels = {
             "org.opencontainers.image.revision": runtime["source_revision"],
@@ -204,7 +251,7 @@ class DeploymentProfileTests(unittest.TestCase):
                 "platform_manifest_digest": runtime["base_image"].rsplit("@", 1)[1],
             },
             "image": {
-                "id": runtime["image_id"],
+                "id": identity["config_digest"],
                 "platform": runtime["platform"],
                 "labels": labels,
             },
@@ -214,8 +261,87 @@ class DeploymentProfileTests(unittest.TestCase):
         runtime["build_evidence_sha256"] = hashlib.sha256(
             evidence_path.read_bytes()
         ).hexdigest()
+        store_evidence = {
+            "schema_version": 1,
+            "docker_image_id": runtime["image_id"],
+            "platform": runtime["platform"],
+            **identity,
+        }
+        store_path = self.root / "image-store-evidence.json"
+        store_path.write_text(json.dumps(store_evidence, sort_keys=True))
+        runtime["image_store_evidence_sha256"] = hashlib.sha256(
+            store_path.read_bytes()
+        ).hexdigest()
+        self.image_archive_path = archive_path
+        self.image_store_evidence_path = store_path
         self._write_profile()
         return evidence_path, evidence
+
+    def _containerd_image_evidence(self):
+        build_path, build_evidence = self._local_image_evidence()
+        runtime = self.profile["runtime"]
+        identity = runtime["artifact_identity"]
+        layer_digest = "sha256:" + "e" * 64
+        layer = {
+            "digest": layer_digest,
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "size": 10,
+        }
+        with tarfile.open(self.image_archive_path, "r:") as archive:
+            archive_manifest = json.load(archive.extractfile("manifest.json"))
+            config_size = len(archive.extractfile(archive_manifest[0]["Config"]).read())
+        manifest_raw = json.dumps(
+            {
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {
+                    "digest": identity["config_digest"],
+                    "mediaType": "application/vnd.oci.image.config.v1+json",
+                    "size": config_size,
+                },
+                "layers": [layer],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        manifest_digest = "sha256:" + hashlib.sha256(manifest_raw).hexdigest()
+        identity.update(
+            {
+                "identity_kind": "containerd_oci_manifest",
+                "namespace": "moby",
+                "image_record_reference": "sha256:" + "a" * 64,
+                "matching_image_records": 1,
+                "manifest_digest": manifest_digest,
+                "manifest_media_type": "application/vnd.oci.image.manifest.v1+json",
+                "manifest_config_digest": identity["config_digest"],
+                "manifest_config_media_type": "application/vnd.oci.image.config.v1+json",
+                "manifest_config_size_bytes": config_size,
+                "manifest_layers": [
+                    {
+                        "digest": layer_digest,
+                        "media_type": layer["mediaType"],
+                        "size_bytes": layer["size"],
+                    }
+                ],
+                "verified_layer_digests": [layer_digest],
+            }
+        )
+        runtime["image_id"] = manifest_digest
+        store_evidence = {
+            "schema_version": 1,
+            "docker_image_id": runtime["image_id"],
+            "platform": runtime["platform"],
+            **identity,
+            "raw_manifest_base64": base64.b64encode(manifest_raw).decode("ascii"),
+        }
+        self.image_store_evidence_path.write_text(
+            json.dumps(store_evidence, sort_keys=True)
+        )
+        runtime["image_store_evidence_sha256"] = hashlib.sha256(
+            self.image_store_evidence_path.read_bytes()
+        ).hexdigest()
+        self._write_profile()
+        return build_path, build_evidence
 
     def _validate(
         self,
@@ -231,6 +357,14 @@ class DeploymentProfileTests(unittest.TestCase):
             self.worker_path,
             dockerfile_path=dockerfile_path,
             build_evidence_path=build_evidence_path,
+            image_archive_path=(
+                self.image_archive_path if build_evidence_path is not None else None
+            ),
+            image_store_evidence_path=(
+                self.image_store_evidence_path
+                if build_evidence_path is not None
+                else None
+            ),
             verify_files=verify_files,
         )
 
@@ -488,6 +622,40 @@ class DeploymentProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "conflicts with profile"):
             self._validate(build_evidence_path=evidence_path, verify_files=False)
 
+    def test_local_image_build_evidence_rejects_provenance_mismatches(self):
+        mutations = (
+            ("source", lambda value: value.update(source_commit="f" * 40)),
+            (
+                "lock",
+                lambda value: value.update(dependency_lock_sha256="0" * 64),
+            ),
+            (
+                "base",
+                lambda value: value["base"].update(
+                    platform_manifest_digest="sha256:" + "0" * 64
+                ),
+            ),
+            (
+                "label",
+                lambda value: value["image"]["labels"].update(
+                    {"com.speech-platform.source-revision": "f" * 40}
+                ),
+            ),
+        )
+        for name, mutate in mutations:
+            with self.subTest(provenance=name):
+                evidence_path, evidence = self._local_image_evidence()
+                mutate(evidence)
+                evidence_path.write_text(json.dumps(evidence, sort_keys=True))
+                self.profile["runtime"]["build_evidence_sha256"] = hashlib.sha256(
+                    evidence_path.read_bytes()
+                ).hexdigest()
+                self._write_profile()
+                with self.assertRaisesRegex(ValueError, "conflicts with profile"):
+                    self._validate(
+                        build_evidence_path=evidence_path, verify_files=False
+                    )
+
     def test_local_image_id_configuration_change_changes_configuration_digest(self):
         evidence_path, _ = self._local_image_evidence()
         before = configuration_set_sha256(
@@ -496,6 +664,7 @@ class DeploymentProfileTests(unittest.TestCase):
             self.deployment_path,
             self.worker_path,
             build_evidence_path=evidence_path,
+            image_store_evidence_path=self.image_store_evidence_path,
         )
         self.profile["runtime"]["image_id"] = "sha256:" + "5" * 64
         self._write_profile()
@@ -505,8 +674,201 @@ class DeploymentProfileTests(unittest.TestCase):
             self.deployment_path,
             self.worker_path,
             build_evidence_path=evidence_path,
+            image_store_evidence_path=self.image_store_evidence_path,
         )
         self.assertNotEqual(before, after)
+
+    def test_containerd_manifest_identity_is_distinct_from_config_digest(self):
+        build_path, _ = self._containerd_image_evidence()
+        validated = self._validate(build_evidence_path=build_path, verify_files=False)
+        runtime = self.profile["runtime"]
+        identity = runtime["artifact_identity"]
+        self.assertEqual(validated["image_id"], identity["manifest_digest"])
+        self.assertEqual(identity["manifest_config_digest"], identity["config_digest"])
+        self.assertNotEqual(runtime["image_id"], identity["config_digest"])
+
+        inspection = [
+            {
+                "Id": runtime["image_id"],
+                "Os": "linux",
+                "Architecture": "amd64",
+                "Config": {
+                    "User": "65532:65532",
+                    "Entrypoint": ["python", "-m"],
+                    "Labels": {
+                        "org.opencontainers.image.revision": runtime["source_revision"],
+                        "com.speech-platform.source-revision": runtime[
+                            "source_revision"
+                        ],
+                        "com.speech-platform.image-role": "stt-worker",
+                        "com.speech-platform.base-image": runtime["base_image"],
+                        "com.speech-platform.cuda-lock-sha256": runtime[
+                            "cuda_lock_sha256"
+                        ],
+                    },
+                },
+            }
+        ]
+        validate_local_image_inspection(runtime, inspection)
+
+    def test_local_artifact_identity_rejects_wrong_content_relations(self):
+        self._containerd_image_evidence()
+        evidence_path = self.image_store_evidence_path
+        runtime = self.profile["runtime"]
+        original = json.loads(evidence_path.read_text())
+        mutations = (
+            ("config_digest", "sha256:" + "1" * 64, "evidence conflicts"),
+            ("manifest_digest", "sha256:" + "2" * 64, "evidence conflicts"),
+            ("verified_layer_digests", ["sha256:" + "3" * 64], "evidence conflicts"),
+            ("manifest_config_digest", "sha256:" + "4" * 64, "evidence conflicts"),
+            (
+                "raw_manifest_base64",
+                base64.b64encode(b'{"not":"the approved manifest"}').decode("ascii"),
+                "raw OCI manifest digest",
+            ),
+            (
+                "raw_manifest_base64",
+                base64.b64encode(b"[]").decode("ascii"),
+                "raw OCI manifest evidence is invalid",
+            ),
+        )
+        for key, value, message in mutations:
+            with self.subTest(field=key):
+                changed = copy.deepcopy(original)
+                changed[key] = value
+                path = self.root / f"changed-{key}.json"
+                path.write_text(json.dumps(changed, sort_keys=True))
+                runtime["image_store_evidence_sha256"] = hashlib.sha256(
+                    path.read_bytes()
+                ).hexdigest()
+                with self.assertRaisesRegex(ValueError, message):
+                    validate_local_artifact_identity(
+                        runtime, changed, path, self.image_archive_path
+                    )
+
+        missing = copy.deepcopy(original)
+        missing.pop("raw_config_sha256")
+        path = self.root / "missing-raw-config.json"
+        path.write_text(json.dumps(missing, sort_keys=True))
+        runtime["image_store_evidence_sha256"] = hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        with self.assertRaisesRegex(ValueError, "fields do not match"):
+            validate_local_artifact_identity(
+                runtime, missing, path, self.image_archive_path
+            )
+
+        wrong_platform = copy.deepcopy(original)
+        wrong_platform["platform"] = "linux/arm64"
+        path = self.root / "wrong-platform.json"
+        path.write_text(json.dumps(wrong_platform, sort_keys=True))
+        runtime["image_store_evidence_sha256"] = hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        with self.assertRaisesRegex(ValueError, "platform"):
+            validate_local_artifact_identity(
+                runtime, wrong_platform, path, self.image_archive_path
+            )
+
+        tampered_archive = self.root / "tampered-image.tar"
+        tampered_archive.write_bytes(self.image_archive_path.read_bytes() + b"x")
+        valid_evidence = json.loads(evidence_path.read_text())
+        runtime["image_store_evidence_sha256"] = hashlib.sha256(
+            evidence_path.read_bytes()
+        ).hexdigest()
+        with self.assertRaisesRegex(ValueError, "archive SHA-256"):
+            validate_local_artifact_identity(
+                runtime, valid_evidence, evidence_path, tampered_archive
+            )
+
+    def test_containerd_config_descriptor_size_must_match_approved_archive(self):
+        self._containerd_image_evidence()
+        runtime = self.profile["runtime"]
+        identity = runtime["artifact_identity"]
+        evidence = json.loads(self.image_store_evidence_path.read_text())
+        raw_manifest = base64.b64decode(evidence["raw_manifest_base64"])
+        manifest = json.loads(raw_manifest)
+        manifest["config"]["size"] += 1
+        raw_manifest = json.dumps(
+            manifest, sort_keys=True, separators=(",", ":")
+        ).encode()
+        manifest_digest = "sha256:" + hashlib.sha256(raw_manifest).hexdigest()
+        identity["manifest_config_size_bytes"] = manifest["config"]["size"]
+        identity["manifest_digest"] = manifest_digest
+        runtime["image_id"] = manifest_digest
+        evidence.update(identity)
+        evidence["docker_image_id"] = manifest_digest
+        evidence["raw_manifest_base64"] = base64.b64encode(raw_manifest).decode("ascii")
+        self.image_store_evidence_path.write_text(json.dumps(evidence, sort_keys=True))
+        runtime["image_store_evidence_sha256"] = hashlib.sha256(
+            self.image_store_evidence_path.read_bytes()
+        ).hexdigest()
+        with self.assertRaisesRegex(ValueError, "configuration size"):
+            validate_local_artifact_identity(
+                runtime,
+                evidence,
+                self.image_store_evidence_path,
+                self.image_archive_path,
+            )
+
+    def test_local_artifact_identity_rejects_ambiguity_and_unsupported_store(self):
+        for change, message in (
+            ({"matching_image_records": 2}, "ambiguous"),
+            ({"identity_kind": "unrecognized_store"}, "unsupported"),
+        ):
+            self._containerd_image_evidence()
+            evidence_path = self.image_store_evidence_path
+            runtime = self.profile["runtime"]
+            runtime["artifact_identity"].update(change)
+            evidence = json.loads(evidence_path.read_text())
+            evidence.update(change)
+            path = self.root / "invalid-store-evidence.json"
+            path.write_text(json.dumps(evidence, sort_keys=True))
+            runtime["image_store_evidence_sha256"] = hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+            with (
+                self.subTest(change=change),
+                self.assertRaisesRegex(ValueError, message),
+            ):
+                validate_local_artifact_identity(
+                    runtime, evidence, path, self.image_archive_path
+                )
+
+    def test_matching_labels_cannot_substitute_for_content_evidence(self):
+        self._containerd_image_evidence()
+        evidence_path = self.image_store_evidence_path
+        runtime = self.profile["runtime"]
+        inspection = [
+            {
+                "Id": runtime["image_id"],
+                "Os": "linux",
+                "Architecture": "amd64",
+                "Config": {
+                    "User": "65532:65532",
+                    "Entrypoint": ["python", "-m"],
+                    "Labels": {
+                        "org.opencontainers.image.revision": runtime["source_revision"],
+                        "com.speech-platform.source-revision": runtime[
+                            "source_revision"
+                        ],
+                        "com.speech-platform.image-role": "stt-worker",
+                        "com.speech-platform.base-image": runtime["base_image"],
+                        "com.speech-platform.cuda-lock-sha256": runtime[
+                            "cuda_lock_sha256"
+                        ],
+                    },
+                },
+            }
+        ]
+        validate_local_image_inspection(runtime, inspection)
+        evidence = json.loads(evidence_path.read_text())
+        evidence["raw_config_sha256"] = "sha256:" + "0" * 64
+        evidence_path.write_text(json.dumps(evidence, sort_keys=True))
+        with self.assertRaisesRegex(ValueError, "evidence digest"):
+            validate_local_artifact_identity(
+                runtime, evidence, evidence_path, self.image_archive_path
+            )
 
     def test_local_image_preflight_checks_versions_and_docker_inspection_data(self):
         evidence_path, _ = self._local_image_evidence()
@@ -551,17 +913,43 @@ class DeploymentProfileTests(unittest.TestCase):
             validate_local_image_inspection(runtime, changed_id)
 
     def test_container_prestart_verification_requires_exact_id_and_created_state(self):
-        expected = "sha256:" + "a" * 64
+        expected_container = "a" * 64
+        expected = "sha256:" + "b" * 64
         inspection = [
-            {"Image": expected, "State": {"Status": "created", "Running": False}}
+            {
+                "Id": expected_container,
+                "Image": expected,
+                "State": {"Status": "created", "Running": False},
+            }
         ]
-        validate_created_container_inspection(expected, inspection)
+        validate_created_container_inspection(expected_container, expected, inspection)
         for changed in (
-            [{"Image": "sha256:" + "b" * 64, "State": inspection[0]["State"]}],
-            [{"Image": expected, "State": {"Status": "running", "Running": True}}],
+            [
+                {
+                    "Id": "c" * 64,
+                    "Image": expected,
+                    "State": inspection[0]["State"],
+                }
+            ],
+            [
+                {
+                    "Id": expected_container,
+                    "Image": "sha256:" + "d" * 64,
+                    "State": inspection[0]["State"],
+                }
+            ],
+            [
+                {
+                    "Id": expected_container,
+                    "Image": expected,
+                    "State": {"Status": "running", "Running": True},
+                }
+            ],
         ):
             with self.assertRaisesRegex(ValueError, "image identity or state mismatch"):
-                validate_created_container_inspection(expected, changed)
+                validate_created_container_inspection(
+                    expected_container, expected, changed
+                )
 
     def test_docker_image_preflight_uses_only_read_only_identity_commands(self):
         evidence_path, _ = self._local_image_evidence()
@@ -615,6 +1003,7 @@ class DeploymentProfileTests(unittest.TestCase):
         container_id = "c" * 64
         container_data = [
             {
+                "Id": container_id,
                 "Image": runtime["image_id"],
                 "State": {"Status": "created", "Running": False},
             }

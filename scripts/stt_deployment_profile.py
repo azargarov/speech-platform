@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import errno
 import hashlib
 import json
@@ -13,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tarfile
 from pathlib import Path
 
 import yaml
@@ -81,6 +83,270 @@ def _image_id(value, label="runtime.image_id"):
     return value
 
 
+LOCAL_ARTIFACT_FIELDS = {
+    "identity_kind",
+    "archive_sha256",
+    "config_digest",
+    "raw_config_sha256",
+    "rootfs_diff_ids",
+}
+LOCAL_OCI_ARTIFACT_FIELDS = LOCAL_ARTIFACT_FIELDS | {
+    "namespace",
+    "image_record_reference",
+    "matching_image_records",
+    "manifest_digest",
+    "manifest_media_type",
+    "manifest_config_digest",
+    "manifest_config_media_type",
+    "manifest_config_size_bytes",
+    "manifest_layers",
+    "verified_layer_digests",
+}
+OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
+OCI_CONFIG_MEDIA_TYPE = "application/vnd.oci.image.config.v1+json"
+OCI_LAYER_MEDIA_TYPES = frozenset(
+    {
+        "application/vnd.oci.image.layer.v1.tar",
+        "application/vnd.oci.image.layer.v1.tar+gzip",
+        "application/vnd.oci.image.layer.v1.tar+zstd",
+        "application/vnd.docker.image.rootfs.diff.tar.gzip",
+    }
+)
+
+
+def _sha256_digest(value, label):
+    if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+        raise ValueError(f"{label} must be a sha256 digest")
+    return value
+
+
+def _digest_list(value, label):
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{label} must be a nonempty digest list")
+    return [_sha256_digest(item, label) for item in value]
+
+
+def validate_local_artifact_identity(runtime, evidence, evidence_path, archive_path):
+    """Validate archive, raw config and typed image-store identity evidence."""
+    identity = runtime.get("artifact_identity")
+    if not isinstance(identity, dict):
+        raise ValueError("local image artifact identity is missing")
+    kind = identity.get("identity_kind")
+    fields = (
+        LOCAL_ARTIFACT_FIELDS
+        if kind == "docker_config_digest"
+        else (LOCAL_OCI_ARTIFACT_FIELDS if kind == "containerd_oci_manifest" else None)
+    )
+    if fields is None:
+        raise ValueError("unsupported local image-store identity kind")
+    _fields(identity, fields, "runtime.artifact_identity")
+    if not isinstance(identity["archive_sha256"], str) or not re.fullmatch(
+        r"[0-9a-f]{64}", identity["archive_sha256"]
+    ):
+        raise ValueError("approved Docker archive SHA-256 is invalid")
+    config_digest = _sha256_digest(identity["config_digest"], "config digest")
+    raw_config_digest = _sha256_digest(
+        identity["raw_config_sha256"], "raw configuration digest"
+    )
+    if raw_config_digest != config_digest:
+        raise ValueError("raw configuration digest does not match config descriptor")
+    diff_ids = _digest_list(identity["rootfs_diff_ids"], "RootFS diff IDs")
+    if evidence is None or evidence_path is None:
+        raise ValueError("local image-store evidence is required")
+    expected_evidence_digest = runtime.get("image_store_evidence_sha256")
+    if not isinstance(expected_evidence_digest, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", expected_evidence_digest
+    ):
+        raise ValueError("local image-store evidence SHA-256 is required")
+    if _sha256(evidence_path) != expected_evidence_digest:
+        raise ValueError("local image-store evidence digest does not match")
+    if not isinstance(evidence, dict):
+        raise ValueError("local image-store evidence is invalid")
+    expected_evidence_fields = {
+        "schema_version",
+        "docker_image_id",
+        "platform",
+    } | fields
+    if kind == "containerd_oci_manifest":
+        expected_evidence_fields.add("raw_manifest_base64")
+    _fields(evidence, expected_evidence_fields, "image-store evidence")
+    if type(evidence["schema_version"]) is not int or evidence["schema_version"] != 1:
+        raise ValueError("unsupported image-store evidence schema")
+    if evidence["docker_image_id"] != runtime["image_id"]:
+        raise ValueError("Docker-reported image identity does not match evidence")
+    if evidence["platform"] != runtime["platform"]:
+        raise ValueError("image-store platform does not match profile")
+    if evidence.get("identity_kind") != kind:
+        raise ValueError("unsupported image-store evidence identity kind")
+    if kind == "docker_config_digest":
+        if runtime["image_id"] != config_digest:
+            raise ValueError("Docker image ID does not match configuration digest")
+    else:
+        if runtime["image_id"] != identity["manifest_digest"]:
+            raise ValueError("Docker image identity does not match OCI manifest")
+        if identity["manifest_config_digest"] != config_digest:
+            raise ValueError("OCI manifest config descriptor does not match config")
+        if identity["manifest_media_type"] != OCI_MANIFEST_MEDIA_TYPE:
+            raise ValueError("unsupported OCI manifest media type")
+        if identity["manifest_config_media_type"] != OCI_CONFIG_MEDIA_TYPE:
+            raise ValueError("unsupported OCI configuration media type")
+        if (
+            type(identity["manifest_config_size_bytes"]) is not int
+            or identity["manifest_config_size_bytes"] <= 0
+        ):
+            raise ValueError("OCI configuration descriptor size is invalid")
+        if (
+            type(identity["matching_image_records"]) is not int
+            or identity["matching_image_records"] != 1
+        ):
+            raise ValueError("containerd image record association is ambiguous")
+        if not isinstance(identity["namespace"], str) or not identity["namespace"]:
+            raise ValueError("containerd namespace is missing")
+        if (
+            not isinstance(identity["image_record_reference"], str)
+            or not identity["image_record_reference"]
+        ):
+            raise ValueError("containerd image record reference is missing")
+        layers = identity["manifest_layers"]
+        if not isinstance(layers, list) or len(layers) != len(diff_ids):
+            raise ValueError("OCI manifest layer inventory does not match RootFS")
+        layer_digests = []
+        for layer in layers:
+            if not isinstance(layer, dict) or set(layer) != {
+                "digest",
+                "media_type",
+                "size_bytes",
+            }:
+                raise ValueError("OCI manifest layer descriptor is invalid")
+            layer_digests.append(_sha256_digest(layer["digest"], "layer digest"))
+            if layer["media_type"] not in OCI_LAYER_MEDIA_TYPES:
+                raise ValueError("unsupported OCI manifest layer media type")
+            if type(layer["size_bytes"]) is not int or layer["size_bytes"] <= 0:
+                raise ValueError("OCI manifest layer size is invalid")
+        verified_layers = _digest_list(
+            identity["verified_layer_digests"], "verified layer digests"
+        )
+        if verified_layers != layer_digests:
+            raise ValueError("containerd layer content hashes do not match manifest")
+        try:
+            encoded_manifest = evidence["raw_manifest_base64"]
+            if (
+                not isinstance(encoded_manifest, str)
+                or len(encoded_manifest) > 12 * 1024 * 1024
+            ):
+                raise ValueError("raw OCI manifest exceeds the validation bound")
+            raw_manifest = base64.b64decode(encoded_manifest, validate=True)
+            manifest = json.loads(raw_manifest)
+        except (ValueError, json.JSONDecodeError, TypeError) as exc:
+            raise ValueError("raw OCI manifest evidence is invalid") from exc
+        if not isinstance(manifest, dict):
+            raise ValueError("raw OCI manifest evidence is invalid")
+        if (
+            "sha256:" + hashlib.sha256(raw_manifest).hexdigest()
+            != identity["manifest_digest"]
+        ):
+            raise ValueError("raw OCI manifest digest does not match manifest identity")
+        if (
+            manifest.get("schemaVersion") != 2
+            or manifest.get("mediaType") != identity["manifest_media_type"]
+        ):
+            raise ValueError("OCI manifest schema or media type is unsupported")
+        config_descriptor = manifest.get("config")
+        if not isinstance(config_descriptor, dict) or config_descriptor != {
+            "digest": identity["manifest_config_digest"],
+            "mediaType": identity["manifest_config_media_type"],
+            "size": identity["manifest_config_size_bytes"],
+        }:
+            raise ValueError("OCI manifest configuration descriptor mismatch")
+        expected_layers = [
+            {
+                "digest": layer["digest"],
+                "mediaType": layer["media_type"],
+                "size": layer["size_bytes"],
+            }
+            for layer in layers
+        ]
+        if manifest.get("layers") != expected_layers:
+            raise ValueError("OCI manifest layer descriptors do not match evidence")
+    if {key: evidence[key] for key in fields} != identity:
+        raise ValueError("image-store evidence conflicts with approved identity")
+    _validate_local_image_archive(archive_path, identity, runtime["platform"], diff_ids)
+
+
+def _validate_local_image_archive(archive_path, identity, platform, diff_ids):
+    if _sha256(archive_path) != identity["archive_sha256"]:
+        raise ValueError("Docker archive SHA-256 does not match approved identity")
+    try:
+        with tarfile.open(archive_path, "r:") as archive:
+            members = archive.getmembers()
+            by_name = {}
+            for member in members:
+                if member.name.startswith("/") or ".." in Path(member.name).parts:
+                    raise ValueError("Docker archive contains an unsafe member path")
+                if member.name in by_name:
+                    raise ValueError("Docker archive contains duplicate member paths")
+                by_name[member.name] = member
+            manifest_member = by_name.get("manifest.json")
+            if manifest_member is None or not manifest_member.isfile():
+                raise ValueError("Docker archive manifest is unavailable")
+            if manifest_member.size > 8 * 1024 * 1024:
+                raise ValueError("Docker archive manifest exceeds the validation bound")
+            manifest = json.load(archive.extractfile(manifest_member))
+            if not isinstance(manifest, list) or len(manifest) != 1:
+                raise ValueError("Docker archive must contain exactly one image")
+            entry = manifest[0]
+            if not isinstance(entry, dict) or entry.get("RepoTags") not in (None, []):
+                raise ValueError("Docker archive tags are not permitted as identity")
+            config_path = entry.get("Config")
+            config_member = (
+                by_name.get(config_path) if isinstance(config_path, str) else None
+            )
+            if config_member is None or not config_member.isfile():
+                raise ValueError("Docker archive configuration blob is unavailable")
+            if config_member.size > 16 * 1024 * 1024:
+                raise ValueError("Docker archive config exceeds the validation bound")
+            if (
+                identity["identity_kind"] == "containerd_oci_manifest"
+                and config_member.size != identity["manifest_config_size_bytes"]
+            ):
+                raise ValueError(
+                    "approved archive configuration size does not match OCI descriptor"
+                )
+            raw_config = archive.extractfile(config_member).read()
+            if (
+                "sha256:" + hashlib.sha256(raw_config).hexdigest()
+                != identity["config_digest"]
+            ):
+                raise ValueError("Docker archive configuration digest mismatch")
+            config = json.loads(raw_config)
+            if not isinstance(config, dict) or not isinstance(
+                config.get("rootfs"), dict
+            ):
+                raise ValueError("Docker archive configuration is invalid")
+            observed_platform = f"{config.get('os')}/{config.get('architecture')}"
+            if observed_platform != platform:
+                raise ValueError("Docker archive platform does not match profile")
+            if config.get("rootfs", {}).get("diff_ids") != diff_ids:
+                raise ValueError("Docker archive RootFS diff IDs do not match profile")
+            layer_paths = entry.get("Layers")
+            if not isinstance(layer_paths, list) or len(layer_paths) != len(diff_ids):
+                raise ValueError("Docker archive layer inventory does not match config")
+            if any(
+                path not in by_name or not by_name[path].isfile()
+                for path in layer_paths
+            ):
+                raise ValueError("Docker archive layer content is unavailable")
+            for path, expected_diff_id in zip(layer_paths, diff_ids, strict=True):
+                digest = hashlib.sha256()
+                with archive.extractfile(by_name[path]) as layer:
+                    for block in iter(lambda: layer.read(1024 * 1024), b""):
+                        digest.update(block)
+                if "sha256:" + digest.hexdigest() != expected_diff_id:
+                    raise ValueError("Docker archive layer content hash mismatch")
+    except (OSError, tarfile.TarError, json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("Docker archive is unavailable or invalid") from exc
+
+
 def validate_local_image_build_evidence(runtime, evidence, evidence_path):
     """Bind the private build record to the local-image identity in the profile."""
     if _sha256(evidence_path) != runtime["build_evidence_sha256"]:
@@ -98,7 +364,7 @@ def validate_local_image_build_evidence(runtime, evidence, evidence_path):
     expected = (
         evidence.get("source_commit") == runtime["source_revision"],
         evidence.get("dependency_lock_sha256") == runtime["cuda_lock_sha256"],
-        image.get("id") == runtime["image_id"],
+        image.get("id") == runtime["artifact_identity"]["config_digest"],
         image.get("platform") == runtime["platform"],
         base.get("platform") == runtime["base_image_platform"],
         base.get("platform_manifest_digest") == base_digest,
@@ -141,8 +407,14 @@ def validate_local_image_inspection(runtime, inspection):
         raise ValueError("local Docker image identity or provenance mismatch")
 
 
-def validate_created_container_inspection(expected_image_id, inspection):
-    """Require the exact image ID on a stopped, newly created container."""
+def validate_created_container_inspection(
+    expected_container_id, expected_image_id, inspection
+):
+    """Require exact container/image IDs and a stopped, newly created container."""
+    if not isinstance(expected_container_id, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", expected_container_id
+    ):
+        raise ValueError("container ID must be a full hexadecimal Docker ID")
     _image_id(expected_image_id, "expected image ID")
     if not isinstance(inspection, list) or len(inspection) != 1:
         raise ValueError("Docker container inspection did not return exactly one item")
@@ -151,7 +423,8 @@ def validate_created_container_inspection(expected_image_id, inspection):
         raise ValueError("Docker container inspection is invalid")
     state = container.get("State") if isinstance(container, dict) else None
     if (
-        container.get("Image") != expected_image_id
+        container.get("Id") != expected_container_id
+        or container.get("Image") != expected_image_id
         or not isinstance(state, dict)
         or state.get("Status") != "created"
         or state.get("Running") is not False
@@ -207,7 +480,7 @@ def verify_created_container_with_docker(container_id, expected_image_id):
         )
     except json.JSONDecodeError as exc:
         raise ValueError("Docker container inspection returned invalid data") from exc
-    validate_created_container_inspection(expected_image_id, inspection)
+    validate_created_container_inspection(container_id, expected_image_id, inspection)
 
 
 def _positive_number(value, label, maximum):
@@ -365,6 +638,7 @@ def configuration_set_sha256(
     compose_base_path="deployments/compose/compose.yaml",
     compose_cuda_path="deployments/compose/compose.stt-cuda.yaml",
     build_evidence_path=None,
+    image_store_evidence_path=None,
 ):
     inputs = {
         "application": application_path,
@@ -383,6 +657,12 @@ def configuration_set_sha256(
             "path": str(Path(build_evidence_path).resolve()),
             "sha256": _sha256(build_evidence_path),
         }
+    for role, path in (("image_store_evidence", image_store_evidence_path),):
+        if path is not None:
+            identities[role] = {
+                "path": str(Path(path).resolve()),
+                "sha256": _sha256(path),
+            }
     canonical = json.dumps(identities, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -454,6 +734,8 @@ def load_and_validate(
     lock_path="services/requirements-stt-cuda.lock",
     dockerfile_path="deployments/compose/worker-stt-cuda.Dockerfile",
     build_evidence_path=None,
+    image_archive_path=None,
+    image_store_evidence_path=None,
     verify_files=True,
 ):
     profile_path = Path(profile_path)
@@ -485,6 +767,8 @@ def load_and_validate(
         "source_revision_verified",
     }
     if identity_mode == "registry_digest":
+        if image_archive_path is not None or image_store_evidence_path is not None:
+            raise ValueError("local image evidence cannot be supplied in registry mode")
         _fields(
             runtime,
             common_runtime_fields | {"image", "image_id", "image_reference_verified"},
@@ -503,7 +787,13 @@ def load_and_validate(
     elif identity_mode == "local_image_id":
         _fields(
             runtime,
-            common_runtime_fields | {"image_id", "build_evidence_sha256"},
+            common_runtime_fields
+            | {
+                "image_id",
+                "artifact_identity",
+                "image_store_evidence_sha256",
+                "build_evidence_sha256",
+            },
             "runtime",
         )
         image_id = _image_id(runtime["image_id"])
@@ -521,7 +811,29 @@ def load_and_validate(
             raise ValueError(
                 "local image build evidence is unavailable or invalid"
             ) from exc
+        if image_archive_path is None or image_store_evidence_path is None:
+            raise ValueError(
+                "local image mode requires archive and image-store evidence inputs"
+            )
+        try:
+            store_evidence = json.loads(
+                Path(image_store_evidence_path).read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "local image-store evidence is unavailable or invalid"
+            ) from exc
+        validate_local_artifact_identity(
+            runtime, store_evidence, image_store_evidence_path, image_archive_path
+        )
         validate_local_image_build_evidence(runtime, evidence, build_evidence_path)
+        if runtime["artifact_identity"]["identity_kind"] == "containerd_oci_manifest":
+            # This observation is data-bound, but the observed Engine/store pair
+            # still requires a separately reviewed compatibility authorization.
+            if runtime["image_id"] != runtime["artifact_identity"]["manifest_digest"]:
+                raise ValueError(
+                    "Docker-reported image identity does not match manifest"
+                )
     else:
         raise ValueError(
             "runtime.identity_mode must be registry_digest or local_image_id"
@@ -863,6 +1175,7 @@ def load_and_validate(
             deployment_config_path,
             worker_config_path,
             build_evidence_path=build_evidence_path,
+            image_store_evidence_path=image_store_evidence_path,
         ),
         "identity_mode": identity_mode,
         "resources": resources,
@@ -1181,6 +1494,8 @@ def _main():
             "--dockerfile", default="deployments/compose/worker-stt-cuda.Dockerfile"
         )
         sub.add_argument("--build-evidence")
+        sub.add_argument("--image-archive")
+        sub.add_argument("--image-store-evidence")
         if name == "prepare":
             sub.add_argument("--output-env", required=True)
         if name == "verify-container":
@@ -1195,6 +1510,10 @@ def _main():
         ]
         if args.build_evidence:
             private_inputs.append(args.build_evidence)
+        if args.image_archive:
+            private_inputs.append(args.image_archive)
+        if args.image_store_evidence:
+            private_inputs.append(args.image_store_evidence)
         require_private_config_paths(private_inputs)
         validated = load_and_validate(
             args.profile,
@@ -1204,6 +1523,8 @@ def _main():
             lock_path=args.lock,
             dockerfile_path=args.dockerfile,
             build_evidence_path=args.build_evidence,
+            image_archive_path=args.image_archive,
+            image_store_evidence_path=args.image_store_evidence,
         )
         if args.command == "prepare":
             write_env_file(
