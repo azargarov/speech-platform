@@ -1,6 +1,6 @@
 # M01C implementation record
 
-Status: implementation committed and CI verified; no image release or tag created.
+Status: implementation committed; v0.1.2 published and independently verified by the user from XMG. M01C closeout evidence is recorded in [verification](verification.md) and [result](result.md).
 
 ## Changes
 
@@ -17,9 +17,11 @@ Status: implementation committed and CI verified; no image release or tag create
 - Added tests for release version parsing, bounded service selection and GHCR auth configuration.
 - Updated the roadmap, operational documentation and releases README. Added proposed [ADR 0011](../../../docs/adr/0011-ghcr-publication.md).
 
-The previous release gate failed because the publisher selected CPU STT and the implementation was uncommitted. This change addresses variant selection. No tag was created, no package was pushed, no running service/server was changed, and `releases/stt-cuda-baseline-001.yaml` was not edited. The operational baseline is a compatibility reference only; it does not validate this new image.
+The earlier release gate failed because the publisher selected CPU STT and the implementation was uncommitted. The variant correction addressed that defect. Later, the approved annotated tag `v0.1.2` published Gateway, CUDA STT, and health-only TTS from commit `bbbeb697c1ae840e084e962fac39db0c19ab7728`; the release workflow succeeded. The user's authenticated XMG manifest inspection confirmed the registry digests match release metadata. The operational baseline remains a compatibility reference only; it does not validate this new image.
 
 
 ## Publisher image-resolution correction
 
 The `v0.1.1` release run 39162673061 built the images, then failed before tagging/pushing because `docker compose images -q` requires created Compose containers. Replaced that lookup with the stable `image:` references rendered from the tracked Compose definitions, followed by `docker image inspect`. Gateway, CPU STT, CUDA STT and health-only TTS now have explicit local image names; CPU and CUDA STT remain distinct. The publisher now validates all selected local image labels, lock identity and platform before any registry tagging or pushing. This does not create containers or publish images.
+
+This resolution fix was included in the successful v0.1.2 publication. The v0.1.0 deprecated artifact-action failure and the v0.1.1 image-resolution failure are retained in the [verification history](verification.md); neither release tag was moved or recreated.

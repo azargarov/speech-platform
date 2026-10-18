@@ -1,6 +1,6 @@
 # M01C plan — GHCR image publication
 
-Status: implementation and artifact-action correction are committed; the `v0.1.1` workflow failed after image builds but before publication because image resolution depended on nonexistent Compose containers. The resolution/prevalidation correction is in progress. Preserve `v0.1.0` and `v0.1.1`; local and GitHub validation now pass; recommend `v0.1.2` for the next controlled release, subject to explicit approval. Do not create the tag in this recovery task. GHCR publication and milestone closeout remain pending.
+Status: **PASS; closed 2026-10-18** after the explicitly approved v0.1.2 publication, successful release workflow and user-reported independent XMG manifest inspection. The v0.1.0 and v0.1.1 failures remain recorded in [verification](verification.md); both tags were preserved. See [result](result.md) for acceptance evidence. M01D is next planned; this milestone did not include deployment or GPU inference validation.
 
 ## Scope
 
@@ -46,4 +46,4 @@ The actual GHCR publication, workflow run and registry inspection require an app
 
 The first `v0.1.1` release attempt failed in run 39162673061 after all builds, at publisher image lookup: `docker compose images -q` returned no image because no Compose containers had been created. This is a publisher defect; build success was not the problem. The correction adds explicit local image names to the existing Compose definitions and resolves them with `docker compose config --format json` followed by `docker image inspect`. No container is started as a workaround. Regression tests cover all three release images in a no-container mock, missing images, incorrect service/variant identity, registry tag preparation, and the rule that all local validation precedes any push.
 
-The corrected pipeline must pass the listed local checks and GitHub CI before a new release version is recommended. Preserve both existing tags. M01C remains incomplete until a later approved release is published and independently verified by OCI digest.
+The corrected pipeline passed local and GitHub CI checks. The approved v0.1.2 release was published and all three OCI digests were independently inspected from XMG and matched release metadata. See the final evidence in [verification](verification.md). Preserve the v0.1.0 and v0.1.1 release history; neither tag was moved or recreated.

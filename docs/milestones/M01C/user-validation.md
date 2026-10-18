@@ -1,16 +1,15 @@
 # M01C user validation
 
-Status: pending user review.
+Status: **PASS — user validation and explicit closeout approval received (2026-10-18).**
 
-## Review steps
+## Validation evidence
 
-1. Review the Make target, publisher, release workflow, image labels and metadata schema.
-2. Confirm the package names `voiceservice-stt-cpu` and `voiceservice-stt-cuda`, and the explicit `voiceservice-tts-health-only` identity.
-3. The earlier `v0.1.0` and `v0.1.1` tags remain unchanged. The corrected implementation passed GitHub CI in run 39164164869. Review the proposed `v0.1.2` release request separately. No new tag or image will be created/pushed before explicit approval.
-4. Review the release workflow result and each emitted metadata JSON. Inspect each published image using its `repository@sha256:...` reference and confirm OCI revision/role labels and architecture.
+The user independently inspected the three published v0.1.2 images from the XMG workstation using authenticated GHCR access and `docker buildx imagetools inspect`. All registry manifest digests matched release metadata:
 
-## Expected result
+- Gateway `ghcr.io/azargarov/voiceservice-gateway`: `sha256:cab80ebc04bc78ec608c1f81c69ce1dfc8e048227e4892053c86783833064d30`.
+- STT CUDA `ghcr.io/azargarov/voiceservice-stt-cuda`: `sha256:31440127a13a1892f07fe480f013f1185c2d978ee981b5ce56fcd4a09a702ad8`.
+- TTS health-only `ghcr.io/azargarov/voiceservice-tts-health-only`: `sha256:6ac1e87e1290f657dae613faf45cbcdd83239b4529b0482a4cd2d12b642739d6`.
 
-Only the approved source revision and version are published. The release workflow verify/build job succeeds before the publish job runs and explicitly selects CUDA STT. Each image's registry digest, service, runtime variant, applicable lock digest, platform, source revision and role match the metadata. CPU publication requires `VARIANT=cpu`. No models, private configuration, credentials or local audio fixtures are present in the published images.
+The v0.1.2 release workflow [39165353557](https://github.com/azargarov/speech-platform/actions/runs/39165353557) succeeded. Full source revision, image metadata and verification evidence are recorded in [verification](verification.md); acceptance is summarized in [result](result.md).
 
-Reviewer, approval, commands, registry observations and feedback: pending.
+Reviewer: user, reporting independent inspection from XMG. Feedback: all three registry digests match release metadata; M01C closeout approved. No server deployment or GPU inference acceptance was requested or performed.

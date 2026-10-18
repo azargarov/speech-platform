@@ -1,6 +1,6 @@
 # M01C verification record
 
-Status: implementation committed to GitHub `main`; local verification and GitHub CI pass. GHCR publication and M01C closeout remain pending.
+Status: **PASS; closed after user-provided independent XMG GHCR manifest inspection and explicit closeout approval (2026-10-18).** The v0.1.2 tag workflow and publication succeeded; the three registry digests match release metadata and the independent inspection. No deployment or GPU inference validation is claimed.
 
 ## OBSERVED
 
@@ -43,16 +43,16 @@ Status: implementation committed to GitHub `main`; local verification and GitHub
 
 An initial system-Python Ruff check could not run because Ruff is not installed there; the repository virtualenv was used. An initial unittest module invocation used the wrong import path and an early test draft mistakenly accepted Docker-invalid SemVer build metadata; these were corrected, and the discover-based tests passed.
 
-## NOT ESTABLISHED
+## NOT ESTABLISHED AT THE PRE-RELEASE CHECK (historical; superseded below)
 
 - GHCR package write access, publication, registry digest and digest-pull inspection.
 - CUDA GPU inference; the local image build and library-load check do not establish inference behavior.
 
 Buildx registry digest resolution and digest-pull inspection were not executed. The local image IDs observed during image builds are not OCI manifest digests. The historical M01B results remain separate evidence.
 
-## Release readiness
+## Historical release readiness (superseded by v0.1.2 below)
 
-The CPU-selection defect is corrected: publication defaults to the distinct CUDA STT repository, CPU publication requires `VARIANT=cpu`, and the release workflow explicitly builds and publishes CUDA. GitHub Actions run 39161408151 passed verification and both image builds, but failed before the publish job could start because the artifact upload pin resolved to deprecated v3.1.2. The action pin was corrected and committed as `69098d0bf06f63d2b6a084981a2b0a0218ae9a5e`; ordinary CI passed in [run 39161979320](https://github.com/azargarov/speech-platform/actions/runs/39161979320). Release run 39162673061 then failed after image builds because publisher resolution used `docker compose images -q`, which returns no image without created Compose containers. The Compose-reference/direct-inspect fix and its local checks are recorded below; hosted CI passed on correction commit `47f4aa6665fe17fca2c868bd86e17e41f82e4f34` in [run 39164164869](https://github.com/azargarov/speech-platform/actions/runs/39164164869). Preserve both `v0.1.0` and `v0.1.1`; recommend `v0.1.2` for a future controlled release, pending explicit approval. M01C remains incomplete until publication and independent OCI digest inspection succeed.
+At this historical readiness checkpoint, the corrected implementation had not yet been published. Publication defaults to the distinct CUDA STT repository; CPU publication requires `VARIANT=cpu`, and the release workflow explicitly builds and publishes CUDA. GitHub Actions run 39161408151 passed verification and both image builds, but failed before the publish job could start because the artifact upload pin resolved to deprecated v3.1.2. The action pin was corrected and committed as `69098d0bf06f63d2b6a084981a2b0a0218ae9a5e`; ordinary CI passed in [run 39161979320](https://github.com/azargarov/speech-platform/actions/runs/39161979320). Release run 39162673061 then failed after image builds because publisher resolution used `docker compose images -q`, which returns no image without created Compose containers. The Compose-reference/direct-inspect fix and its local checks are recorded below; hosted CI passed on correction commit `47f4aa6665fe17fca2c868bd86e17e41f82e4f34` in [run 39164164869](https://github.com/azargarov/speech-platform/actions/runs/39164164869). These failures led to the corrected, separately approved v0.1.2 release recorded below.
 
 ## Release recovery — 2026-10-18
 
@@ -75,3 +75,18 @@ The CPU-selection defect is corrected: publication defaults to the distinct CUDA
 - `make verify PYTHON=.venv/bin/python` — exit 0, including lint, config, Compose, Go and Python tests, governance and STT lock checks.
 - `actionlint .github/workflows/release.yaml .github/workflows/verify.yaml` — exit 0. `git diff --check` — exit 0. Missing/invalid `VERSION` and unknown `SERVICE` each exited 2 before any build or publication.
 - GitHub Actions [run 39164164869](https://github.com/azargarov/speech-platform/actions/runs/39164164869) on commit `47f4aa6665fe17fca2c868bd86e17e41f82e4f34` completed successfully. The `foundation` job passed `make verify`, `make image`, and `make image VARIANT=cuda` on the hosted runner. This verifies buildability, not GPU inference. No GHCR image was tagged or pushed and no release tag was created. No server or running container was changed; `releases/stt-cuda-baseline-001.yaml` is unchanged.
+
+## Final v0.1.2 release and independent registry verification — 2026-10-18
+
+- **OBSERVED — Git and workflow:** annotated tag `v0.1.2` dereferences to release commit `bbbeb697c1ae840e084e962fac39db0c19ab7728`, the approved `main` revision used for release. GitHub Actions [run 39165353557](https://github.com/azargarov/speech-platform/actions/runs/39165353557) completed successfully; `verify` and `publish` both succeeded. The release workflow explicitly selected CUDA STT. Earlier tags `v0.1.0` and `v0.1.1` remain preserved.
+- **OBSERVED — publisher checks:** the publishing job resolved a registry digest for each package, pulled each image by immutable digest, and completed platform and identity-label checks before writing metadata. The workflow artifact `release-metadata-v0.1.2` (artifact ID `12150139581`, archive digest `sha256:7c0ff69981c907b2e738712b936a0c3ff2830e1a6c9f2b74597ef4da981ed3`) contains Gateway, STT CUDA, and TTS health-only JSON metadata.
+- **USER-REPORTED INDEPENDENT EVIDENCE:** the user inspected the three published manifests from the XMG workstation using authenticated GHCR access and `docker buildx imagetools inspect`. All actual registry digests matched the release metadata:
+
+  | Service | Immutable image reference | OCI digest | Metadata identity |
+  |---|---|---|---|
+  | Gateway | `ghcr.io/azargarov/voiceservice-gateway@sha256:cab80ebc04bc78ec608c1f81c69ce1dfc8e048227e4892053c86783833064d30` | `sha256:cab80ebc04bc78ec608c1f81c69ce1dfc8e048227e4892053c86783833064d30` | `linux/amd64`, `foundation` |
+  | STT | `ghcr.io/azargarov/voiceservice-stt-cuda@sha256:31440127a13a1892f07fe480f013f1185c2d978ee981b5ce56fcd4a09a702ad8` | `sha256:31440127a13a1892f07fe480f013f1185c2d978ee981b5ce56fcd4a09a702ad8` | `linux/amd64`, `cuda`; lock SHA-256 `68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14` |
+  | TTS | `ghcr.io/azargarov/voiceservice-tts-health-only@sha256:6ac1e87e1290f657dae613faf45cbcdd83239b4529b0482a4cd2d12b642739d6` | `sha256:6ac1e87e1290f657dae613faf45cbcdd83239b4529b0482a4cd2d12b642739d6` | `linux/amd64`, `health-only` |
+
+- **OBSERVED — metadata agreement:** all three JSON records identify release `v0.1.2`, source revision `bbbeb697c1ae840e084e962fac39db0c19ab7728`, and workflow identity `release#39165353557.1`; each repository and digest matches the independent XMG inspection. STT metadata includes the CUDA lock checksum above.
+- **INTERPRETATION:** image publication and immutable artifact verification satisfy M01C. This does not establish CUDA GPU inference, managed installation, deployment, TTS inference, or Gateway inference routing. No server or running container was accessed or changed; `releases/stt-cuda-baseline-001.yaml` remains unchanged. The release is the health-only implementation for TTS.

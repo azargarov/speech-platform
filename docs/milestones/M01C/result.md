@@ -1,28 +1,30 @@
 # M01C result
 
-Status: INCOMPLETE — the `v0.1.1` release built images but failed before publication because image resolution depended on Compose containers. The local resolution/prevalidation fix and requested local checks pass; GitHub CI, GHCR publication and digest verification remain pending.
+Status: **PASS — closed 2026-10-18 after successful v0.1.2 publication and user-reported independent XMG GHCR manifest inspection.** The acceptance is limited to versioned image publication and immutable digest verification. It does not claim deployment or GPU inference.
 
 ## Acceptance status
 
 | Criterion | Status | Evidence |
 |---|---|---|
-| Reuse existing Make/Compose image builds | Local PASS | `make image` and `make verify` passed; see [verification](verification.md) |
-| Explicit versioned publication and safe input failures | Local PASS | Unit tests and Make negative cases passed; publication itself pending |
-| Separate Gateway, STT and health-only TTS images | Local PASS | All three built; local architecture and role labels inspected; registry check pending |
-| Tag workflow with read-only ordinary verification and scoped publish permission | Recovery in progress | Release verification passed in [run 39161408151](https://github.com/azargarov/speech-platform/actions/runs/39161408151); publish job failed before its first step because the artifact action SHA resolved to deprecated v3.1.2. Corrected pin is committed; ordinary CI passed in [run 39161979320](https://github.com/azargarov/speech-platform/actions/runs/39161979320). |
-| Registry OCI digests and minimal metadata | Pending release | Failed run did not start publication and produced no metadata artifact; requires an approved corrected release and digest inspection |
-| No deployment or baseline modification | PASS | No runtime/remote action; baseline SHA matches `HEAD` |
-| Separate CPU/CUDA STT build and publication identities | Local PASS | CPU and CUDA Make builds use the corresponding existing Dockerfiles/locks; release defaults to CUDA, distinct repository names, explicit variant/service labels and metadata. See [verification](verification.md). |
-| Previous release gate and first release attempt | Recovery in progress | The artifact pin was fixed and `v0.1.1` remains immutable, but its run failed after builds because `docker compose images -q` needs created containers. The correction resolves stable Compose image references and validates all selected images before writes. Preserve `v0.1.0` and `v0.1.1`; do not recommend another version until GitHub CI passes. |
+| Reuse existing Make/Compose image builds and publish only by explicit version | PASS | Local verification and publisher regression checks are recorded in [verification](verification.md). The release workflow invokes `make publish VERSION="$GITHUB_REF_NAME" VARIANT=cuda`. |
+| Publish separate Gateway, CUDA STT, and health-only TTS images | PASS | The three v0.1.2 GHCR repositories and runtime identities are recorded in [verification](verification.md). |
+| Verify source, platform, service/variant labels, and CUDA lock identity | PASS | The publishing job's digest-pull checks passed. The user independently inspected all three manifests from XMG using authenticated `docker buildx imagetools inspect`; registry digests matched release metadata. STT CUDA lock SHA-256 is recorded in the verification table. |
+| Release metadata names the actual immutable artifacts | PASS | Workflow artifact `release-metadata-v0.1.2` (ID `12150139581`) contains three service JSON records. Their source revision, version, workflow identity, repository and digests match the release and independent inspection. |
+| Preserve failed release attempts and prior tags | PASS | v0.1.0's deprecated artifact-action pin and v0.1.1's Compose-container image-resolution failure remain documented in [verification](verification.md). Neither tag was moved or recreated; v0.1.2 is the recovery release. |
+| Avoid deployment and preserve the historical CUDA baseline | PASS | No Ubuntu host or running container was accessed or changed. `releases/stt-cuda-baseline-001.yaml` is unchanged. |
 
-## Remaining requirements for first release
+## Release identity
 
-- Confirm ordinary CI passes on the workflow-fix commit.
-- After approval, tag the corrected commit as `v0.1.1`; leave `v0.1.0` unchanged.
-- Run publication, inspect Gateway, CUDA STT and health-only TTS by immutable OCI digest, and record source revision, architecture and workflow identity.
-- User validates the evidence and explicitly approves M01C closeout.
+- Tag: annotated `v0.1.2`, dereferencing to `bbbeb697c1ae840e084e962fac39db0c19ab7728`.
+- GitHub Actions: [release run 39165353557](https://github.com/azargarov/speech-platform/actions/runs/39165353557); verification and publication jobs succeeded.
+- Gateway: `ghcr.io/azargarov/voiceservice-gateway@sha256:cab80ebc04bc78ec608c1f81c69ce1dfc8e048227e4892053c86783833064d30`.
+- STT CUDA: `ghcr.io/azargarov/voiceservice-stt-cuda@sha256:31440127a13a1892f07fe480f013f1185c2d978ee981b5ce56fcd4a09a702ad8`.
+- TTS health-only: `ghcr.io/azargarov/voiceservice-tts-health-only@sha256:6ac1e87e1290f657dae613faf45cbcdd83239b4529b0482a4cd2d12b642739d6`.
 
+## Remaining limitations
 
-## Current recovery status — 2026-10-18
+- CUDA inference on the published image was not tested. A successful CUDA image build and digest inspection do not establish GPU behavior.
+- TTS remains health-only; Gateway inference routing/authentication is not implemented by M01C.
+- Installation, update, rollback and operation on the target Ubuntu host are outside M01C.
 
-The regression fix, explicit Compose image references and documentation are ready locally. The fresh-daemon mock and real local build/inspection evidence are in [verification](verification.md). The exact cause of release run 39162673061 was publisher use of `docker compose images -q` after image build; no containers existed, so it returned an empty result. The fix does not start containers. The requested checks passed locally; the correction still needs a commit/push and successful GitHub CI. Keep M01C incomplete. After CI passes, propose `v0.1.2` without creating it; only a separately approved release attempt can satisfy the registry publication/digest criteria.
+M01D — Release Manifest and Model Artifact Management — is the next planned milestone. It has not been started by this closeout.
