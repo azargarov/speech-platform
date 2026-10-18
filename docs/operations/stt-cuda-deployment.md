@@ -80,6 +80,8 @@ The CUDA lock SHA-256 remains `68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b
 
 For local-image mode, select the discriminator and artifact identity kind explicitly in the private profile, remove registry-only `image` and `image_reference_verified` fields, and supply the expected store-reported `image_id`, build-evidence digest, archive digest, and image-store-evidence digest. `docker_config_digest` is valid only where the observed store reports that config identity; `containerd_oci_manifest` requires a unique target image record and raw manifest evidence whose digest and config/layer descriptors match the approved identity. Layer-content verification is represented in the pinned image-store evidence; the offline validator does not fetch blobs from a remote or target containerd store. Evidence collection and approval are operator trust-boundary steps, not independent signature verification. There is no mutable-tag fallback. Before preparing/rendering or any separately approved creation, supply all inputs explicitly:
 
+The one-time operator collector for target containerd association and content-store observations is documented in [stt-image-store-evidence.md](stt-image-store-evidence.md). It is diagnostic-only, uses explicit socket, namespace and Docker context values, and does not change the deployment contract or compatibility policy. Do not run it without separate target-execution authorization.
+
 ```sh
 .venv/bin/python scripts/stt_deployment_profile.py verify-image \
   --profile private/stt-deployment-profile-cuda.yaml \
