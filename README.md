@@ -1,6 +1,6 @@
 # Speech Platform
 
-Application-agnostic, self-hosted STT and TTS foundation. M01 is complete as a foundation and architecture milestone. Inference is unavailable. No `/v1` or internal inference handlers are installed. M02/M03 implement providers; M04 implements authentication enforcement and complete routing. Runtime deployment and GPU passthrough have not been validated.
+Application-agnostic, self-hosted speech services. The product name is VoiceService; the repository remains `speech-platform`. The repository contains a production STT worker and a CUDA STT runtime smoke baseline. The target-local STT baseline in [releases/stt-cuda-baseline-001.yaml](releases/stt-cuda-baseline-001.yaml) records a healthy container and two successful HTTP transcriptions. This is a working experimental runtime, not a reproducible platform installation or capacity guarantee. The Gateway's public inference routes/authentication and TTS inference remain unimplemented; see [PLANS.md](PLANS.md) and the [architecture redesign plan](docs/architecture/platform-redesign.md).
 
 ## Development
 
@@ -29,16 +29,8 @@ Sample configuration binds all interfaces for containers. For direct host runs, 
 
 Keep private audio, credentials, local fixtures and other sensitive test data under the root `private/` directory. That directory is ignored by Git and excluded from Docker build contexts; do not force-add its contents. The local benchmark sample is `private/audio/russian.m4a`. Benchmark code should read `SPEECH_BENCHMARK_AUDIO`; use `scripts/with-benchmark-audio.sh` to set the default or override the path for a command. See [M00 benchmark notes](benchmarks/README.md) for local archive instructions.
 
-## Containers
+## Container and deployment status
 
-```sh
-docker compose -f deployments/compose/compose.yaml build
-docker compose -f deployments/compose/compose.yaml up -d
-curl -i http://127.0.0.1:8080/healthz
-curl -i http://127.0.0.1:8080/readyz
-docker compose -f deployments/compose/compose.yaml down
-```
+The CUDA STT smoke deployment is already running on the target recorded by the baseline. Do not use the generic foundation Compose commands below as instructions to recreate or replace that service. The tracked Compose files include CPU/foundation defaults and a separate validated CUDA overlay; the successful smoke used ignored, target-specific configuration. A supported `make install`/`update`/`rollback` interface is proposed but is not implemented yet. Preserve the running service until a separately reviewed migration and rollback path is approved.
 
-Expected: health 200, readiness 503. Workers publish no host ports. Only a loopback gateway port is published by default. Existing Ollama and Dify services are not referenced or modified. No GPU reservations or model downloads occur in M01.
-
-See [architecture](docs/architecture/overview.md), [contracts](api/openapi/public-v1.yaml), [operations](docs/operations/runbook.md), [milestone plan](PLANS.md), and [user validation](docs/milestones/M01/user-validation.md).
+See [architecture](docs/architecture/overview.md), the [redesign and migration plan](docs/architecture/platform-redesign.md), [contracts](api/openapi/public-v1.yaml), [operations](docs/operations/runbook.md), [milestone plan](PLANS.md), and [baseline record](releases/stt-cuda-baseline-001.yaml).

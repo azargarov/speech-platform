@@ -1,5 +1,7 @@
 # Architecture
 
+This is the accepted component-boundary design; it is not a status claim that every described API or deployment is implemented. The current repository and proposed platform migration are summarized in [platform-redesign.md](platform-redesign.md). The working target-local CUDA STT smoke is recorded separately in [stt-cuda-baseline-001.yaml](../../releases/stt-cuda-baseline-001.yaml); it does not replace milestone acceptance records.
+
 Gateway → STT worker; Gateway → TTS worker. Workers have no calls or imports between them. Each process is independently buildable and configurable. Shared Python code contains HTTP/configuration mechanics only; each worker can be deployed without starting the other. One worker image supports separate entry points.
 
 Gateway owns public versioned contracts, authentication, validation and routing. Provider implementation, model registry and model lifecycle belong to their respective workers. Public model/voice IDs are platform aliases. The Gateway forwards an STT alias unchanged; STT resolves that alias to an immutable artifact and backend. Public and internal contract types do not name faster-whisper or any engine.
