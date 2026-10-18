@@ -1,6 +1,12 @@
 # Persistent CUDA STT deployment profile — C.6A
 
-Status: **configuration design and offline validation only**. No target host, production container start, GPU, model load or service is validated by this document's static checks. Do not treat the example profile as deployable.
+Status: **deployment not ready**. The profile and Compose policy remain design/offline validated; target image-store evidence is now present and passes the existing offline identity validator, but no production profile has been prepared and no production worker has been started. Do not treat the example profile or current private test configs as deployable.
+
+## Current image-store evidence review
+
+The private target collector record at `private/evidence/image-store-evidence.json` has SHA-256 `45dffe412426bd4a00ceb15c736eda499bba376e1e47ae6f2ae2ba9266d1dafc`. The existing `validate_local_artifact_identity()` accepted it against the retained approved image archive. It binds the reported containerd OCI manifest identity `sha256:7f710bf8fca9307d387a5d61ab84361756efa9c3e18a6d60e07b9c42b60eb45c` to config digest `sha256:3780e43b86717c877d82bb65c9944c8df7d497efd8446263dbd22b5092f1f406`, the archive SHA-256, ten ordered layer descriptors, RootFS diff IDs and the raw manifest. The accompanying A2 build record has SHA-256 `b25f992d44c0e9b0aa4be103080325daf2ccfa586a383a7ad134923cbdaffae7`.
+
+This is offline consistency validation of the supplied private record and archive, not a fresh target inspection or independent signature. The current private candidate now records the operator-confirmed target GPU UUID, model release and owner/group, worker identity, and approved initial experimental resource limits. The supplied host checks report that all seven release files are readable by UID/GID 65532:65532 with supplementary GID 988. Those are operator-provided observations, not a fresh target inspection or proof of container access. Deployment remains blocked: target Engine `29.1.3` is outside the local-image mode compatibility allowlist (`29.7.2-ce` only, with Compose `5.6.0`), and the workstation cannot inspect the target-only model path to satisfy the existing `prepare` artifact/permission verifier. Current GPU mapping, host headroom and shared-service health must be rechecked before creation. No compatibility gate is bypassed here. The Compose overlay already has no STT host port, uses an internal private network, selects one configured host GPU, runs non-root with a read-only root, uses manual restart behavior, and probes `/healthz`; no Compose policy change is justified by this review.
 
 ## What is prepared
 
@@ -12,26 +18,32 @@ The existing STT application config remains authoritative for CUDA-only device p
 
 ## Preparing a reviewed private profile
 
-Copy the example to ignored `private/`, then fill every placeholder using target/operator evidence. Do not add the private profile or generated Compose environment file to Git.
+The workstation has a private candidate set under `private/deployment/cuda-stt-initial/`. It binds the accepted image/model evidence and uses the CUDA templates. The candidate records the operator-confirmed GPU UUID, model owner UID 0, reader GID 988, worker UID/GID 65532:65532, and operator-approved initial experimental limits. The supplied target-side `setpriv` checks cover all seven release files, but do not replace target `prepare` validation or prove access from the created container. On this workstation, `prepare` currently fails because the target-only release root is not present locally; it must be run on the target after confirming the same inputs there. The target Engine compatibility gate also remains unsupported and must be explicitly addressed before container creation.
+
+For a new checkout, copy templates without overwriting an existing private candidate, then fill every placeholder using reviewed target evidence. Do not add private files or the generated Compose environment file to Git.
 
 ```sh
-mkdir -p private && chmod 700 private
-cp configs/stt-deployment-profile-cuda.example.yaml private/stt-deployment-profile-cuda.yaml
-cp configs/stt-application-cuda.example.yaml private/stt-application-cuda.yaml
-cp configs/stt-deployment-cuda.example.yaml private/stt-deployment-cuda.yaml
-cp configs/stt.yaml private/stt-worker.yaml
+mkdir -p private/deployment/cuda-stt-initial
+chmod 700 private private/deployment private/deployment/cuda-stt-initial
+cp -n configs/stt-deployment-profile-cuda.example.yaml private/deployment/cuda-stt-initial/profile.yaml
+cp -n configs/stt-application-cuda.example.yaml private/deployment/cuda-stt-initial/application.yaml
+cp -n configs/stt-deployment-cuda.example.yaml private/deployment/cuda-stt-initial/deployment.yaml
+cp -n configs/stt.yaml private/deployment/cuda-stt-initial/worker.yaml
 # Use mode 0600 for every private input; keep containing directories at 0700.
-chmod 600 private/stt-deployment-profile-cuda.yaml private/stt-application-cuda.yaml \
-  private/stt-deployment-cuda.yaml private/stt-worker.yaml
+chmod 600 private/deployment/cuda-stt-initial/profile.yaml private/deployment/cuda-stt-initial/application.yaml \
+  private/deployment/cuda-stt-initial/deployment.yaml private/deployment/cuda-stt-initial/worker.yaml
 # Set the required free-VRAM preflight value in the private deployment config
 # only after operator review; configure the actual target artifact release and
 # worker config without adding host-specific values to tracked files.
 .venv/bin/python scripts/stt_deployment_profile.py prepare \
-  --profile private/stt-deployment-profile-cuda.yaml \
-  --application-config private/stt-application-cuda.yaml \
-  --deployment-config private/stt-deployment-cuda.yaml \
-  --worker-config private/stt-worker.yaml \
-  --output-env private/deployment/stt-cuda.compose.env
+  --profile private/deployment/cuda-stt-initial/profile.yaml \
+  --application-config private/deployment/cuda-stt-initial/application.yaml \
+  --deployment-config private/deployment/cuda-stt-initial/deployment.yaml \
+  --worker-config private/deployment/cuda-stt-initial/worker.yaml \
+  --build-evidence private/image-build-a2-20261018-01/build-result.json \
+  --image-archive private/results/c6b-image-transfer-20261018-01/stt-cuda-image.tar \
+  --image-store-evidence private/evidence/image-store-evidence.json \
+  --output-env private/deployment/cuda-stt-initial/stt-cuda.compose.env
 ```
 
 `prepare` strictly loads the existing application, worker and deployment schemas; verifies the CUDA lock digest, model alias/revision/manifest and artifact file hashes; checks static owner/group/mode, setgid, traversal, and no-ACL policy; validates resource and timeout relationships; then writes a mode-0600 Compose environment file under a private directory. All four input configurations must be explicit non-example files under the ignored repository `private/` directory, with mode 0600 or stricter; there is no fallback to the tracked examples. In local-image mode, pass the private A2 build-evidence file (`--build-evidence`), the exact approved `docker save` archive (`--image-archive`), and image-store identity evidence (`--image-store-evidence`). The profile pins the build-evidence and image-store-evidence SHA-256 values; its typed artifact identity pins the archive digest, configuration digest and store-specific identity. The complete configuration-set identity includes each input's logical role, resolved source path and content SHA-256, private evidence-file path/content digests in local mode, and both Compose files' paths/content digests, serialized as sorted compact JSON. The archive bytes are verified against the archive SHA-256 declared in the profile rather than rehashed as a second configuration-set input. Only the resulting digest is placed in a Compose label; it does not expose source paths. The generated environment file is not an input, avoiding a self-reference cycle. Review and approve all resource values in the private profile; C.4's experimental limits are not production recommendations. Preparation and Compose rendering do not invoke CUDA or inference. Static success does not prove effective target permissions or mounted-container access; C.6B-R3 must verify artifact access as UID/GID 65532 plus the configured supplementary group in the actual runtime.
@@ -42,6 +54,48 @@ Use one dedicated host model-reader group with a numeric GID recorded in the pri
 
 Parent directories need only grant the worker identity execute/traversal and must not allow that identity to write; world-writable parents are rejected except a sticky, root-controlled temporary-directory pattern. Do not change the home or repository permissions to satisfy the check. If the approved release is inaccessible through existing parent permissions, use an operator-approved dedicated model store with restrictive parent traversal and a verified copy of the immutable release. The validator rejects POSIX ACLs: this design selects ordinary group/mode policy rather than combining two authorization systems. Container group namespaces/user remapping may change effective numeric identity; the target phase must inspect Docker's effective UID/GID/groups and prove actual reads. Static validation is not runtime proof.
 
+The previously observed release under `/home/master/...` had owner-only directories and a mode-0600 manifest. Do not loosen the home directory or mutate that release in place. The following is a proposed permission procedure for `llm`: copy the already verified release into a dedicated `/srv` store, create a dedicated group, and apply modes only to the new digest-named copy. It requires a fresh path/disk preflight and separate approval. Stop if the destination or group already exists, the source contains symlinks/special objects, or disk headroom is insufficient. The copy is local and does not download the model.
+
+```sh
+set -euo pipefail
+MODEL_DIGEST=86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6
+SOURCE_RELEASE="/home/master/speech-platform-staging/M02/M02-C/M02-C.4/releases/$MODEL_DIGEST"
+STORE_PARENT=/srv/speech-platform
+STORE_ROOT=/srv/speech-platform/models
+MODEL_RELEASE="$STORE_ROOT/$MODEL_DIGEST"
+MODEL_READER_GROUP=stt-model-reader
+
+test -d "$SOURCE_RELEASE"
+sudo test ! -e "$STORE_PARENT"
+if getent group "$MODEL_READER_GROUP" >/dev/null; then
+  echo "model-reader group exists; inspect and review it before proceeding" >&2
+  exit 1
+fi
+if sudo find -P "$SOURCE_RELEASE" ! -type d ! -type f -print -quit | grep -q .; then
+  echo "source release contains a symlink or non-regular object" >&2
+  exit 1
+fi
+sudo groupadd --system "$MODEL_READER_GROUP"
+MODEL_READER_GID="$(getent group "$MODEL_READER_GROUP" | cut -d: -f3)"
+test -n "$MODEL_READER_GID"
+sudo install -d -o root -g root -m 0711 "$STORE_PARENT"
+sudo install -d -o root -g "$MODEL_READER_GROUP" -m 2710 "$STORE_ROOT"
+sudo test ! -e "$MODEL_RELEASE"
+sudo install -d -o root -g "$MODEL_READER_GROUP" -m 2750 "$MODEL_RELEASE"
+sudo cp -a "$SOURCE_RELEASE/." "$MODEL_RELEASE/"
+if sudo find -P "$MODEL_RELEASE" ! -type d ! -type f -print -quit | grep -q .; then
+  echo "copied release contains a symlink or non-regular object" >&2
+  exit 1
+fi
+sudo chown -hR "root:$MODEL_READER_GROUP" "$MODEL_RELEASE"
+sudo find -P "$MODEL_RELEASE" -type d -exec chmod 2750 {} +
+sudo find -P "$MODEL_RELEASE" -type f -exec chmod 0640 {} +
+printf 'Reader GID for private profile: %s\n' "$MODEL_READER_GID"
+```
+
+This leaves the source release untouched. Set the private profile's `host_release_root` to the destination, `artifact_owner_uid: 0`, and `supplementary_read_gid` to the printed GID, then run the existing `prepare` validator. It checks artifact hashes, ownership, modes, ACL absence and parent traversal. It does not prove effective access under Docker user-namespace settings; actual container access/readiness remains a separate gate.
+
+
 ## Private configuration preparation and review
 
 Copy the tracked templates into `private/`, fill every placeholder only from independently collected target/image/model evidence, and set private files to mode 0600 and containing directories to 0700. Keep versioned, complete configuration sets together so rollback selects the prior profile, application config, deployment config, worker config, and generated env file as a unit. `prepare` rejects example files, external paths, symlinks, missing inputs, broad private permissions, mutable image tags, unresolved identity values, mismatched artifact identity, and unreviewed resource settings. Review the rendered effective Compose output and approve CPU, RAM, PID, free-VRAM admission and timeout values against host headroom and shared-service needs before deployment. The generated configuration-set digest identifies exact source bytes; it is an integrity identifier, not a signature or secret-management system. Keep credentials out of these files and Compose labels.
@@ -51,18 +105,56 @@ Rollback is release selection, not in-place mutation: retain at least one previo
 The generated environment file drives the Compose settings. Render and validate before any separately authorized service start:
 
 ```sh
-docker compose --env-file private/deployment/stt-cuda.compose.env \
+set -euo pipefail
+
+docker compose --env-file private/deployment/cuda-stt-initial/stt-cuda.compose.env \
   -f deployments/compose/compose.yaml \
   -f deployments/compose/compose.stt-cuda.yaml \
   --profile cuda config --format json |
   .venv/bin/python scripts/stt_deployment_profile.py check-rendered \
-    --profile private/stt-deployment-profile-cuda.yaml \
-    --application-config private/stt-application-cuda.yaml \
-    --deployment-config private/stt-deployment-cuda.yaml \
-    --worker-config private/stt-worker.yaml
+    --profile private/deployment/cuda-stt-initial/profile.yaml \
+    --application-config private/deployment/cuda-stt-initial/application.yaml \
+    --deployment-config private/deployment/cuda-stt-initial/deployment.yaml \
+    --worker-config private/deployment/cuda-stt-initial/worker.yaml \
+    --build-evidence private/image-build-a2-20261018-01/build-result.json \
+    --image-archive private/results/c6b-image-transfer-20261018-01/stt-cuda-image.tar \
+    --image-store-evidence private/evidence/image-store-evidence.json
 ```
 
 The checker confirms the rendered project and profile labels, immutable image/no-build/no-pull policy, GPU 0 host selection, configured limits, no restart loop, private worker network/no published ports, non-root/read-only mount and `/healthz`-only healthcheck. Compose `config` is a render/validation step; it does not start containers. The environment file and target paths are deployment data and stay private.
+
+### Initial resource proposal — not approved
+
+The private candidate uses the operator-approved initial experimental limits: 4 CPUs, 12 GiB RAM, 128 PIDs; one active and one queued request; the existing C.4 model-load/request/shutdown timeouts (100-second model-load timeout, 25-second request timeout, 60-second worker socket shutdown timeout, 10-second drain, 2-second child-exit timeout and 125-second Compose stop grace); and a 14,336 MiB pre-load free-VRAM gate. The supplied preflight observed 14,909 MiB free GPU memory and 57 GiB available host RAM at that time; these are observations, not reserved capacity or current readings. The operator-approved limits are marked reviewed in the private candidate, but they do not establish production capacity, exact peak VRAM, concurrency capacity or sustained performance.
+
+
+
+
+## Read-only target preflight commands
+
+Run these on `llm` only after separate authorization for target inspection. They do not create or modify Docker resources. Retain sanitized output privately; do not capture full inspect JSON or environment values.
+
+```sh
+set -euo pipefail
+hostnamectl --static
+uname -m
+docker context show
+docker version --format 'client={{.Client.Version}} server={{.Server.Version}} api={{.Server.APIVersion}}'
+docker compose version
+docker info --format 'os={{.OSType}} arch={{.Architecture}} storage={{.Driver}} runtimes={{json .Runtimes}}'
+nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.free,utilization.gpu --format=csv,noheader
+nproc
+free -b
+df -B1 /srv
+docker ps --all --format '{{.ID}} {{.Names}} {{.State}} {{.Status}}'
+curl --fail --silent --show-error --max-time 3 http://127.0.0.1:11434/api/version >/dev/null
+docker image inspect --format '{{.Id}} {{.Os}}/{{.Architecture}} {{.Config.User}} {{json .Config.Entrypoint}}' \
+  sha256:7f710bf8fca9307d387a5d61ab84361756efa9c3e18a6d60e07b9c42b60eb45c
+```
+
+Compare Engine/Compose with the explicit local-image compatibility allowlist: recorded target Engine 29.1.3 is unsupported, while Compose 5.6.0 matches. The minimum policy change is an explicit addition of Engine `29.1.3` to the centralized allowlist and regression coverage for the exact Engine 29.1.3 / Compose 5.6.0 pair, after a separately authorized create-only compatibility test succeeds. No policy expansion is made here. Compare GPU 0 UUID to a freshly reviewed private profile value and verify the exact image output is the expected manifest identity, linux/amd64, user 65532:65532 and production `python -m` entrypoint. `nvidia-smi` and Docker's runtime list do not prove host-to-container CUDA mapping.
+
+`docker ps` provides current Ollama/Dify state and Docker health where configured. Missing health status means unknown, not healthy. The Ollama version GET is read-only. Do not restart or send inference to either service.
 
 ## GPU identity and configuration relationship
 
@@ -84,13 +176,13 @@ The one-time operator collector for target containerd association and content-st
 
 ```sh
 .venv/bin/python scripts/stt_deployment_profile.py verify-image \
-  --profile private/stt-deployment-profile-cuda.yaml \
-  --application-config private/stt-application-cuda.yaml \
-  --deployment-config private/stt-deployment-cuda.yaml \
-  --worker-config private/stt-worker.yaml \
+  --profile private/deployment/cuda-stt-initial/profile.yaml \
+  --application-config private/deployment/cuda-stt-initial/application.yaml \
+  --deployment-config private/deployment/cuda-stt-initial/deployment.yaml \
+  --worker-config private/deployment/cuda-stt-initial/worker.yaml \
   --build-evidence private/image-build-a2-20261018-01/build-result.json \
-  --image-archive private/image-build-a2-20261018-01/production-image.tar \
-  --image-store-evidence private/image-build-a2-20261018-01/image-store-evidence.json
+  --image-archive private/results/c6b-image-transfer-20261018-01/stt-cuda-image.tar \
+  --image-store-evidence private/evidence/image-store-evidence.json
 ```
 
 The check is read-only: it runs Docker Engine/Compose version queries and `docker image inspect` for the exact configured ID; it never pulls or builds. Local mode is currently accepted only for Engine `29.7.2-ce` and Compose `5.6.0`. Registry mode remains governed by the existing repository-qualified immutable digest and verified image-ID relationship.
@@ -99,13 +191,13 @@ After a separately authorized Compose create operation, but before any start aut
 
 ```sh
 .venv/bin/python scripts/stt_deployment_profile.py verify-container \
-  --profile private/stt-deployment-profile-cuda.yaml \
-  --application-config private/stt-application-cuda.yaml \
-  --deployment-config private/stt-deployment-cuda.yaml \
-  --worker-config private/stt-worker.yaml \
+  --profile private/deployment/cuda-stt-initial/profile.yaml \
+  --application-config private/deployment/cuda-stt-initial/application.yaml \
+  --deployment-config private/deployment/cuda-stt-initial/deployment.yaml \
+  --worker-config private/deployment/cuda-stt-initial/worker.yaml \
   --build-evidence private/image-build-a2-20261018-01/build-result.json \
-  --image-archive private/image-build-a2-20261018-01/production-image.tar \
-  --image-store-evidence private/image-build-a2-20261018-01/image-store-evidence.json \
+  --image-archive private/results/c6b-image-transfer-20261018-01/stt-cuda-image.tar \
+  --image-store-evidence private/evidence/image-store-evidence.json \
   --container-id '<full-container-id>'
 ```
 
@@ -153,25 +245,97 @@ The host model release is an immutable versioned directory mounted at `/models:r
 6. Roll back by restoring the complete previously verified release A (immutable image reference, app/deployment/worker config, model release and generated environment) from its preserved versioned files. Re-run all pre-start validation and rendered Compose checks, then start only the exact STT service. Do not rely on a mutable tag or automatic rollback.
 7. Preserve sanitized startup/shutdown evidence outside Git and verify Ollama and Dify health before and after. If exact container/child exit, model access, GPU identity, readiness or shared-service health cannot be confirmed, stop and escalate without retrying.
 
-For a future separately authorized C.6B/C.6C execution, use the same reviewed env file and Compose file pair for every command. Resolve the project name from the validated profile/env file and record the exact container ID before lifecycle actions. The following command shapes are operator procedures only; they were not run in C.6A:
+For a separately authorized deployment, use the same reviewed env file and Compose file pair for every command. Resolve the project name from the validated profile/env file and record the exact container ID before lifecycle actions. Local-image mode requires a create/inspect gate before start; do not use `compose up` because it combines creation and startup and would bypass the operator-enforced image-ID check. These commands are blocked until the target Engine compatibility policy, model access, private configuration and resource review are resolved. They were not run as part of this preparation:
 
 Set `STT_STOP_GRACE_PERIOD_SECONDS` in the operator shell from the reviewed deployment profile value; do not substitute an unreviewed literal.
 
 ```sh
-docker compose --env-file private/deployment/stt-cuda.compose.env \
+docker compose --env-file private/deployment/cuda-stt-initial/stt-cuda.compose.env \
   -f deployments/compose/compose.yaml \
   -f deployments/compose/compose.stt-cuda.yaml \
-  --profile cuda up --detach --no-build --pull never stt
+  --profile cuda create --no-build --pull never stt
 
-docker compose --env-file private/deployment/stt-cuda.compose.env \
+mapfile -t STT_CONTAINER_IDS < <(docker compose --env-file private/deployment/cuda-stt-initial/stt-cuda.compose.env \
   -f deployments/compose/compose.yaml \
   -f deployments/compose/compose.stt-cuda.yaml \
-  --profile cuda ps --all --quiet stt
+  --profile cuda ps --all --quiet stt)
+test "${#STT_CONTAINER_IDS[@]}" -eq 1
+STT_CONTAINER_ID="${STT_CONTAINER_IDS[0]}"
 
-# Save the returned full ID, inspect that exact ID, then stop/remove only it.
-docker inspect "$STT_CONTAINER_ID"
+# Validate this exact created container before authorizing start.
+.venv/bin/python scripts/stt_deployment_profile.py verify-container \
+  --profile private/deployment/cuda-stt-initial/profile.yaml \
+  --application-config private/deployment/cuda-stt-initial/application.yaml \
+  --deployment-config private/deployment/cuda-stt-initial/deployment.yaml \
+  --worker-config private/deployment/cuda-stt-initial/worker.yaml \
+  --build-evidence private/image-build-a2-20261018-01/build-result.json \
+  --image-archive private/results/c6b-image-transfer-20261018-01/stt-cuda-image.tar \
+  --image-store-evidence private/evidence/image-store-evidence.json \
+  --container-id "$STT_CONTAINER_ID"
+
+# Run only after verify-container succeeds.
+docker start "$STT_CONTAINER_ID"
+docker inspect --format '{{.State.Health.Status}}' "$STT_CONTAINER_ID"
+test "$(docker inspect --format '{{.State.Health.Status}}' "$STT_CONTAINER_ID")" = healthy
+
+# Readiness is a separate gate from Docker /healthz liveness.
+docker compose --env-file private/deployment/cuda-stt-initial/stt-cuda.compose.env \
+  -f deployments/compose/compose.yaml \
+  -f deployments/compose/compose.stt-cuda.yaml \
+  --profile cuda exec -T stt python -c \
+  'import os, urllib.request; url="http://127.0.0.1:" + os.environ["STT_LISTEN_PORT"] + "/readyz"; print(urllib.request.urlopen(url, timeout=float(os.environ["STT_HEALTHCHECK_PROBE_TIMEOUT_SECONDS"])).read().decode())'
+
+# Example one-request private HTTP check. Verify the approved audio checksum
+# first. The bytes are piped to a client process inside stt, so no host port or
+# additional service is required. The client prints metadata only, never text.
+sha256sum -c private/results/audio-before.sha256
+cat private/audio/russian.m4a | docker compose \
+  --env-file private/deployment/cuda-stt-initial/stt-cuda.compose.env \
+  -f deployments/compose/compose.yaml \
+  -f deployments/compose/compose.stt-cuda.yaml \
+  --profile cuda exec -T stt python -c '
+import json, math, os, sys, urllib.error, urllib.request, uuid
+from services.stt.config import load_application_config
+config = load_application_config("/config/stt-application.yaml")
+limit = config.admission.max_upload_bytes
+audio = sys.stdin.buffer.read(limit + 1)
+if not audio or len(audio) > limit:
+    raise SystemExit("approved audio is empty or exceeds configured upload limit")
+boundary = "speech-platform-" + uuid.uuid4().hex
+marker = boundary.encode("ascii")
+body = (b"--" + marker + b"\r\n" +
+        b"Content-Disposition: form-data; name=\"audio\"; filename=\"russian.m4a\"\r\n" +
+        b"Content-Type: audio/mp4\r\n\r\n" + audio + b"\r\n--" + marker + b"\r\n" +
+        b"Content-Disposition: form-data; name=\"language\"\r\n\r\nauto\r\n--" + marker + b"\r\n" +
+        b"Content-Disposition: form-data; name=\"timestamps\"\r\n\r\ntrue\r\n--" + marker + b"--\r\n")
+url = "http://127.0.0.1:" + os.environ["STT_LISTEN_PORT"] + "/internal/v1/transcriptions"
+request = urllib.request.Request(
+    url, data=body,
+    headers={"Content-Type": "multipart/form-data; boundary=" + boundary,
+             "X-Request-Timeout-Ms": str(int(config.admission.request_timeout_seconds * 1000))})
+try:
+    with urllib.request.urlopen(request, timeout=config.admission.request_timeout_seconds + 5) as response:
+        result = json.loads(response.read())
+except urllib.error.HTTPError as error:
+    print(json.dumps({"status": error.code, "result": "http_error"}))
+    raise SystemExit(1) from None
+segments = result.get("segments")
+if response.status != 200 or result.get("language") != "ru" or not isinstance(segments, list) or not segments:
+    raise SystemExit("HTTP response did not meet the smoke-test contract")
+maximum = config.audio_limits.max_duration_seconds
+if any(not math.isfinite(s["start"]) or not math.isfinite(s["end"]) or s["start"] < 0 or s["end"] < s["start"] or s["end"] > maximum for s in segments):
+    raise SystemExit("segment timestamps are outside configured bounds")
+print(json.dumps({"status": response.status, "language": result["language"], "segment_count": len(segments), "timestamps_valid": True}))'
+
+# Roll back only the exact STT container created above; preserve the image,
+# model and other Compose projects. After stop, verify the exact container is
+# exited and review the sanitized supervisor shutdown evidence. Remove it only
+# after child shutdown is confirmed; container exit alone does not prove that.
 docker stop --time "$STT_STOP_GRACE_PERIOD_SECONDS" "$STT_CONTAINER_ID"
-docker inspect --format '{{.State.Running}}' "$STT_CONTAINER_ID"
+docker inspect --format '{{.State.Running}} {{.State.ExitCode}}' "$STT_CONTAINER_ID"
+test "$(docker inspect --format '{{.State.Running}}' "$STT_CONTAINER_ID")" = false
+# Operator gate: confirm the preserved supervisor report says child termination
+# was confirmed before proceeding with exact-container removal.
 docker rm "$STT_CONTAINER_ID"
 ```
 

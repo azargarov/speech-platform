@@ -1,0 +1,190 @@
+baseline_id: stt-cuda-baseline-001
+captured_on: "2026-10-18"
+scope: experimental_private_localhost_cuda_stt_smoke
+status: successful_runtime_observed
+
+repository:
+  branch: main
+  current_head: 9320ba4e1664a169eab3d9b7c6403413fa64c230
+  working_tree_at_capture: dirty
+  tracked_uncommitted_changes:
+    - docs/operations/stt-cuda-deployment.md
+  image_source_revision: 7356dda0b650f757a842f498e080acca5d2ddf81
+  image_source_revision_reachable_from_current_head: true
+  runtime_source_changes_since_image_source_revision: none
+  dockerfile_sha256_at_image_source_revision: dd2856b15fa7c846a8d6ed9b75d7088032f53dc196743a7ac095504cd5afd599
+  cuda_dependency_lock_sha256: 68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14
+  dependency_lock_sha256_at_image_source_revision: 68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14
+  relevant_uncommitted_application_or_deployment_code: none
+  source_revision_compose_delta:
+    file: deployments/compose/compose.stt-cuda.yaml
+    changes_since_image_source_revision: image_identity_labels_only
+
+api:
+  gateway_version: unknown_not_part_of_this_smoke_test
+  stt_api_version: not_separately_versioned
+  api_source_revision: 7356dda0b650f757a842f498e080acca5d2ddf81
+  endpoint: http://127.0.0.1:18081
+  health_path: /healthz
+  readiness_path: /readyz
+  transcription_path: /internal/v1/transcriptions
+
+image:
+  target_docker_image_id: sha256:7f710bf8fca9307d387a5d61ab84361756efa9c3e18a6d60e07b9c42b60eb45c
+  target_observed_oci_manifest_digest: sha256:7f710bf8fca9307d387a5d61ab84361756efa9c3e18a6d60e07b9c42b60eb45c
+  image_config_digest: sha256:3780e43b86717c877d82bb65c9944c8df7d497efd8446263dbd22b5092f1f406
+  registry_digest: null
+  target_repo_digests: []
+  target_archive_sha256: cdb4d88c51c4b8ebcdceed3f119b622b29f046a2786fd39b4c478cd73fa06dfd
+  build_evidence_sha256: b25f992d44c0e9b0aa4be103080325daf2ccfa586a383a7ad134923cbdaffae7
+  platform: linux/amd64
+  base_image: python:3.13.9-slim
+  base_image_manifest_digest: sha256:3f1ce1c415054488586812b63270daf89d97b4f23416e1288003816790eb08de
+  entrypoint: [python, -m]
+  user: "65532:65532"
+  source_revision_label: 7356dda0b650f757a842f498e080acca5d2ddf81
+  cuda_lock_label: 68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14
+  identity_note: >-
+    On this target containerd image store, Docker reports .Id as the observed OCI
+    manifest digest; this is target-specific evidence, not a universal identity rule.
+
+model:
+  repository: dropbox-dash/faster-whisper-large-v3-turbo
+  revision: 0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf
+  format: ctranslate2-whisper
+  canonical_manifest_sha256: 86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6
+  raw_local_manifest_yaml_sha256: 423411b48c216a5d921b6b97a762dc7341c945dc31de036904c39ff74ce81b96
+  manifest_integrity_status: previously_verified_by_production_artifact_verifier
+  artifact_inventory:
+    - path: config.json
+      size_bytes: 2263
+      sha256: b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e
+    - path: model.bin
+      size_bytes: 1617884929
+      sha256: e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da
+    - path: preprocessor_config.json
+      size_bytes: 340
+      sha256: 7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711
+    - path: tokenizer.json
+      size_bytes: 2710337
+      sha256: 297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd
+    - path: vocabulary.json
+      size_bytes: 1068114
+      sha256: c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1
+  total_artifact_bytes: 1621665983
+  host_release_path: /srv/speech-platform/models/86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6
+  container_model_mount: /models
+  configured_artifact_directory: /models/artifact
+  configured_manifest_path: /models/manifest.yaml
+  fresh_target_file_hash_verification: not_performed
+
+deployment:
+  compose_project: speech-platform-stt-runtime-smoke-20261018
+  compose_service: stt
+  compose_config_hash_label: e34727b5960c16008dcd93407f199d6c74581b21d4a4968b8a0796a32eb313df
+  configuration_source: private/deployment/stt-runtime-smoke
+  target_configuration_directory: /home/master/speech-platform-staging/M02/M02-C/M02-C.6B/stt-runtime-smoke
+  target_configurations_matched_local_sha256: true
+  configurations:
+    - file: compose.yaml
+      sha256: ba5b6011368b4e7c3c976d37c9e71ba934d5b8c0f7942d8654f1991df3ec3d49
+    - file: worker.yaml
+      sha256: 78ca1016c207f807d5260530b3372b91c12e3545cf467a486b6e78ceb990e5f9
+    - file: application.yaml
+      sha256: ea630792ff0f09c1e42f60ae576cdb6f8bc0c26ce4d067f975fc3ec43c2d5100
+    - file: deployment.yaml
+      sha256: 58af93389f6fd0db0193567343c33c3ba8962c9d9ba24c819088389ed53d3e1d
+  worker:
+    uid_gid: "65532:65532"
+    supplementary_groups: [988]
+    listen_address_inside_container: 0.0.0.0:8081
+    published_address: 127.0.0.1:18081
+    network_driver: bridge
+    restart_policy: "no"
+    model_mount_read_only: true
+    root_filesystem_read_only: true
+    cpu_limit: 4
+    memory_limit_bytes: 12884901888
+    pid_limit: 128
+    cuda_mode: cuda
+    cuda_device_index_in_container: 0
+    configured_host_gpu_uuid: GPU-8087d1a4-299e-cf92-471b-f96acbdf7d6a
+    compute_type: float16
+    cpu_fallback: false
+    model_load_timeout_seconds: 100
+    request_timeout_seconds: 25
+    shutdown_drain_timeout_seconds: 10
+    stop_grace_period_seconds: 125
+  target_runtime:
+    host_alias: wisper
+    hostname: llm
+    os: Ubuntu 24.04
+    architecture: x86_64
+    docker_engine: 29.1.3
+    docker_api: "1.52"
+    docker_compose: 5.6.0
+    gpu: NVIDIA Quadro RTX 5000
+    gpu_uuid: GPU-8087d1a4-299e-cf92-471b-f96acbdf7d6a
+
+runtime_observation:
+  container_id: ff12dafa6bd45de664e58928acf427ebd40ba876983ea2b046bbd495a464d996
+  container_state: running
+  docker_health: healthy
+  host_healthz_http_status: 200
+  host_readyz_http_status: 200
+  environment:
+    STT_LISTEN_PORT: "8081"
+    STT_HEALTHCHECK_PROBE_TIMEOUT_SECONDS: "2"
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONUNBUFFERED: "1"
+  smoke_tests:
+    - fixture: english.wav
+      sha256: b48c387dac14a073b72c9bb4c2f994d936b3af60e9281ca48bdd03278b4f89d6
+      duration_seconds: 23.999955
+      http_status: 200
+      detected_language: en
+      segment_count: 2
+      timestamps_valid: true
+      request_seconds: 1.193009
+    - fixture: english1.wav
+      sha256: 3176a81bd1c45a8ff7993bfa920074f215c3547c05c6239f7ee3df86615b0b97
+      duration_seconds: 71.784966
+      http_status: 200
+      detected_language: en
+      segment_count: 9
+      timestamps_valid: true
+      request_seconds: 1.838344
+  post_request_sample:
+    container_cpu_percent: 0.38
+    container_memory: 535.5MiB
+    container_pids: 72
+    gpu_used_mib: 2216
+    gpu_process_used_mib: 2212
+    gpu_free_mib: 12694
+    gpu_utilization_percent: 0
+    measurement_kind: point_in_time_not_peak
+  shared_services:
+    ollama: running
+    dify_containers: running
+    healthchecks_healthy_where_configured: true
+
+reproduction:
+  required_private_files:
+    - private/deployment/stt-runtime-smoke/compose.yaml
+    - private/deployment/stt-runtime-smoke/worker.yaml
+    - private/deployment/stt-runtime-smoke/application.yaml
+    - private/deployment/stt-runtime-smoke/deployment.yaml
+    - private/audio/english.wav
+    - private/audio/english1.wav
+  private_audio_included_in_repository: false
+  target_model_must_match_canonical_manifest: true
+  image_must_already_be_present_locally: true
+  registry_pull_or_build_included: false
+  operator_api_timeout_header_ms: 25000
+
+limitations:
+  - No separately versioned Gateway or STT API release identifier exists.
+  - No registry digest is available for the target-local image.
+  - Target model files were not freshly hashed during this capture; prior verified manifest and runtime success are recorded.
+  - GPU memory values are point-in-time observations, not peak measurements.
+  - This is a private localhost smoke baseline, not persistent deployment acceptance or load-capacity evidence.
