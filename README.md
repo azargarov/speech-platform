@@ -4,15 +4,20 @@ Application-agnostic, self-hosted speech services. The product name is VoiceServ
 
 ## Development
 
-Requires Go 1.27.2, Python 3.13, Docker with Compose, and Make. No GPU needed.
+Requires Go 1.27.2, Python 3.13.9, Docker Engine with Compose, and Make. No GPU is needed for verification or image builds. The GitHub Actions workflow uses the same Make targets on Ubuntu 24.04.
 
 ```sh
 python3 -m venv .venv
 make bootstrap PYTHON=.venv/bin/python
 make verify PYTHON=.venv/bin/python
+make image SERVICE=stt
 ```
 
 `make fmt` intentionally rewrites formatting. `make verify` checks formatting without rewriting files. Python dependencies are direct pins; transitive dependencies are not locked yet.
+
+`make image` builds all current Compose service images locally; `make image SERVICE=gateway|stt|tts` selects one. It never publishes images. STT uses the existing CPU image definition for ordinary builds, so no GPU or private model artifacts are required. The TTS image is currently health-only and does not provide TTS inference.
+
+`.github/workflows/verify.yaml` runs `make bootstrap`, `make verify`, and `make image` for pushes to `main` and pull requests targeting `main`. It has read-only repository permissions and does not publish images or deploy. GHCR publication is deferred to a separately authorized next step.
 
 ## Local process
 

@@ -1,6 +1,22 @@
 PYTHON ?= python3
 COMPOSE = docker compose -f deployments/compose/compose.yaml
-.PHONY: verify fmt lint config test build compose-check bootstrap governance-check stt-lock-check stt-cpu-integration stt-cuda-http-integration
+IMAGE_SERVICES := gateway stt tts
+IMAGE_SERVICE := $(strip $(SERVICE))
+IMAGE_SELECTION :=
+ifneq ($(filter image,$(MAKECMDGOALS)),)
+ifeq ($(IMAGE_SERVICE),)
+IMAGE_SELECTION := $(IMAGE_SERVICES)
+else ifeq ($(IMAGE_SERVICE),gateway)
+IMAGE_SELECTION := gateway
+else ifeq ($(IMAGE_SERVICE),stt)
+IMAGE_SELECTION := stt
+else ifeq ($(IMAGE_SERVICE),tts)
+IMAGE_SELECTION := tts
+else
+$(error Unknown image service '$(SERVICE)'; choose gateway, stt, or tts)
+endif
+endif
+.PHONY: verify fmt lint config test build image compose-check bootstrap governance-check stt-lock-check stt-cpu-integration stt-cuda-http-integration
 bootstrap:
 	$(PYTHON) -m pip install -r requirements-dev.txt
 	$(PYTHON) -m pip install --require-hashes -r services/requirements-stt-cpu.lock
@@ -30,6 +46,8 @@ test:
 build:
 	go build ./...
 	$(PYTHON) -c 'import ast,pathlib; [ast.parse(p.read_text()) for p in pathlib.Path("services").rglob("*.py")]'
+image:
+	STT_APPLICATION_CONFIG="$(CURDIR)/configs/stt-application-cpu.example.yaml" STT_DEPLOYMENT_CONFIG="$(CURDIR)/configs/stt-deployment-cpu.example.yaml" STT_MODEL_ROOT=/models $(COMPOSE) -f deployments/compose/compose.stt-cpu.yaml build $(IMAGE_SELECTION)
 governance-check:
 	$(PYTHON) scripts/validate_governance.py
 	$(PYTHON) -m unittest discover -s scripts -p 'test_governance.py' -v
