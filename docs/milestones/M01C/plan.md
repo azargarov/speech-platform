@@ -1,6 +1,6 @@
 # M01C plan — GHCR image publication
 
-Status: implementation is committed; first release recovery is in progress after the `v0.1.0` workflow failed before publication. Preserve the existing tag. A corrected `v0.1.1` release requires user approval. GHCR publication and milestone closeout remain pending.
+Status: implementation and artifact-action correction are committed; ordinary CI passed. First release recovery remains in progress after the `v0.1.0` workflow failed before publication. Preserve the existing tag. A corrected `v0.1.1` release requires user approval. GHCR publication and milestone closeout remain pending.
 
 ## Scope
 
