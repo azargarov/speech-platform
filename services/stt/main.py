@@ -1,4 +1,4 @@
-"""STT process entry point; inference is deliberately unavailable in M01."""
+"""Production STT worker process entry point."""
 
 from services.worker.server import main
 

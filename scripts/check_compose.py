@@ -3,6 +3,7 @@
 import ipaddress
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -62,6 +63,56 @@ def validate(config, expected_port, expected_bind):
             raise ValueError(f"{name} must remain private and independent")
 
 
+def validate_cuda_deployment(config, expected):
+    """Check the persistent CUDA overlay after ordinary Compose rendering."""
+    if config.get("name") != expected["project_name"]:
+        raise ValueError("CUDA Compose project identity does not match")
+    stt = config["services"]["stt"]
+    if stt.get("gpus"):
+        raise ValueError("CUDA worker must not use broad gpus allocation")
+    if stt.get("image") != expected["image"] or stt.get("build") is not None:
+        raise ValueError("CUDA worker must use only its immutable runtime image")
+    if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", expected["image"]):
+        raise ValueError("CUDA static image reference must be digest-pinned")
+    if stt.get("platform") != "linux/amd64" or stt.get("pull_policy") != "never":
+        raise ValueError("CUDA runtime platform and pull policy must be explicit")
+    if stt.get("restart") != "no":
+        raise ValueError("CUDA worker restart must remain operator-controlled")
+    if stt.get("user") != "65532:65532" or stt.get("read_only") is not True:
+        raise ValueError("CUDA worker must remain non-root with a read-only root")
+    if stt.get("ports") or set(stt.get("networks", {})) != {"stt_private"}:
+        raise ValueError("CUDA worker must remain private and publish no ports")
+    if stt.get("group_add") != [str(expected["artifact_gid"])]:
+        raise ValueError("CUDA artifact supplementary group does not match")
+    devices = (
+        stt.get("deploy", {})
+        .get("resources", {})
+        .get("reservations", {})
+        .get("devices", [])
+    )
+    if len(devices) != 1 or devices[0].get("device_ids") != [expected["host_gpu"]]:
+        raise ValueError("CUDA worker must expose exactly the configured host GPU")
+    if devices[0].get("driver") != "nvidia" or "gpu" not in devices[0].get(
+        "capabilities", []
+    ):
+        raise ValueError("CUDA worker device reservation is invalid")
+    if (
+        int(stt.get("mem_limit", 0)) != expected["memory_bytes"]
+        or float(stt.get("cpus", 0)) != expected["cpus"]
+        or int(stt.get("pids_limit", 0)) != expected["pids"]
+    ):
+        raise ValueError("CUDA worker resource limits do not match the profile")
+    healthcheck = stt.get("healthcheck", {})
+    probe = " ".join(map(str, healthcheck.get("test", [])))
+    if "/healthz" not in probe or "/readyz" in probe:
+        raise ValueError("CUDA Compose liveness must check healthz only")
+    model_mounts = [
+        volume for volume in stt.get("volumes", []) if volume.get("target") == "/models"
+    ]
+    if len(model_mounts) != 1 or model_mounts[0].get("read_only") is not True:
+        raise ValueError("CUDA model mount must be explicit and read-only")
+
+
 def main():
     rendered = json.load(sys.stdin)
     defaults = yaml.safe_load(Path("configs/gateway.yaml").read_text())
@@ -72,6 +123,19 @@ def main():
         raise ValueError("SPEECH_LISTEN_PORT must be an integer") from exc
     bind = os.environ.get("SPEECH_BIND_IP") or "127.0.0.1"
     validate(rendered, port, bind)
+    if os.environ.get("STT_CUDA_STATIC_CHECK") == "1":
+        validate_cuda_deployment(
+            rendered,
+            {
+                "project_name": os.environ["STT_COMPOSE_PROJECT_NAME"],
+                "image": os.environ["STT_CUDA_IMAGE"],
+                "artifact_gid": os.environ["STT_ARTIFACT_GID"],
+                "host_gpu": os.environ["STT_HOST_GPU_DEVICE_ID"],
+                "memory_bytes": int(os.environ["STT_MEMORY_LIMIT_BYTES"]),
+                "cpus": float(os.environ["STT_CPU_LIMIT"]),
+                "pids": int(os.environ["STT_PIDS_LIMIT"]),
+            },
+        )
 
 
 if __name__ == "__main__":

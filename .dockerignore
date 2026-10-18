@@ -1,5 +1,7 @@
 .git
 /private
+/secrets
+/credentials
 .cache
 **/.cache
 .huggingface
@@ -18,6 +20,7 @@ huggingface
 .venv
 **/__pycache__
 **/*.pyc
+**/tests/
 **/*.m4a
 **/*.wav
 **/*.mp3
@@ -27,4 +30,6 @@ huggingface
 **/*.tar
 .env
 **/.env
+*.pem
+*.key
 bin

@@ -1,6 +1,6 @@
 # M02 implementation
 
-Status: M02-A, M02-B, M02-C.2b, M02-C.3, M02-C.4 and M02-C.5 are PASS for their accepted bounded scopes. C.5 covers deterministic offline failure behavior and the operator recovery procedure; it does not establish real CUDA cleanup, GPU OOM recovery or active GPU workload coexistence. Overall M02 remains INCOMPLETE. C.6 deployment planning is proposed; no deployment implementation or runtime validation has begun.
+Status: M02-A, M02-B, M02-C.2b, M02-C.3, M02-C.4, M02-C.5, C.6A and C.6B-R1 are PASS for their accepted bounded scopes. C.5 covers deterministic offline failure behavior and the operator recovery procedure; it does not establish real CUDA cleanup, GPU OOM recovery or active GPU workload coexistence. C.6B Phase A read-only preflight completed with blockers. Production image build is NOT STARTED; C.6B-R2/R3 and C.6C are NOT STARTED. Overall M02 remains INCOMPLETE.
 
 ## M02-A implementation record
 
@@ -201,10 +201,54 @@ INTERPRETATION: code and fake-process tests support the documented application-l
 
 NOT ESTABLISHED: actual target-host recovery, Docker daemon/container behavior under persistent deployment, process visibility for a real inference child, GPU context release after forced termination, GPU OOM recovery, and recovery while Ollama/Dify run active GPU workloads. The user accepted C.5A and C.5B as PASS on 2026-10-18 for deterministic offline scope; no target experiment was performed.
 
-## M02-C.6 deployment readiness — planning only
+## M02-C.6A static deployment profile — PASS for accepted offline scope
 
-OBSERVED: base Compose already separates internal Gateway/STT/TTS networks, publishes only Gateway by default on loopback, runs workers non-root with read-only root filesystems, and has private `/healthz` and `/readyz` contracts. CPU/CUDA overlays mount artifacts read-only. The CUDA overlay currently exposes all GPUs, STT defaults to 256 MiB/1 CPU, Compose has no healthcheck/restart policy, and the CUDA Dockerfile uses a mutable Python tag. The previous artifact test required temporary permission changes, so permanent read access for the service identity is not established.
+OBSERVED (initial inspection): base Compose already separated internal Gateway/STT/TTS networks, published only Gateway by default on loopback, ran workers non-root with read-only root filesystems, dropped capabilities and `no-new-privileges`, and the application exposed distinct `/healthz` and `/readyz`. Before C.6A, the CUDA overlay used broad GPU allocation, small base resource defaults, no healthcheck/restart policy, and a mutable Python tag; target artifact access had needed temporary permission changes. Those are historical pre-change findings.
 
-INTERPRETATION: proposed C.6A should add a strict deployment profile driving both configured CUDA device and Compose GPU exposure, permanent least-privilege model permissions, reviewed configurable CPU/RAM/PID limits, digest-pinned base image, Compose liveness wiring, explicit project identity, and exact rollback documentation/static checks. C.6B would separately validate bounded target startup/readiness/shutdown and shared-service health. C.6C would separately validate one private-path request and rollback. Each execution phase requires separate approval; none is implemented here.
+OBSERVED: added a strict versioned profile validator that reuses existing STT schema loaders and the production artifact verifier. It checks model/revision/manifest and file hashes, static least-privilege group access, immutable runtime/base image references and lock digest, fail-closed image/platform provenance attestations, host-to-container GPU mapping, resource bounds and timeout relationships. It emits a restrictive private Compose environment file and validates rendered Compose against worker isolation, explicit single-device selection, resource/security policy, `/healthz` liveness and model mount identity. The CUDA overlay now requires digest references and platform, prevents build/pull and automatic restart, uses explicit device IDs, adds healthcheck/labels/resource fields, and retains existing private network boundaries. The CUDA Dockerfile has no mutable base-image fallback. Added the deployment operations guide with preparation, liveness/readiness, exact resource identity, bounded stop and immutable rollback procedure.
 
-NOT ESTABLISHED: persistent target service behavior, device-0-only Compose passthrough, deployed image provenance, permanent artifact access, service resource envelope, restart/recovery behavior, shutdown/GPU resource release, or rollback. Ollama and Dify were not accessed or modified.
+INTERPRETATION: C.4's 4 CPU / 12 GiB / 128 PID values are only candidate experiment references; the profile requires explicit operator review and does not assert capacity. Compose maps host physical index separately from container CUDA index; C.6B must verify the UUID mapping. Restart is operator-controlled (`no`). `stop_grace_period` is checked against model-load, request, drain and child-exit deadlines with margin. Liveness checks process health only; `/readyz` remains a separate model-serving gate.
+
+NOT ESTABLISHED: no immutable platform-specific Python base digest or repository-qualified production-image digest was established offline. The initial C.6A template reused the validation image ID as a production identity constraint; C.6B-R1 corrects the schema and explicitly rejects that image. Target GPU UUID, artifact ownership/group/modes and effective container access, host resource headroom, GPU passthrough, model readiness, enforced limits, shutdown/GPU release, shared-service behavior during operation and rollback remain runtime inputs. Ollama/Dify were not accessed or modified.
+
+## M02-C.6B-R1 production image specification — PASS for accepted offline scope
+
+OBSERVED:
+
+- Reused and corrected `deployments/compose/worker-stt-cuda.Dockerfile`; no second production image definition was introduced. It now declares a required immutable Python 3.13.9 base reference, requires an immutable source revision and the exact CUDA lock digest at build time, checks these inputs before dependency installation, installs with `--require-hashes`, copies only STT/shared worker source, labels image role/base/source/lock provenance, runs as UID/GID 65532, and uses the Python module entrypoint used by the Compose worker command. `.dockerignore` excludes tests and private data. No model/audio/config/credentials are copied and no runtime model-fetch behavior is added.
+- Updated the deployment profile to distinguish repository-qualified immutable `runtime.image` from local Docker `runtime.image_id`. Validation rejects the previously approved validation image ID, requires role `stt-worker`, verified source revision, verified image-reference-to-ID mapping, platform-specific base-image evidence, and unchanged CUDA lock identity. Compose records source, role and lock labels. Static profile tests cover validation-image rejection, wrong role, missing provenance evidence, production entrypoint and lock requirements.
+- Existing `python -m services.stt.main` entrypoint calls the production worker composition root. Python is present for `/healthz` liveness; readiness remains a separate `/readyz` check. The CUDA-only application policy still selects CUDA float16 without CPU fallback. Compose retains private networking, GPU-specific reservation, non-root/read-only operation and manual restart policy.
+
+INTERPRETATION:
+
+- Static checks establish that the Dockerfile/profile describe a production worker and that the runtime deployment reference is immutable and labeled consistently. They do not prove the image was actually built from those inputs, that its labels are authentic, that a registry digest resolves to the recorded local image ID, or that installed libraries/device access work in a container.
+- The source revision must refer to a committed source tree for a future reproducible build. The current R1 worktree is uncommitted, so it is not a build source identity.
+
+## M02-C.6B-R1 final offline runtime review — corrections applied
+
+OBSERVED:
+
+- The CUDA lock pins faster-whisper 1.2.1, CTranslate2 4.8.3, cuBLAS 12.9.2.10, cuDNN 9.27.0.42 and CUDA NVRTC 12.9.86. The production Dockerfile installs the hash-locked set. Its loader search path now explicitly includes the locked Python package library directories for cuBLAS, NVRTC and cuDNN. A static regression test rejects a Dockerfile that omits the NVRTC directory.
+- `services.stt.main` exists and calls the shared worker composition root as `main("stt")`. The shared server parses the three production config files, constructs `DeferredSTTApplication`, starts the aiohttp server, installs SIGINT/SIGTERM handlers and awaits server cleanup; application close invokes bounded supervisor cleanup. Compose's command targets this module and healthcheck uses Python's standard library against `/healthz`.
+- Corrected the stale `services/stt/main.py` M01-era docstring. Added a static deployment-profile test that checks the production module delegates to the worker server.
+- The C.4 smoke evidence established successful CUDA inference with this pinned package tuple, but did not preserve the exact loader environment or a production-image build. Therefore equivalence of the C.4 loader paths to this Dockerfile is NOT ESTABLISHED.
+
+INTERPRETATION:
+
+- Explicitly adding the NVRTC package library directory makes the locked NVRTC shared library discoverable when a runtime consumer loads it dynamically. The reviewed CTranslate2 CUDA path uses its wheel-provided CUDA runtime linkage and dynamically loaded CUDA libraries; this path addition does not establish that CTranslate2 requires NVRTC for every inference.
+- Static inspection confirms the intended entrypoint/config/signal/cleanup composition. Read-only filesystem compatibility, non-root runtime behavior, actual library resolution, exit behavior and child cleanup in the built image remain runtime properties and have not been exercised.
+
+NOT ESTABLISHED:
+
+- No immutable platform-specific Python base digest, clean committed source revision for the build, built production image ID, registry manifest digest or build attestation exists. No image was built or run. The approved validation image remains unsuitable as the production worker.
+- A future build still requires controlled retrieval of the digest-pinned base and hash-locked wheel artifacts, or a verified local cache; no build-network access or local wheelhouse provenance was inspected.
+- Production-image CUDA library loading and inference, GPU device mapping, effective model access, health/readiness, enforced resource limits, shutdown, target behavior and coexistence remain runtime gates. R1 is accepted only for its offline specification scope; C.6B runtime work and overall M02 remain incomplete.
+
+The user accepted C.6B-R1 on 2026-10-18 as PASS for production image specification and offline verification only. This acceptance does not authorize or establish a production image build. The documented future build procedure now requires a clean checkout, an expected full commit SHA, an empty `git status --porcelain --untracked-files=all`, and a `git archive` context from that exact commit; the source-revision build argument alone is explicitly not provenance evidence. C.6B-R2/R3 and C.6C remain NOT STARTED; overall M02 remains INCOMPLETE.
+
+NOT ESTABLISHED:
+
+- No immutable linux/amd64 base manifest digest has been established. No Docker build, pull or image inspection was performed. Production image ID, repository manifest digest, registry, build provenance/attestation and runtime dependency inventory are unresolved.
+- R1 does not resolve the target model directory's group access/traversal blocker, supply private target configuration/resource review, establish GPU UUID mapping, or prove Compose runtime health/readiness, limit enforcement, shutdown, persistent model loading or shared-service behavior.
+
+R1 is not a C.6B runtime phase and is not marked PASS. See [the deployment runbook](../../operations/stt-cuda-deployment.md) for the evidence required before a separately authorized build-validation phase.

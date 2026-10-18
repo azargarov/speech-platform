@@ -1,0 +1,46 @@
+# Template only. Copy to ignored private/ and replace every placeholder after
+# host resource, GPU identity, permissions, base-image and built-image review.
+# C.4's 4 CPU / 12 GiB / 128 PID values are experiment references, not capacity.
+schema_version: 1
+project_name: speech-platform-stt-cuda
+runtime:
+  image: registry.example.invalid/speech-platform/stt-cuda@sha256:REPLACE_WITH_BUILT_IMAGE_DIGEST
+  image_id: sha256:REPLACE_WITH_BUILT_IMAGE_ID
+  image_reference_verified: false
+  image_role: stt-worker
+  platform: linux/amd64
+  base_image: python:3.13.9-slim@sha256:REPLACE_WITH_VERIFIED_AMD64_BASE_DIGEST
+  base_image_platform: linux/amd64
+  base_image_platform_verified: false
+  source_revision: REPLACE_WITH_PRODUCTION_SOURCE_REVISION
+  source_revision_verified: false
+  cuda_lock_sha256: 68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14
+model:
+  alias: large-v3-turbo
+  revision: 0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf
+  manifest_sha256: 86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6
+  host_release_root: /REPLACE_WITH_HOST_MODEL_RELEASE_ROOT
+  container_artifact_directory: /models/artifact
+  container_manifest_path: /models/manifest.yaml
+device:
+  host_physical_index: 0
+  expected_host_uuid: REPLACE_WITH_C6B_VERIFIED_GPU_UUID
+  container_cuda_index: 0
+artifact_access:
+  service_uid: 65532
+  service_gid: 65532
+  supplementary_read_gid: REPLACE_WITH_DEDICATED_ARTIFACT_GROUP_ID
+resources:
+  cpu_limit: 4.0
+  memory_limit_bytes: 12884901888
+  pids_limit: 128
+  limits_reviewed: false
+lifecycle:
+  stop_grace_period_seconds: 125
+  termination_margin_seconds: 3
+healthcheck:
+  interval_seconds: 10
+  timeout_seconds: 3
+  probe_timeout_seconds: 2
+  retries: 3
+  start_period_seconds: 130

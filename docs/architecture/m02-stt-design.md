@@ -1,6 +1,6 @@
 # M02 STT architecture design
 
-Status: accepted architecture baseline. M02-A, M02-B, bounded M02-C.2b, C.3 and C.4 scopes, and M02-C.5's deterministic offline fault-handling and operator-procedure scope are PASS. M01 remains PASS and overall M02 is INCOMPLETE. C.6 deployment design is proposed; implementation and runtime validation have not started. See [M02 plan](../milestones/M02/plan.md) and ADRs [0006](../adr/0006-stt-alias-ownership.md), [0007](../adr/0007-stt-execution-lifecycle.md), [0008](../adr/0008-stt-artifacts-devices-configuration.md) and accepted [0009](../adr/0009-worker-network-reachability.md).
+Status: accepted architecture baseline. M02-A, M02-B, bounded M02-C.2b, C.3, C.4, C.5 and C.6A static deployment-profile scopes are PASS. M01 remains PASS and overall M02 is INCOMPLETE. C.6B Phase A read-only target preflight is complete and found blockers; C.6B Phase B runtime validation and C.6C have not started. See [M02 plan](../milestones/M02/plan.md) and ADRs [0006](../adr/0006-stt-alias-ownership.md), [0007](../adr/0007-stt-execution-lifecycle.md), [0008](../adr/0008-stt-artifacts-devices-configuration.md) and accepted [0009](../adr/0009-worker-network-reachability.md).
 
 ## Evidence and assumptions
 

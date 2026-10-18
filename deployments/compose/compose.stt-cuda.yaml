@@ -1,8 +1,49 @@
+name: ${STT_COMPOSE_PROJECT_NAME:?prepare a validated deployment profile}
 services:
   stt:
-    build:
-      context: ../..
-      dockerfile: deployments/compose/worker-stt-cuda.Dockerfile
+    # This is a runtime-only overlay. Image builds are separate and require an
+    # immutable base digest; this service must never build or pull on startup.
+    build: !reset null
+    image: ${STT_CUDA_IMAGE:?set the validated immutable built-image reference}
+    platform: ${STT_PLATFORM:?set the validated image platform}
+    pull_policy: never
+    profiles: [cuda]
+    restart: "no"
+    stop_grace_period: ${STT_STOP_GRACE_PERIOD_SECONDS:?set the reviewed stop budget}s
+    mem_limit: ${STT_MEMORY_LIMIT_BYTES:?set the reviewed STT memory limit}
+    cpus: ${STT_CPU_LIMIT:?set the reviewed STT CPU limit}
+    pids_limit: ${STT_PIDS_LIMIT:?set the reviewed STT PID limit}
+    group_add: ["${STT_ARTIFACT_GID:?set the model artifact read group}"]
+    labels:
+      com.speech-platform.image-role: stt-worker
+      com.speech-platform.source-revision: ${STT_SOURCE_REVISION:?set the verified production source revision}
+      com.speech-platform.cuda-lock-sha256: ${STT_CUDA_LOCK_SHA256:?set the verified CUDA dependency-lock digest}
+      com.speech-platform.deployment-profile-sha256: ${STT_DEPLOYMENT_PROFILE_SHA256:?profile must be validated}
+      com.speech-platform.model-manifest-sha256: ${STT_MODEL_MANIFEST_SHA256:?model identity must be validated}
+      com.speech-platform.model-revision: ${STT_MODEL_REVISION:?model revision must be validated}
+      com.speech-platform.application-config-sha256: ${STT_APPLICATION_CONFIG_SHA256:?application config identity must be validated}
+      com.speech-platform.deployment-config-sha256: ${STT_DEPLOYMENT_CONFIG_SHA256:?deployment config identity must be validated}
+      com.speech-platform.worker-config-sha256: ${STT_WORKER_CONFIG_SHA256:?worker config identity must be validated}
+    environment:
+      STT_LISTEN_PORT: ${STT_LISTEN_PORT:?set the validated worker listen port}
+      STT_HEALTHCHECK_PROBE_TIMEOUT_SECONDS: ${STT_HEALTHCHECK_PROBE_TIMEOUT_SECONDS:?set the health probe timeout}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ['STT_LISTEN_PORT'] + '/healthz', timeout=float(os.environ['STT_HEALTHCHECK_PROBE_TIMEOUT_SECONDS']))"
+      interval: ${STT_HEALTHCHECK_INTERVAL_SECONDS:?set healthcheck interval}s
+      timeout: ${STT_HEALTHCHECK_TIMEOUT_SECONDS:?set healthcheck timeout}s
+      retries: ${STT_HEALTHCHECK_RETRIES:?set healthcheck retries}
+      start_period: ${STT_HEALTHCHECK_START_PERIOD_SECONDS:?set healthcheck start period}s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${STT_HOST_GPU_DEVICE_ID:?select one host GPU device}"]
+              capabilities: [gpu]
     command:
       - services.stt.main
       - --config
@@ -12,8 +53,7 @@ services:
       - --deployment-config
       - /config/stt-deployment.yaml
     volumes:
-      - ../../configs/stt.yaml:/config/stt.yaml:ro
+      - ${STT_WORKER_CONFIG:?set the validated STT worker config}:/config/stt.yaml:ro
       - ${STT_APPLICATION_CONFIG:?set a local versioned STT application config}:/config/stt-application.yaml:ro
       - ${STT_DEPLOYMENT_CONFIG:?set a local CUDA STT deployment config}:/config/stt-deployment.yaml:ro
-      - ${STT_MODEL_ROOT:?set a local read-only model artifact root}:/models:ro
-    gpus: all
+      - ${STT_MODEL_HOST_ROOT:?set the validated model release root}:/models:ro

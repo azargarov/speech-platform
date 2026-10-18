@@ -2,7 +2,7 @@
 
 import unittest
 
-from scripts.check_compose import validate
+from scripts.check_compose import validate, validate_cuda_deployment
 
 
 def rendered(port=8080, bind="127.0.0.1"):
@@ -89,6 +89,56 @@ class ComposeConfig(unittest.TestCase):
         config["networks"]["tts_private"]["internal"] = False
         with self.assertRaisesRegex(ValueError, "networks must be internal"):
             validate(config, 8080, "127.0.0.1")
+
+    def test_cuda_static_check_rejects_broad_gpu_allocation(self):
+        config = {
+            "name": "speech-platform-static",
+            "services": {
+                "stt": {
+                    "image": "registry.example.invalid/stt@sha256:" + "0" * 64,
+                    "build": None,
+                    "platform": "linux/amd64",
+                    "pull_policy": "never",
+                    "restart": "no",
+                    "user": "65532:65532",
+                    "read_only": True,
+                    "ports": [],
+                    "networks": {"stt_private": None},
+                    "group_add": ["1000"],
+                    "deploy": {
+                        "resources": {
+                            "reservations": {
+                                "devices": [
+                                    {
+                                        "device_ids": ["0"],
+                                        "driver": "nvidia",
+                                        "capabilities": ["gpu"],
+                                    }
+                                ]
+                            }
+                        }
+                    },
+                    "mem_limit": 1024,
+                    "cpus": 1,
+                    "pids_limit": 128,
+                    "healthcheck": {"test": ["CMD", "python", "/healthz"]},
+                    "volumes": [{"target": "/models", "read_only": True}],
+                }
+            },
+        }
+        expected = {
+            "project_name": "speech-platform-static",
+            "image": config["services"]["stt"]["image"],
+            "artifact_gid": "1000",
+            "host_gpu": "0",
+            "memory_bytes": 1024,
+            "cpus": 1,
+            "pids": 128,
+        }
+        validate_cuda_deployment(config, expected)
+        config["services"]["stt"]["gpus"] = "all"
+        with self.assertRaisesRegex(ValueError, "broad gpus"):
+            validate_cuda_deployment(config, expected)
 
 
 if __name__ == "__main__":

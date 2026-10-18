@@ -89,3 +89,13 @@ The user accepted C.5A as PASS for deterministic offline fault-injection coverag
 ## M02-C.5B recovery/operator procedure — PASS for accepted offline scope
 
 The user accepted C.5B on 2026-10-18 as PASS for the documented deterministic offline recovery-procedure scope. Evidence is recorded in [implementation](implementation.md) and [verification](verification.md). This does not establish target-host recovery, real CUDA fault cleanup, GPU OOM recovery, active workload coexistence or deployment. C.5 and overall M02 remain bounded/incomplete respectively.
+
+## M02-C.6A static deployment profile — PASS for accepted scope
+
+The user accepted C.6A on 2026-10-18 as PASS for static deployment-profile implementation and offline verification. Acceptance includes the regression correction that rendered-Compose validators reject `gpus: all`. The accepted scope excluded target access, Docker container execution/build/pull, CUDA, inference, deployment, and changes to Ollama/Dify.
+
+Unresolved inputs remain fail-closed: immutable image/base provenance, host GPU UUID, target artifact access and operator resource review. C.6B Phase A read-only target preflight has since completed with blockers; C.6B runtime validation and C.6C are not accepted or started.
+
+## M02-C.6B-R1 production image specification — PASS for accepted offline scope
+
+The user accepted C.6B-R1 on 2026-10-18 for the production image specification and offline verification only. Acceptance includes the production-entrypoint and CUDA library-path corrections, the lock-consistent runtime specification, immutable identity requirements, and clean-commit/source-context safeguards. No image was built, pulled, run or inspected; no target host was accessed. C.6B Phase A remains complete with blockers. Production image build is NOT STARTED; C.6B-R2/R3 and C.6C are NOT STARTED. Overall M02 remains INCOMPLETE. Runtime library loading, CUDA execution, target artifact access, readiness, resource enforcement, shutdown and coexistence remain NOT ESTABLISHED.

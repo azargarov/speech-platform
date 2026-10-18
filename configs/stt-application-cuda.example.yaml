@@ -1,0 +1,46 @@
+# CUDA-only configuration for the approved large-v3-turbo artifact identity.
+# Keep local deployment copies under ignored private/.
+schema_version: 3
+default_model: large-v3-turbo
+backend:
+  id: faster-whisper
+  options:
+    cpu_threads: 4
+    compute_type_cpu: int8
+    compute_type_cuda: float16
+    beam_size: 1
+models:
+  - alias: large-v3-turbo
+    family: whisper
+    immutable_revision: 0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf
+    artifacts:
+      faster-whisper:
+        ref: large-v3-turbo
+        manifest_sha256: 86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6
+        format: ctranslate2-whisper
+device_policy:
+  mode: cuda
+  preference: [cuda]
+audio_limits:
+  sample_rate_hz: 16000
+  max_duration_seconds: 120
+  max_decoded_audio_bytes: 67108864
+admission:
+  max_active: 1
+  max_queued: 2
+  max_queued_audio_bytes: 52428800
+  max_retained_audio_bytes: 67108864
+  max_uploads: 2
+  max_upload_bytes: 52428800
+  max_request_bytes: 26214400
+  max_result_bytes: 1048576
+  max_ipc_message_bytes: 36704256
+  queue_wait_timeout_seconds: 10
+  request_timeout_seconds: 60
+lifecycle:
+  model_load_timeout_seconds: 120
+  cooperative_cancel_grace_seconds: 0.2
+  process_exit_timeout_seconds: 2
+  shutdown_drain_timeout_seconds: 10
+recovery:
+  policy: manual

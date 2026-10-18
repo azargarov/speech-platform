@@ -1,6 +1,6 @@
 # M02 verification
 
-Status: M02-A/B/C.2b/C.3 and bounded M02-C.4/C.5 evidence is PASS for accepted scopes. C.5A and C.5B are accepted for deterministic offline fault handling and operator-procedure scope. Overall M02 remains INCOMPLETE; C.6 is planning only.
+Status: M02-A/B/C.2b/C.3 and bounded M02-C.4/C.5/C.6A/C.6B-R1 evidence is PASS for accepted scopes. C.5A and C.5B are accepted for deterministic offline fault handling and operator-procedure scope. C.6B Phase A read-only preflight is complete with blockers. Production image build is NOT STARTED; C.6B-R2/R3 and C.6C are NOT STARTED. Overall M02 remains INCOMPLETE.
 
 ## M02-A audit remediation verification
 
@@ -236,13 +236,67 @@ INTERPRETATION: deterministic tests now cover the application’s fault latch, r
 
 NOT ESTABLISHED: target-host recovery, Docker behavior for a persistent worker, real GPU process visibility/context release, real CUDA fault cleanup, GPU OOM recovery, or active Ollama/Dify workload coexistence. These are not required for C.5 closure; intentional OOM or shared GPU exhaustion is excluded. User accepted C.5A and C.5B as PASS on 2026-10-18 for the documented offline scope.
 
-## M02-C.6 deployment readiness — static review only
+## M02-C.6A static deployment profile — verification
 
-OBSERVED: Compose topology has Gateway attached to the two private internal networks, STT and TTS isolated from each other, no worker host ports, and a loopback-bound Gateway port. Workers use UID/GID 65532, read-only roots, dropped capabilities and no-new-privileges. STT health/readiness routes exist, but Compose does not consume them. The CUDA overlay uses `gpus: all`; STT's base limits are 256 MiB and 1 CPU; no explicit restart policy exists. CUDA model mounts are read-only, but permanent artifact permissions for the service identity are not validated. CUDA Dockerfiles use hash-locked Python dependencies atop a mutable image tag.
+OBSERVED:
 
-INTERPRETATION: C.6A needs a validated versioned deployment profile shared by config validation and Compose selection, GPU 0 only, permanent least-privilege model read access, configurable reviewed resource limits, a digest-pinned platform image, Compose liveness healthcheck, explicit project identity, and static/rollback checks. C.6B must separately validate target startup, artifact/device access, readiness and bounded shutdown. C.6C must separately validate a private-path request and exact project-scoped rollback. No C.6 implementation or execution occurred in this review.
+- `.venv/bin/python -m unittest scripts.test_stt_deployment_profile scripts.test_compose -v` — PASS; 19 tests passed, covering CUDA profile/artifact/config validation, parent traversal, rendered Compose security/GPU/network/health/restart policy, explicit rejection of broad `gpus` allocation, and invalid identities and limits.
+- `make verify PYTHON=.venv/bin/python` — PASS. It included formatting/static checks, Go tests/build, config validation, Compose static rendering and topology checks, 115 repository script tests, 61 STT tests, governance and lock checks. No container was built or started; Compose was rendered only.
+- `make governance-check PYTHON=.venv/bin/python` — PASS; governance structural validation and 2 tests passed.
+- `git diff --check` — PASS.
+- No target host, model artifact, Docker container, CUDA runtime, GPU, inference, or Ollama/Dify service was accessed. No deployment action occurred.
 
-NOT ESTABLISHED: real Compose GPU-0 exposure, production image build identity, persistent model load/readiness, deployed resource limits, restart behavior, actual shutdown/GPU release, rollback behavior, and runtime isolation from shared GPU workloads. Existing C.4 pre/post health checks do not establish simultaneous Ollama/Dify workload coexistence.
+Initial static review findings (broad GPU selection, absent liveness wiring, mutable base image, and no persistent deployment identity) are historical pre-change observations; current changes address their static configuration portions. Final offline acceptance review found that the rendered-Compose validators did not explicitly reject an added `gpus: all` field. Both validation paths now reject any `gpus` allocation alongside explicit device reservation, with regression tests.
+
+INTERPRETATION: offline profile and render tests establish fail-closed configuration consistency, not Compose runtime GPU selection, host ACLs, runtime image provenance or persistent service behavior. C.6B must separately validate target startup, artifact/device access, readiness and bounded shutdown. C.6C must separately validate a private-path request and exact project-scoped rollback.
+
+NOT ESTABLISHED: GPU/runtime behavior, artifact access as the deployed user, health transitions under persistent service, limits enforcement, recovery, cleanup and rollback. No target, Docker container, GPU or inference work was performed during C.6A. The user accepted C.6A on 2026-10-18 for this static/offline scope only.
+
+## M02-C.6B-R1 — production image specification and offline validation
+
+Status: PASS for accepted production-image specification and offline verification scope. User acceptance is recorded in `user-validation.md`. No image build or target action was performed.
+
+OBSERVED:
+
+- Focused deployment profile tests: `.venv/bin/python -m unittest scripts.test_stt_deployment_profile -v` — 15 tests passed. Coverage includes production image role/entrypoint requirements, rejection of the known validation image ID and validation repository references, immutable base/source/lock evidence gates, Compose profile label consistency and the existing GPU/security/artifact constraints.
+- CUDA lock SHA-256 remains `68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14`; package pins and hashes were not changed.
+- The production Dockerfile statically specifies Python module execution, non-root UID/GID, hash-verified dependency installation and provenance labels. The profile and Compose validator continue to enforce immutable image references, explicit GPU allocation, CUDA-only configuration, `/healthz` liveness, a separate `/readyz` gate, no automatic restart, private networks and read-only artifact/config mounts.
+- Final offline review confirmed the locked CUDA package versions, found that the production Dockerfile's loader path omitted the installed NVRTC library directory, and corrected it. Focused regression coverage now rejects removal of that path. Review also verified that `services.stt.main` delegates to the production worker server and corrected its stale M01-only docstring.
+- The C.4 reports establish successful CUDA inference with the same package tuple but do not record its exact `LD_LIBRARY_PATH`; equivalence of the C.4 and proposed production loader environments is therefore NOT ESTABLISHED.
+
+INTERPRETATION: These tests and source checks verify specification consistency only; they do not execute the Dockerfile or prove the resulting image's contents, library compatibility, entrypoint behavior or labels.
+
+NOT ESTABLISHED: platform-specific base digest and source/build provenance; built image ID and repository digest; installed package inventory and actual shared-library resolution from the production image; target model accessibility as UID/GID 65532; host-to-container GPU UUID mapping; CUDA/model startup, readiness, enforced resource limits, shutdown and Ollama/Dify coexistence.
+
+OBSERVED verification commands:
+
+- `make verify PYTHON=.venv/bin/python` — PASS. This included Go vet/tests/build, Ruff checks, config validation, Compose rendering/static checks, all 121 repository script tests, all 61 STT tests, AST parsing and STT lock validation. Compose commands were configuration rendering only; no services or containers were started.
+- `make governance-check PYTHON=.venv/bin/python` — PASS. Seven skill structures/frontmatter and local governance references validated; two governance tests passed.
+- `git diff --check` — PASS.
+
+User acceptance on 2026-10-18 applies to R1's bounded specification/offline scope only. The future build procedure requires a clean checkout at the expected commit, verifies no staged/unstaged/untracked files, and streams a Git archive of that exact commit as the build context; a SHA build argument alone is not treated as source provenance. Production image build remains NOT STARTED. C.6B-R2/R3, C.6C and overall M02 remain incomplete.
+
+No Docker build/pull/run, host access, CUDA operation, inference, dependency change, model operation, or deployment occurred. M02-C.6B-R1 is accepted only for its offline specification scope; C.6B runtime work and overall M02 remain incomplete.
+
+## M02-C.6B Phase A — read-only target preflight; BLOCKED before runtime validation
+
+OBSERVED: Read-only SSH inspection through the approved `wisper` alias resolved to host `llm`. Host inventory: Ubuntu 24.04.5, kernel 6.8.0-147-generic x86_64, 32 logical CPUs, 61 GiB RAM (57 GiB available), 95 GiB available on `/`, Docker Engine 29.1.3 and Compose v5.6.0. NVIDIA driver 580.178.04 and Container Toolkit 1.20.1 were present; Docker reports the NVIDIA runtime registered (default runtime remains `runc`).
+
+OBSERVED: GPU 0 is a Quadro RTX 5000 at PCI bus `00000000:06:10.0`, UUID `GPU-8087d1a4-299e-cf92-471b-f96acbdf7d6a`; 15,360 MiB total, 14,909 MiB free, 1 MiB used and 0% utilization at sampling. No compute process was reported. Static host index and container CUDA index are both configured as 0 in examples, but no private profile supplies the expected UUID, and host-to-container mapping remains NOT ESTABLISHED.
+
+OBSERVED: Ollama container `72d0ee33e0e6` was running and its version endpoint returned HTTP 200. Dify project `docker` had 12 running components and one exited one-shot permission-init container (exit 0); API, PostgreSQL, Redis and sandbox health checks reported healthy, and the Dify system-features endpoint returned HTTP 200. Other Dify components were running without Docker health checks. No Speech Platform project/container/network/volume collision was found. No services or Docker resources were modified.
+
+OBSERVED: The exact approved image ID exists and reports linux/amd64 and user `65532:65532`. Docker reports tag `speech-platform-cuda-validation:m02-c2a-20261017`, repository digest `speech-platform-cuda-validation@sha256:b25af1309e1e51e8ce72c227028727cb26014fef512b716fbd11cf8f9fb16540`, no labels, and entrypoint `python /opt/validation/probe.py`. Preserved successful C.2b evidence records 35 installed package versions; all 35 match the staged CUDA lock and lock digest `68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14`. The image entrypoint is a validation probe, not the production STT worker. Base-image digest/build provenance is unavailable; the image cannot satisfy the production worker contract as-is. Image ID and repository digest are distinct identity types even though Docker reports the same digest string here.
+
+OBSERVED: The production artifact verifier passed for `dropbox-dash/faster-whisper-large-v3-turbo`, revision `0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf`, canonical manifest digest `86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6`, five files and total size 1,621,665,983 bytes. `model.bin` matched SHA-256 `e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da`. However, parent/release/artifact directories are mode 2700, manifest mode 0600, and artifact files mode 0644; no POSIX access ACL was present on inspected path components. The non-root worker cannot traverse the owner-only release directories or read the manifest. Permissions were not changed.
+
+OBSERVED: The target checkout remained clean at `e8027a7`; no target C.6A private deployment profile, app/deployment/worker configs or generated Compose environment file exists. The local static sentinel Compose render/check passed as part of `make verify`, but target-specific rendering could not run without those inputs. The proposed C.4 reference limits (4 CPUs/12 GiB/128 PIDs) are below observed host totals but are not reviewed production capacity. The observed 14,909 MiB free VRAM is not reserved capacity.
+
+INTERPRETATION: C.6B Phase A is complete as a read-only preflight, but Phase B must not proceed. Blockers are the validation-only image entrypoint and missing production image/base provenance; missing private deployment identity/configuration and resource review; and model directory/manifest permissions incompatible with the non-root worker. The Dify Compose summary's `exited(1)` denotes one exited component; inspection confirmed the one-shot init container exited 0, while all 12 long-running components were running.
+
+NOT ESTABLISHED: a production worker image tied to an immutable linux/amd64 base digest; deployment image provenance; expected GPU UUID match and container device mapping; effective worker artifact access; target-rendered Compose policy; runtime device visibility/readiness/limits/shutdown; deployment rollback; or coexistence under active GPU load.
+
+Sanitized evidence is preserved on the target at `/home/master/speech-platform-staging/M02/M02-C/M02-C.6/attempts/c6b-phase-a-20261018-01/preflight-report.json` (mode 0600). No inference, model load, CUDA operation, container lifecycle action, permission change, image operation or service modification occurred.
 
 ## M02-C.5 closeout verification — OBSERVED
 
@@ -252,6 +306,6 @@ NOT ESTABLISHED: real Compose GPU-0 exposure, production image build identity, p
 - `git diff --check` — PASS.
 - C.6 was a static configuration/documentation review only; no Docker, target host, GPU, inference or service was accessed.
 
-INTERPRETATION: C.5 is closed only for accepted offline fault handling and operator-procedure scope. C.6 findings are planning evidence, not deployment validation.
+INTERPRETATION: C.5 is closed only for accepted offline fault handling and operator-procedure scope. C.6A evidence is static/offline only, not deployment validation.
 
 NOT ESTABLISHED: real CUDA fault cleanup, GPU OOM recovery, active GPU workload coexistence, persistent deployment, production resource envelope, rollback, or deployed GPU selection/readiness.
