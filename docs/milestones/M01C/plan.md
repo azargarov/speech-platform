@@ -1,6 +1,6 @@
 # M01C plan — GHCR image publication
 
-Status: implementation and local validation in progress; first release publication is explicitly not part of this task. GHCR release and milestone closeout remain pending.
+Status: implementation is committed; first release recovery is in progress after the `v0.1.0` workflow failed before publication. Preserve the existing tag. A corrected `v0.1.1` release requires user approval. GHCR publication and milestone closeout remain pending.
 
 ## Scope
 
