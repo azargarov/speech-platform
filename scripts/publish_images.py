@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 SERVICES = {
@@ -39,6 +40,20 @@ LABEL_VARIANT = "com.speech-platform.runtime-variant"
 
 class PublishError(RuntimeError):
     """An input, local Docker, or registry publication error."""
+
+
+@dataclass(frozen=True)
+class PreparedImage:
+    service: str
+    package: str
+    role: str
+    runtime_variant: str
+    lock_label: str | None
+    image_ref: str
+    repository: str
+    tagged_ref: str
+    platform: str
+    expected_labels: dict[str, str]
 
 
 def validate_version(version: str) -> None:
@@ -131,14 +146,14 @@ def workflow_identity() -> str:
     return "local:make-publish"
 
 
-def local_image_details(image_id: str) -> tuple[str, dict[str, str]]:
-    raw = command(["docker", "image", "inspect", image_id], capture=True)
+def local_image_details(image_ref: str) -> tuple[str, dict[str, str]]:
+    raw = command(["docker", "image", "inspect", image_ref], capture=True)
     try:
         image = json.loads(raw)[0]
         platform = f"{image['Os']}/{image['Architecture']}"
         labels = image["Config"].get("Labels") or {}
     except (KeyError, IndexError, json.JSONDecodeError, TypeError) as error:
-        raise PublishError(f"could not inspect local image {image_id}") from error
+        raise PublishError(f"could not inspect local image {image_ref}") from error
     return platform, labels
 
 
@@ -190,95 +205,113 @@ def publish(
             build_args.append(f"VARIANT={variant}")
         command(build_args)
 
-    for service in services:
-        package, expected_role, runtime_variant, lock_label = image_identity(
-            service, variant
-        )
-        image_id = compose_image_id(service, revision, variant)
-        platform, labels = local_image_details(image_id)
-        expected_labels = {
-            LABEL_SERVICE: service,
-            LABEL_VARIANT: runtime_variant,
-        }
-        if lock_label:
-            lock_variant = "cpu" if runtime_variant == "cpu" else "cuda"
-            lock_path = Path(f"services/requirements-stt-{lock_variant}.lock")
-            expected_labels[f"com.speech-platform.{lock_label}"] = hashlib.sha256(
-                lock_path.read_bytes()
-            ).hexdigest()
-        if labels.get(LABEL_REVISION) != revision:
-            raise PublishError(
-                f"local {service} image source revision label does not match {revision}"
-            )
-        if labels.get(LABEL_ROLE) != expected_role:
-            raise PublishError(
-                f"local {service} image role label does not match {expected_role}"
-            )
-        for label, expected in expected_labels.items():
-            if labels.get(label) != expected:
-                raise PublishError(
-                    f"local {service} image label {label} does not match {expected}"
-                )
-        if platform != "linux/amd64":
-            raise PublishError(
-                f"local {service} image platform {platform!r} is not linux/amd64"
-            )
+    # Resolve and validate the entire selection before the first registry write.
+    prepared = [
+        prepare_image(service, variant, revision, version) for service in services
+    ]
+    for image in prepared:
+        command(["docker", "image", "tag", image.image_ref, image.tagged_ref])
 
-        repository = f"{REGISTRY}/{package}"
-        tagged = f"{repository}:{version}"
-        command(["docker", "image", "tag", image_id, tagged])
-        command(["docker", "push", tagged])
-        digest = registry_digest(repository, version)
+    for image in prepared:
+        command(["docker", "push", image.tagged_ref])
+        digest = registry_digest(image.repository, version)
         published_platform, published_labels = published_image_details(
-            repository, digest
+            image.repository, digest
         )
-        if published_platform != platform:
+        if published_platform != image.platform:
             raise PublishError(
-                f"published {service} platform {published_platform} differs from local {platform}"
+                f"published {image.service} platform {published_platform} differs from local {image.platform}"
             )
         if published_labels.get(LABEL_REVISION) != revision:
             raise PublishError(
-                f"published {service} source revision label does not match {revision}"
+                f"published {image.service} source revision label does not match {revision}"
             )
-        if published_labels.get(LABEL_ROLE) != expected_role:
+        if published_labels.get(LABEL_ROLE) != image.role:
             raise PublishError(
-                f"published {service} image role label does not match {expected_role}"
+                f"published {image.service} image role does not match {image.role}"
             )
-        for label, expected in expected_labels.items():
+        for label, expected in image.expected_labels.items():
             if published_labels.get(label) != expected:
                 raise PublishError(
-                    f"published {service} image label {label} does not match {expected}"
+                    f"published {image.service} image label {label} does not match {expected}"
                 )
 
         metadata = {
-            "service": service,
-            "runtime_variant": runtime_variant,
+            "service": image.service,
+            "runtime_variant": image.runtime_variant,
             "git_source_revision": revision,
             "release_version": version,
-            "image_repository": repository,
+            "image_repository": image.repository,
             "oci_digest": digest,
             "platform": published_platform,
             "architecture": published_platform.split("/", 1)[1],
             "build_workflow_identity": identity,
         }
-        if lock_label:
-            metadata["dependency_lock_sha256"] = expected_labels[
-                f"com.speech-platform.{lock_label}"
+        if image.lock_label:
+            metadata["dependency_lock_sha256"] = image.expected_labels[
+                f"com.speech-platform.{image.lock_label}"
             ]
-        path = metadata_dir / f"{package}-{version}.json"
+        path = metadata_dir / f"{image.package}-{version}.json"
         path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
-        print(f"published {repository}@{digest}; metadata: {path}")
+        print(f"published {image.repository}@{digest}; metadata: {path}")
 
 
-def compose_image_id(service: str, revision: str, variant: str) -> str:
-    compose_files = ["deployments/compose/compose.yaml"]
-    if service == "stt":
-        overlay = (
-            "compose.stt-cuda-build.yaml"
-            if variant == "cuda"
-            else "compose.stt-cpu.yaml"
+def prepare_image(
+    service: str, variant: str, revision: str, version: str
+) -> PreparedImage:
+    package, expected_role, runtime_variant, lock_label = image_identity(
+        service, variant
+    )
+    image_ref = compose_image_reference(service, variant, revision)
+    platform, labels = local_image_details(image_ref)
+    expected_labels = {
+        LABEL_SERVICE: service,
+        LABEL_VARIANT: runtime_variant,
+    }
+    if lock_label:
+        expected_labels[f"com.speech-platform.{lock_label}"] = dependency_lock_digest(
+            runtime_variant
         )
-        compose_files.append(f"deployments/compose/{overlay}")
+    if labels.get(LABEL_REVISION) != revision:
+        raise PublishError(
+            f"local {service} image source revision label does not match {revision}"
+        )
+    if labels.get(LABEL_ROLE) != expected_role:
+        raise PublishError(
+            f"local {service} image role label does not match {expected_role}"
+        )
+    for label, expected in expected_labels.items():
+        if labels.get(label) != expected:
+            raise PublishError(
+                f"local {service} image label {label} does not match {expected}"
+            )
+    if platform != "linux/amd64":
+        raise PublishError(
+            f"local {service} image platform {platform!r} is not linux/amd64"
+        )
+
+    repository = f"{REGISTRY}/{package}"
+    return PreparedImage(
+        service=service,
+        package=package,
+        role=expected_role,
+        runtime_variant=runtime_variant,
+        lock_label=lock_label,
+        image_ref=image_ref,
+        repository=repository,
+        tagged_ref=f"{repository}:{version}",
+        platform=platform,
+        expected_labels=expected_labels,
+    )
+
+
+def compose_image_reference(service: str, variant: str, revision: str) -> str:
+    compose_files = [
+        "deployments/compose/compose.yaml",
+        "deployments/compose/compose.stt-cuda-build.yaml"
+        if variant == "cuda"
+        else "deployments/compose/compose.stt-cpu.yaml",
+    ]
     env = os.environ.copy()
     env.update(
         {
@@ -297,18 +330,17 @@ def compose_image_id(service: str, revision: str, variant: str) -> str:
     args = ["docker", "compose"]
     for compose_file in compose_files:
         args.extend(["-f", compose_file])
-    args.extend(["images", "-q", service])
-    output = command(
-        args,
-        env=env,
-        capture=True,
-    )
-    image_ids = output.splitlines()
-    if len(image_ids) != 1 or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_ids[0]):
+    args.extend(["config", "--format", "json"])
+    try:
+        rendered = json.loads(command(args, env=env, capture=True))
+        image_ref = rendered["services"][service]["image"]
+    except (KeyError, TypeError, json.JSONDecodeError) as error:
         raise PublishError(
-            f"expected one Compose image ID for {service}, got {output!r}"
-        )
-    return image_ids[0]
+            f"Compose does not define a stable image reference for {service}"
+        ) from error
+    if not isinstance(image_ref, str) or not image_ref:
+        raise PublishError(f"Compose image reference for {service} is empty")
+    return image_ref
 
 
 def dependency_lock_digest(variant: str) -> str:

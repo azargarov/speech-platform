@@ -18,3 +18,8 @@ Status: implementation committed and CI verified; no image release or tag create
 - Updated the roadmap, operational documentation and releases README. Added proposed [ADR 0011](../../../docs/adr/0011-ghcr-publication.md).
 
 The previous release gate failed because the publisher selected CPU STT and the implementation was uncommitted. This change addresses variant selection. No tag was created, no package was pushed, no running service/server was changed, and `releases/stt-cuda-baseline-001.yaml` was not edited. The operational baseline is a compatibility reference only; it does not validate this new image.
+
+
+## Publisher image-resolution correction
+
+The `v0.1.1` release run 39162673061 built the images, then failed before tagging/pushing because `docker compose images -q` requires created Compose containers. Replaced that lookup with the stable `image:` references rendered from the tracked Compose definitions, followed by `docker image inspect`. Gateway, CPU STT, CUDA STT and health-only TTS now have explicit local image names; CPU and CUDA STT remain distinct. The publisher now validates all selected local image labels, lock identity and platform before any registry tagging or pushing. This does not create containers or publish images.

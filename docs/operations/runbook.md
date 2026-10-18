@@ -17,8 +17,7 @@ services. Ordinary `make image` and pull-request verification do not publish.
 For a local release, authenticate first with Docker using an account/token that
 can write packages in `azargarov`, then explicitly run
 `make publish VERSION=vX.Y.Z` (or add `SERVICE=gateway`, `stt`, or `tts`). The
-target validates the version/service before building and pushes only the
-selected service images. Never put a token in a command argument or repository
+target validates the version/service before building, resolves stable Compose-owned local image references through rendered configuration, and inspects them directly without requiring Compose containers. It validates every selected image before creating registry tags or pushing any selected image. Never put a token in a command argument or repository
 file. GitHub Actions uses the scoped `GITHUB_TOKEN` only in the publish job.
 
 `make image` defaults STT to CPU. Use `make image SERVICE=stt VARIANT=cuda`

@@ -1,11 +1,13 @@
 """Input validation and safety checks for GHCR publication."""
 
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import publish_images
 from publish_images import (
     PublishError,
     docker_auth_is_configured,
@@ -15,6 +17,7 @@ from publish_images import (
     validate_services,
     validate_variant,
     validate_version,
+    compose_image_reference,
 )
 
 
@@ -105,6 +108,198 @@ class PublishImageValidation(unittest.TestCase):
                 self.assertFalse(docker_auth_is_configured())
                 config.write_text('{"credHelpers":{"ghcr.io":"secretservice"}}')
                 self.assertTrue(docker_auth_is_configured())
+
+
+class PublishImagePipelineRegression(unittest.TestCase):
+    revision = "a" * 40
+    digest = "sha256:" + "b" * 64
+    local_refs = {
+        "gateway": "speech-platform-gateway:local",
+        "stt": "speech-platform-stt-cuda:local",
+        "tts": "speech-platform-tts-health-only:local",
+    }
+    identities = {
+        "gateway": ("gateway", "foundation"),
+        "stt": ("stt-worker", "cuda"),
+        "tts": ("tts-health-only", "health-only"),
+    }
+
+    def details(self, service, *, wrong_label=None):
+        role, variant = self.identities[service]
+        labels = {
+            publish_images.LABEL_REVISION: self.revision,
+            publish_images.LABEL_ROLE: role,
+            publish_images.LABEL_SERVICE: service,
+            publish_images.LABEL_VARIANT: variant,
+        }
+        if service == "stt":
+            labels["com.speech-platform.cuda-lock-sha256"] = (
+                publish_images.dependency_lock_digest("cuda")
+            )
+        if wrong_label and service == "stt":
+            labels[wrong_label] = "incorrect"
+        return json.dumps(
+            [{"Os": "linux", "Architecture": "amd64", "Config": {"Labels": labels}}]
+        )
+
+    def run_publish(self, *, missing_image=None, wrong_label=None):
+        calls = []
+
+        def fake_command(args, *, capture=False, env=None):
+            calls.append(args)
+            if args[:2] == ["docker", "compose"]:
+                # Simulate a fresh Docker daemon: Compose config is available,
+                # but no containers have been created.
+                return json.dumps(
+                    {
+                        "services": {
+                            service: {"image": image_ref}
+                            for service, image_ref in self.local_refs.items()
+                        }
+                    }
+                )
+            if args[:3] == ["docker", "image", "inspect"]:
+                reference = args[3]
+                if reference == missing_image:
+                    raise publish_images.PublishError(
+                        f"image does not exist: {reference}"
+                    )
+                service = (
+                    next(
+                        name
+                        for name, image_ref in self.local_refs.items()
+                        if reference == image_ref
+                    )
+                    if reference in self.local_refs.values()
+                    else next(
+                        name
+                        for name, (package, _role, _variant, _lock) in {
+                            "gateway": publish_images.image_identity("gateway", "cuda"),
+                            "stt": publish_images.image_identity("stt", "cuda"),
+                            "tts": publish_images.image_identity("tts", "cuda"),
+                        }.items()
+                        if reference.startswith(f"{publish_images.REGISTRY}/{package}@")
+                    )
+                )
+                return self.details(service, wrong_label=wrong_label)
+            if args[:3] == ["docker", "buildx", "imagetools"]:
+                return f"Name: fake\nDigest: {self.digest}\n"
+            return ""
+
+        return calls, fake_command
+
+    def publish_with_mock(self, *, missing_image=None, wrong_label=None):
+        calls, fake_command = self.run_publish(
+            missing_image=missing_image, wrong_label=wrong_label
+        )
+        with (
+            patch.object(
+                publish_images, "docker_auth_is_configured", return_value=True
+            ),
+            patch.object(
+                publish_images, "current_revision", return_value=self.revision
+            ),
+            patch.object(publish_images, "workflow_identity", return_value="test:run"),
+            patch.object(publish_images, "command", side_effect=fake_command),
+            tempfile.TemporaryDirectory() as directory,
+        ):
+            publish_images.publish(
+                "v0.1.2", ["gateway", "stt", "tts"], "cuda", Path(directory)
+            )
+        return calls
+
+    def test_fresh_compose_state_resolves_and_prepares_all_registry_tags(self):
+        calls = self.publish_with_mock()
+        inspected_locally = [
+            call[3]
+            for call in calls
+            if call[:3] == ["docker", "image", "inspect"]
+            and call[3] in self.local_refs.values()
+        ]
+        tags = [call for call in calls if call[:3] == ["docker", "image", "tag"]]
+        pushes = [call for call in calls if call[:2] == ["docker", "push"]]
+        self.assertEqual(set(inspected_locally), set(self.local_refs.values()))
+        self.assertEqual(
+            {call[-1] for call in tags},
+            {
+                "ghcr.io/azargarov/voiceservice-gateway:v0.1.2",
+                "ghcr.io/azargarov/voiceservice-stt-cuda:v0.1.2",
+                "ghcr.io/azargarov/voiceservice-tts-health-only:v0.1.2",
+            },
+        )
+        self.assertEqual(len(pushes), 3)
+        first_tag = min(
+            i for i, call in enumerate(calls) if call[:3] == ["docker", "image", "tag"]
+        )
+        self.assertTrue(
+            all(
+                i < first_tag
+                for i, call in enumerate(calls)
+                if call[:3] == ["docker", "image", "inspect"]
+                and call[3] in self.local_refs.values()
+            )
+        )
+        self.assertFalse(any("images" in call and "-q" in call for call in calls))
+        # The mocked Docker environment contains no Compose containers; only
+        # rendered Compose configuration and docker image inspect are consulted.
+        self.assertFalse(any("ps" in call or "up" in call for call in calls))
+
+    def test_missing_expected_image_stops_before_any_registry_tag_or_push(self):
+        calls, fake_command = self.run_publish(missing_image=self.local_refs["stt"])
+        with (
+            patch.object(
+                publish_images, "docker_auth_is_configured", return_value=True
+            ),
+            patch.object(
+                publish_images, "current_revision", return_value=self.revision
+            ),
+            patch.object(publish_images, "workflow_identity", return_value="test:run"),
+            patch.object(publish_images, "command", side_effect=fake_command),
+            tempfile.TemporaryDirectory() as directory,
+            self.assertRaisesRegex(PublishError, "image does not exist"),
+        ):
+            publish_images.publish(
+                "v0.1.2", ["gateway", "stt", "tts"], "cuda", Path(directory)
+            )
+        self.assertFalse(any(call[:3] == ["docker", "image", "tag"] for call in calls))
+        self.assertFalse(any(call[:2] == ["docker", "push"] for call in calls))
+
+    def test_wrong_service_or_runtime_variant_stops_before_any_registry_write(self):
+        for label in (publish_images.LABEL_SERVICE, publish_images.LABEL_VARIANT):
+            with self.subTest(label=label):
+                calls, fake_command = self.run_publish(wrong_label=label)
+                with (
+                    patch.object(
+                        publish_images, "docker_auth_is_configured", return_value=True
+                    ),
+                    patch.object(
+                        publish_images, "current_revision", return_value=self.revision
+                    ),
+                    patch.object(
+                        publish_images, "workflow_identity", return_value="test:run"
+                    ),
+                    patch.object(publish_images, "command", side_effect=fake_command),
+                    tempfile.TemporaryDirectory() as directory,
+                    self.assertRaises(PublishError),
+                ):
+                    publish_images.publish(
+                        "v0.1.2", ["gateway", "stt", "tts"], "cuda", Path(directory)
+                    )
+                self.assertFalse(
+                    any(call[:3] == ["docker", "image", "tag"] for call in calls)
+                )
+                self.assertFalse(any(call[:2] == ["docker", "push"] for call in calls))
+
+    def test_compose_image_reference_is_resolved_from_rendered_compose(self):
+        output = json.dumps({"services": {"stt": {"image": self.local_refs["stt"]}}})
+        with patch("publish_images.command", return_value=output) as run_command:
+            self.assertEqual(
+                compose_image_reference("stt", "cuda", self.revision),
+                self.local_refs["stt"],
+            )
+        args = run_command.call_args.args[0]
+        self.assertEqual(args[-3:], ["config", "--format", "json"])
+        self.assertNotIn("images", args)
 
 
 if __name__ == "__main__":

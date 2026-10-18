@@ -1,6 +1,7 @@
 name: speech-platform
 services:
   gateway:
+    image: speech-platform-gateway:local
     build:
       context: ../..
       dockerfile: deployments/compose/gateway.Dockerfile
@@ -43,6 +44,7 @@ services:
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
   tts:
+    image: speech-platform-tts-health-only:local
     build:
       context: ../..
       dockerfile: deployments/compose/worker.Dockerfile

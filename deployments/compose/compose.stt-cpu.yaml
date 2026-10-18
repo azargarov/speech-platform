@@ -1,5 +1,6 @@
 services:
   stt:
+    image: speech-platform-stt-cpu:local
     build:
       context: ../..
       dockerfile: deployments/compose/worker-stt-cpu.Dockerfile

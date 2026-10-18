@@ -1,6 +1,6 @@
 # M01C plan — GHCR image publication
 
-Status: implementation and artifact-action correction are committed; ordinary CI passed. First release recovery remains in progress after the `v0.1.0` workflow failed before publication. Preserve the existing tag. A corrected `v0.1.1` release requires user approval. GHCR publication and milestone closeout remain pending.
+Status: implementation and artifact-action correction are committed; the `v0.1.1` workflow failed after image builds but before publication because image resolution depended on nonexistent Compose containers. The resolution/prevalidation correction is in progress. Preserve `v0.1.0` and `v0.1.1`; do not create another tag until local and GitHub validation passes. GHCR publication and milestone closeout remain pending.
 
 ## Scope
 
@@ -10,7 +10,7 @@ No deployment, release-tag creation, remote-server changes, model/config/audio p
 
 ## Design and boundaries
 
-`make image` remains the sole build interface. The default `make image` and `make image SERVICE=stt` select CPU to preserve the established local behavior. `make image VARIANT=cuda` builds all services with the CUDA STT build override, while `make image SERVICE=stt VARIANT=cuda` builds only CUDA STT. Both variants reuse their existing Dockerfiles and locked dependencies. The build-only CUDA Compose override supplies the reviewed immutable Python base and SHA-256 of the CUDA lock; the runtime-only CUDA Compose overlay is unchanged. The publisher defaults STT publication to CUDA and stores CPU/CUDA STT in distinct repositories. `VARIANT=cpu` explicitly selects CPU. It invokes Make, verifies local and published service/variant/source/lock labels and `linux/amd64`, captures the registry manifest digest and writes release metadata. See [ADR 0011](../../../docs/adr/0011-ghcr-publication.md).
+`make image` remains the sole build interface. The default `make image` and `make image SERVICE=stt` select CPU to preserve the established local behavior. `make image VARIANT=cuda` builds all services with the CUDA STT build override, while `make image SERVICE=stt VARIANT=cuda` builds only CUDA STT. Both variants reuse their existing Dockerfiles and locked dependencies. The build-only CUDA Compose override supplies the reviewed immutable Python base and SHA-256 of the CUDA lock; the runtime-only CUDA Compose overlay is unchanged. The publisher defaults STT publication to CUDA and stores CPU/CUDA STT in distinct repositories. `VARIANT=cpu` explicitly selects CPU. It invokes Make, resolves Compose-owned stable image references from rendered configuration, and uses `docker image inspect` without requiring containers. It validates every selected image for service/variant/source/lock labels and `linux/amd64` before creating registry tags or pushing; it then verifies the published manifest by digest and writes release metadata. See [ADR 0011](../../../docs/adr/0011-ghcr-publication.md).
 
 The image repositories are `ghcr.io/azargarov/voiceservice-gateway`, `voiceservice-stt-cpu`, `voiceservice-stt-cuda`, and `voiceservice-tts-health-only`. TTS remains a health-only process.
 
@@ -41,3 +41,9 @@ git diff --check
 ```
 
 The actual GHCR publication, workflow run and registry inspection require an approved version tag and package write permission and are outside local verification.
+
+## Publisher image-resolution regression
+
+The first `v0.1.1` release attempt failed in run 39162673061 after all builds, at publisher image lookup: `docker compose images -q` returned no image because no Compose containers had been created. This is a publisher defect; build success was not the problem. The correction adds explicit local image names to the existing Compose definitions and resolves them with `docker compose config --format json` followed by `docker image inspect`. No container is started as a workaround. Regression tests cover all three release images in a no-container mock, missing images, incorrect service/variant identity, registry tag preparation, and the rule that all local validation precedes any push.
+
+The corrected pipeline must pass the listed local checks and GitHub CI before a new release version is recommended. Preserve both existing tags. M01C remains incomplete until a later approved release is published and independently verified by OCI digest.
