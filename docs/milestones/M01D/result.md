@@ -10,7 +10,7 @@ Status: **INCOMPLETE — implementation and local deterministic checks are recor
 | Reuse existing model artifact contract and approved file identities | Local PASS | The release manifest references the byte-identical existing manifest; canonical SHA, revision, five file sizes and hashes match the recorded baseline. |
 | Explicit, staged, content-addressed model provisioning | Synthetic PASS | Cache verification/reuse, staging, integrity failure, interrupted transfer cleanup, atomic activation and retention are covered with small fixtures. No real model download was performed. |
 | Make verification integration | Local PASS | `make verify PYTHON=.venv/bin/python` passed with release validation and synthetic tests included. |
-| GitHub Actions | Pending | Implementation commit must pass ordinary CI. |
+| GitHub Actions | PASS | Ordinary `verify` workflow passed, including verification and both image builds, on `b089e1456c8d09073759395f13ae4fe67873ffcc` ([run 39167849767](https://github.com/azargarov/speech-platform/actions/runs/39167849767)). |
 | User validation and milestone closeout | Pending | Explicit reviewer validation is required; no M01D PASS is claimed. |
 
 ## Limitations
