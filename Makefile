@@ -9,6 +9,8 @@ PUBLISH_SERVICE := $(strip $(SERVICE))
 PUBLISH_SELECTION :=
 PUBLISH_VERSION := $(strip $(VERSION))
 PUBLISH_VARIANT := $(if $(strip $(VARIANT)),$(strip $(VARIANT)),cuda)
+PLATFORM_RELEASE ?= releases/voiceservice-v0.1.2.yaml
+MODEL_STORE ?= private/model-store
 ifneq ($(filter image,$(MAKECMDGOALS)),)
 ifeq ($(filter $(IMAGE_VARIANT),cpu cuda),)
 $(error Unknown image VARIANT '$(IMAGE_VARIANT)'; choose cpu or cuda)
@@ -44,7 +46,7 @@ else
 $(error Unknown publish service '$(SERVICE)'; choose gateway, stt, or tts)
 endif
 endif
-.PHONY: verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check stt-cpu-integration stt-cuda-http-integration
+.PHONY: verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check release-check model-check model-fetch stt-cpu-integration stt-cuda-http-integration
 bootstrap:
 	$(PYTHON) -m pip install -r requirements-dev.txt
 	$(PYTHON) -m pip install --require-hashes -r services/requirements-stt-cpu.lock
@@ -79,6 +81,12 @@ image:
 	SOURCE_REVISION="$(shell git rev-parse HEAD)" STT_CPU_LOCK_SHA256="$$(sha256sum services/requirements-stt-cpu.lock | cut -d' ' -f1)" STT_CUDA_LOCK_SHA256="$$(sha256sum services/requirements-stt-cuda.lock | cut -d' ' -f1)" STT_APPLICATION_CONFIG="$(CURDIR)/configs/stt-application-cpu.example.yaml" STT_DEPLOYMENT_CONFIG="$(CURDIR)/configs/stt-deployment-cpu.example.yaml" STT_MODEL_ROOT=/models $(COMPOSE) -f $(IMAGE_COMPOSE_FILE) build $(IMAGE_SELECTION)
 publish:
 	$(PYTHON) scripts/publish_images.py --version "$(PUBLISH_VERSION)" --services "$(PUBLISH_SELECTION)" --variant "$(PUBLISH_VARIANT)"
+release-check:
+	$(PYTHON) -m scripts.check_release --release "$(PLATFORM_RELEASE)"
+model-check:
+	$(PYTHON) -m scripts.provision_models check --release "$(PLATFORM_RELEASE)" --store "$(MODEL_STORE)"
+model-fetch:
+	$(PYTHON) -m scripts.provision_models fetch --release "$(PLATFORM_RELEASE)" --store "$(MODEL_STORE)"
 governance-check:
 	$(PYTHON) scripts/validate_governance.py
 	$(PYTHON) -m unittest discover -s scripts -p 'test_governance.py' -v
@@ -139,4 +147,4 @@ stt-cuda-http-integration:
 	      --maximum-request-count "$(if $(STT_CUDA_HTTP_MAX_REQUEST_COUNT),$(STT_CUDA_HTTP_MAX_REQUEST_COUNT),1)" \
 	      --overall-deadline-seconds "$(STT_CUDA_HTTP_DEADLINE_SECONDS)" \
 	      --resource-sample-interval-seconds "$(if $(STT_CUDA_RESOURCE_SAMPLE_INTERVAL_SECONDS),$(STT_CUDA_RESOURCE_SAMPLE_INTERVAL_SECONDS),disabled)"
-verify: lint config compose-check test build governance-check stt-lock-check
+verify: lint config compose-check release-check test build governance-check stt-lock-check

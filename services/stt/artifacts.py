@@ -29,16 +29,25 @@ def canonical_manifest_digest(manifest: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def load_artifact_manifest(
+    path: str | Path, expected_sha256: str | None = None
+) -> dict:
+    """Load and validate the shared model artifact manifest contract."""
+    manifest_path = Path(path)
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise ValueError("manifest must be a regular file")
+    manifest = _read_yaml(manifest_path)
+    _validate_manifest_shape(manifest)
+    if expected_sha256 and canonical_manifest_digest(manifest) != expected_sha256:
+        raise ValueError("manifest digest mismatch")
+    return manifest
+
+
 def verify_artifact(model: ModelConfig, location: ArtifactRoot) -> VerifiedArtifact:
     root = location.directory
     manifest_path = location.manifest
     try:
-        if manifest_path.is_symlink() or not manifest_path.is_file():
-            raise ValueError("manifest must be a regular file")
-        manifest = _read_yaml(manifest_path)
-        _validate_manifest_shape(manifest)
-        if canonical_manifest_digest(manifest) != model.manifest_sha256:
-            raise ValueError("manifest digest mismatch")
+        manifest = load_artifact_manifest(manifest_path, model.manifest_sha256)
         if manifest["model"]["family"] != model.identity.family:
             raise ValueError("manifest model family mismatch")
         if manifest["model"]["revision"] != model.identity.upstream_revision:

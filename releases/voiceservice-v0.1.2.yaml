@@ -1,0 +1,46 @@
+schema_version: 1
+release_version: v0.1.2
+git_source_revision: bbbeb697c1ae840e084e962fac39db0c19ab7728
+supported_platforms:
+  - linux/amd64
+services:
+  gateway:
+    image: ghcr.io/azargarov/voiceservice-gateway@sha256:cab80ebc04bc78ec608c1f81c69ce1dfc8e048227e4892053c86783833064d30
+    platform: linux/amd64
+    runtime_variant: foundation
+    capabilities: [health]
+    dependencies: []
+    required_model_artifacts: []
+    configuration_compatibility:
+      source_revision_bound: true
+      schema_versions: {}
+  stt:
+    image: ghcr.io/azargarov/voiceservice-stt-cuda@sha256:31440127a13a1892f07fe480f013f1185c2d978ee981b5ce56fcd4a09a702ad8
+    platform: linux/amd64
+    runtime_variant: cuda
+    capabilities: [health, readiness, transcription]
+    dependencies: []
+    required_model_artifacts:
+      - id: large-v3-turbo
+        source: huggingface_hub
+        family: whisper
+        repository: dropbox-dash/faster-whisper-large-v3-turbo
+        revision: 0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf
+        artifact_format: ctranslate2-whisper
+        manifest_path: releases/artifacts/stt-large-v3-turbo.yaml
+        manifest_sha256: 86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6
+    configuration_compatibility:
+      source_revision_bound: true
+      schema_versions:
+        application: [2, 3]
+        deployment: [1, 2]
+  tts:
+    image: ghcr.io/azargarov/voiceservice-tts-health-only@sha256:6ac1e87e1290f657dae613faf45cbcdd83239b4529b0482a4cd2d12b642739d6
+    platform: linux/amd64
+    runtime_variant: health-only
+    capabilities: [health]
+    dependencies: []
+    required_model_artifacts: []
+    configuration_compatibility:
+      source_revision_bound: true
+      schema_versions: {}

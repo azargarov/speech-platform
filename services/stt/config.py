@@ -16,6 +16,9 @@ from services.stt.domain import (
     FailureCode,
 )
 
+APPLICATION_SCHEMA_VERSIONS = frozenset({2, 3})
+DEPLOYMENT_SCHEMA_VERSIONS = frozenset({1, 2})
+
 
 class StrictLoader(yaml.SafeLoader):
     pass
@@ -152,7 +155,7 @@ def _text(value, name, maximum=256):
 def load_application_config(path: str | Path) -> ApplicationConfig:
     data = _read_yaml(path)
     version = data.get("schema_version")
-    if type(version) is not int or version not in {2, 3}:
+    if type(version) is not int or version not in APPLICATION_SCHEMA_VERSIONS:
         raise ValueError("application schema_version must be 2 or 3")
     fields = {
         "schema_version",
@@ -411,7 +414,7 @@ def load_application_config(path: str | Path) -> ApplicationConfig:
 def load_deployment_config(path: str | Path) -> DeploymentConfig:
     data = _read_yaml(path)
     version = data.get("schema_version")
-    if type(version) is not int or version not in {1, 2}:
+    if type(version) is not int or version not in DEPLOYMENT_SCHEMA_VERSIONS:
         raise ValueError("deployment schema_version must be 1 or 2")
     expected_fields = {"schema_version", "artifacts"}
     if version == 2:
