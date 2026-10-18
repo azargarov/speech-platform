@@ -171,56 +171,15 @@ These names are proposed roadmap work packages under the M01 foundation umbrella
 
 ### M01A — Establish GitHub as the primary repository
 
-**Objective:** make the approved private GitHub repository the primary remote without rewriting commits, dropping refs, or disturbing the working STT baseline.
+**Status: PASS for migration of the reviewed local `main` branch only.** This does not claim that unknown Memphis-only refs were inventoried or migrated.
 
-**Observed state in this execution:** local branch `main` and GitHub `origin/main` both point to `bd0fa17c71bbaf79d6fbaeecedb0f2d1fb19c856`; local `origin` is `git@github.com:azargarov/speech-platform.git`, and `memphis` is the prior HTTPS remote. GitHub also advertises `master` at `ad1dd96a867628e368eb8ab15ef3df2234195213`, with `HEAD` pointing to `master`; that separate branch was fetched for inspection and not modified. Its tip is an initial commit containing `LICENSE`. Local source inventory contains one branch and no tags. GitHub read access succeeded. The operator states that the repository is private, but this session did not independently inspect repository visibility or write permissions. A Memphis fetch of branch and tag refs failed because credentials were unavailable, so its complete live ref inventory is unknown. No dedicated history-sensitive scanner (`gitleaks`, `trufflehog`, or `detect-secrets`) is installed. A bounded custom pattern sweep of 502 unique blobs reachable from locally available refs found no candidates; it does not satisfy the required dedicated scan and cannot cover Memphis-only refs. Therefore source-history/security acceptance is incomplete and M01A is not PASS.
+**Verified execution:** the local `main` was clean at `3ac06b729189209b6349ac53dbd30b53aff21e8a`. Gitleaks v8.30.1 was downloaded as a standalone binary; the official Linux x64 release archive SHA-256 was verified as `551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb`. Its full-history scan of commits reachable from `main` reported one `generic-api-key` candidate at `releases/stt-cuda-baseline-001.yaml:26`; inspection confirmed the value is the `api_source_revision` Git commit identifier, not a credential. No other findings were reported. Secret values were not retained in the user-facing report.
 
-The four files in this change set are planning/status documentation only: `PLANS.md`, `README.md`, `docs/architecture/overview.md`, and this document. They are not included in the GitHub `main` commit observed at the start of this execution. They may be recorded in a separate local documentation commit, but that commit must remain unpublished until the history and secret-scan gates are cleared. This execution does not push refs or change remote names; the remotes were already configured as requested when inspected.
+Only `main` was pushed to GitHub, without force. The resulting remote tip is `3ac06b729189209b6349ac53dbd30b53aff21e8a`. A fresh bare clone independently resolved `main` to that exact commit, retained `master` at `ad1dd96a867628e368eb8ab15ef3df2234195213`, and passed `git fsck --full`. GitHub repository metadata confirmed private visibility, administrator permission for `azargarov`, and `main` as the default branch; `git ls-remote --symref origin HEAD` also points to `main`. Local `main` tracks `origin/main`; `origin` is GitHub and `memphis` remains the secondary remote.
 
-**Remaining checks:** obtain an authorized read-only Memphis branch/tag inventory; run an approved history-sensitive scan over the exact refs intended for migration, covering the proposed source refs and reviewing the retained GitHub history; independently confirm GitHub visibility and the authenticated account's required write/admin permissions. The GitHub `HEAD` symref currently points to `master`; an authorized repository administrator must change the default branch to `main` after confirming `main` is ready. Review and preserve `master`. Do not delete or force-update either remote ref. Confirm that the source `main` history includes the accepted STT baseline record.
+**Unresolved scope limitation:** an explicit branch/tag fetch from Memphis failed because credentials were unavailable. Per the approved narrowed scope, Memphis-only refs were not migrated and this does not block M01A. The secondary remote remains configured. No GitHub `master` ref was changed, and no application, CI, container, model or server state was changed.
 
-**Required GitHub settings:** private visibility; repository name `speech-platform`; set default branch to `main` after review; restrict write/admin access to intended collaborators; disable force pushes and branch deletion for the protected default branch; require pull requests and, once M01B publishes a stable check name, require that CI status check before merging. Require an approval only if an independent reviewer is available. Keep Actions token permissions read-only by default and allow only reviewed workflows/actions. Do not add deployment secrets in M01A. Secret scanning and push protection are useful where the repository plan supports them, but do not replace history inspection. GitHub notes private-repository branch-protection availability depends on plan; verify entitlements before treating rules as enforced ([protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches)). Rulesets can also block force pushes and deletions ([available rules](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)).
-
-**Non-force publication and independent verification, only after blockers are cleared and separately approved:**
-
-```sh
-# Verify the reviewed, clean source checkout and intended refs.
-git status --short
-git branch --all --verbose --verbose
-git tag --list
-git ls-remote --heads --tags memphis
-git ls-remote --heads --tags origin
-
-# GitHub main already matches the reviewed baseline as of this execution.
-# If later reviewed source refs need publication, push only those named refs,
-# without force, after checking for conflicts. Do not push all refs blindly.
-git push origin main
-
-# Compare every intended local branch and tag object ID with GitHub.
-git for-each-ref --format='%(refname) %(objectname)' refs/heads refs/tags | sort > /tmp/speech-platform-local-refs.txt
-git ls-remote --heads --tags origin | awk '$2 !~ /\\^\\{\\}$/ {print $2, $1}' | sort > /tmp/speech-platform-github-refs.txt
-while read -r ref oid; do
-  remote_oid=$(awk -v ref="$ref" '$1 == ref {print $2}' /tmp/speech-platform-github-refs.txt)
-  test "$remote_oid" = "$oid"
-done < /tmp/speech-platform-local-refs.txt
-comm -13 /tmp/speech-platform-local-refs.txt /tmp/speech-platform-github-refs.txt > /tmp/speech-platform-github-only-refs.txt
-cat /tmp/speech-platform-github-only-refs.txt
-
-# In a disposable verification directory, clone the migrated repository,
-# fetch all intended refs and verify the accepted baseline commit is present.
-VERIFY_DIR=$(mktemp -d)
-git clone --bare git@github.com:azargarov/speech-platform.git "$VERIFY_DIR/repo.git"
-git -C "$VERIFY_DIR/repo.git" cat-file -e 'bd0fa17c71bbaf79d6fbaeecedb0f2d1fb19c856^{commit}'
-git -C "$VERIFY_DIR/repo.git" fsck --full
-```
-
-Do not execute publication while source inventory or scan results are incomplete. Stop on any ref conflict or mismatch. Review destination-only refs, especially `master`, without deleting them. The Memphis remote remains configured as secondary. Use unique temporary paths for ref inventories and a fresh clone; remove only those exact temporary paths after verification.
-
-The requested remote names and upstream are already configured. Confirm them with `git remote -v` and `git branch -vv`; no local rename is required. If they are changed later, restore only the local remote names and upstream without changing remote refs.
-
-If a future push is interrupted, compare remote refs with a recorded object-ID inventory and repeat only the same non-force push for missing, conflict-free named refs. Do not force-push, delete remote branches/tags, rebase, squash, or initialize GitHub with another README. Keep `memphis` configured as the secondary remote.
-
-**Acceptance:** dedicated history-sensitive scanning is clean for the reviewed migration refs; complete source and destination ref inventories have been reviewed; GitHub visibility and permissions are confirmed; the intended branch/tag object IDs and history are independently verified in a fresh clone; GitHub `master` remains preserved; authorized repository settings show `main` as default; local `origin` tracks GitHub `main` and `memphis` remains secondary; no force push/history rewrite occurred; existing STT target and private configuration were untouched. At the current observed state, M01A is **not accepted** because these checks are incomplete. M01A does not include CI changes or image publication.
+**Acceptance:** local `main` is published and matches GitHub `main`; full reachable history passed the Gitleaks scan apart from the verified commit-SHA false positive; independent clone integrity passed; upstream tracking and default branch are `main`; the existing GitHub `master` is preserved; Memphis remains configured. This completes M01A for the approved local-`main` migration scope. It does not start M01B or claim migration of other source-host refs.
 
 ### M01B — Consolidate Make-driven CI and image publication
 
