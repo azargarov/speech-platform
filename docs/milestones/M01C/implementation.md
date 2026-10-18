@@ -1,6 +1,6 @@
 # M01C implementation record
 
-Status: implementation in progress; no image release or tag created.
+Status: implementation committed and CI verified; no image release or tag created.
 
 ## Changes
 

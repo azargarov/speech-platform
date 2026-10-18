@@ -1,6 +1,6 @@
 # M01C verification record
 
-Status: implementation locally verified; commit, GitHub CI, GHCR publication and M01C closeout remain pending.
+Status: implementation committed to GitHub `main`; local verification and GitHub CI pass. GHCR publication and M01C closeout remain pending.
 
 ## OBSERVED
 
@@ -29,7 +29,7 @@ Status: implementation locally verified; commit, GitHub CI, GHCR publication and
 - `make image SERVICE=stt VARIANT=cpu` — exit 0; Compose selected `worker-stt-cpu.Dockerfile` and `requirements-stt-cpu.lock`, verified the lock SHA-256, and built the local CPU image.
 - `make image SERVICE=stt VARIANT=cuda` — exit 0; Compose selected `worker-stt-cuda.Dockerfile`, pinned base `python:3.13.9-slim@sha256:326df678c20c78d465db501563f3492d17c42a4afe33a1f2bf5406a1d56b0e86`, and the CUDA lock with SHA-256 `68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14`. The complete build succeeded. BuildKit warned that the Dockerfile's required `ARG STT_CUDA_BASE_IMAGE` has no standalone default; Compose supplies the reviewed pinned value explicitly.
 - `make image` — exit 0 for Gateway, CPU STT and health-only TTS; this preserves CPU as the default build variant. `make image VARIANT=cuda` — exit 0 for Gateway, CUDA STT and health-only TTS, matching the release workflow's build selection.
-- Local `docker image inspect` showed `linux/amd64` and expected service/runtime-variant/role/lock labels for CPU STT, CUDA STT, Gateway and TTS. CUDA labels included the base digest, exact CUDA lock SHA-256 and source-revision label. At this pre-commit point the labels reflected the current Git `HEAD`, not the uncommitted worktree; they are not release-source evidence. Images will be rebuilt from the clean committed revision before source-label verification.
+- Local `docker image inspect` showed `linux/amd64` and expected service/runtime-variant/role/lock labels for CPU STT, CUDA STT, Gateway and TTS. CUDA labels included the base digest, exact CUDA lock SHA-256 and source-revision label. The initial pre-commit image labels were not treated as release-source evidence.
 - `docker run --rm --network none --read-only --entrypoint python speech-platform-stt-cuda:local ...` loaded `libcublas.so.12`, `libcudnn.so.9` and `libnvrtc.so.12` successfully. This confirms packaged CUDA user-space libraries load; it is not GPU inference or acceptance of the operational baseline.
 - `.venv/bin/python -m unittest discover -s scripts -p 'test_publish_images.py' -v` — 10 tests passed, covering version/service/variant validation, repository and label mapping, CUDA Compose/Dockerfile/lock selection, default policy and dirty-worktree rejection.
 - Invalid Make selections exited 2 before build/publication: `make image SERVICE=invalid`, `make image SERVICE=stt VARIANT=gpu`, `make publish SERVICE=unknown VERSION=v0.1.0`, and `make publish SERVICE=stt VARIANT=gpu VERSION=v0.1.0`. Missing and invalid versions (`make publish`, `make publish VERSION=invalid`) exited 2 before authentication/build/push.
@@ -37,17 +37,19 @@ Status: implementation locally verified; commit, GitHub CI, GHCR publication and
 - `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/release.yaml .github/workflows/verify.yaml` — exit 0.
 - `git diff --check` — exit 0. The historical CUDA baseline remains unchanged at SHA-256 `0c585d62d7d4cf3cf7c74bcf2b9693909cf68ec4529036695c24e882268f0627`.
 - No tag, GHCR publication, registry digest lookup, server access or running-service operation occurred.
-- `.github/workflows/verify.yaml` now includes `make image VARIANT=cuda` on ordinary push/PR runs. Its workflow retains `contents: read`; runner-side CUDA image construction needs no GPU or package-write permission. Hosted execution on the updated workflow is pending.
+- Clean-tree image build on commit `0098849da6da3f0ca1ff0363c6db45aea87c44cf`: `make image` passed, and `make image SERVICE=stt VARIANT=cuda` passed. `docker image inspect speech-platform-stt-cuda:local` reported `linux/amd64`, `service=stt`, `runtime-variant=cuda`, the `stt-worker` role, CUDA lock SHA-256 `68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14`, the pinned Python base digest, and source revision `0098849da6da3f0ca1ff0363c6db45aea87c44cf`. This confirms a clean committed-source CUDA build and provenance labels; it does not establish GPU inference.
+- GitHub Actions verification on `a4f59b006811b0830aa3c9a1c618c78bd024d40` succeeded: [run 39160390567](https://github.com/azargarov/speech-platform/actions/runs/39160390567). The run executed `make verify`, the default `make image`, and `make image VARIANT=cuda`; all passed on a standard hosted runner without GPU access. The verification workflow has `contents: read`; it requires no package-write permission.
+- The corrected implementation and CI changes are committed and available on GitHub `main`: implementation `0098849da6da3f0ca1ff0363c6db45aea87c44cf`; latest implementation/CI commit at this verification point `a4f59b006811b0830aa3c9a1c618c78bd024d40`. No tag or GHCR publication was performed.
 
 An initial system-Python Ruff check could not run because Ruff is not installed there; the repository virtualenv was used. An initial unittest module invocation used the wrong import path and an early test draft mistakenly accepted Docker-invalid SemVer build metadata; these were corrected, and the discover-based tests passed.
 
 ## NOT ESTABLISHED
 
-- GitHub CI on the commit, GHCR package write access, publication, registry digest and digest-pull inspection.
+- GHCR package write access, publication, registry digest and digest-pull inspection.
 - CUDA GPU inference; the local image build and library-load check do not establish inference behavior.
 
 Buildx registry digest resolution and digest-pull inspection were not executed. The local image IDs observed during image builds are not OCI manifest digests. The historical M01B results remain separate evidence.
 
 ## Release readiness
 
-The previous CPU-selection defect is corrected locally: publication defaults to the distinct CUDA STT repository, CPU publication requires `VARIANT=cpu`, and the release workflow explicitly builds and publishes CUDA. Commit/push and a passing GitHub CI run are still required before the implementation is ready for the separately approved `v0.1.0` publication. M01C remains incomplete until the actual GHCR images are inspected by OCI digest.
+The CPU-selection defect is corrected: publication defaults to the distinct CUDA STT repository, CPU publication requires `VARIANT=cpu`, and the release workflow explicitly builds and publishes CUDA. The implementation is committed to GitHub `main` and the hosted verification/build workflow passes. It is ready for the separately approved `v0.1.0` publication. M01C remains incomplete until the actual GHCR images are published and inspected by OCI digest.
