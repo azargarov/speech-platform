@@ -183,6 +183,8 @@ Only `main` was pushed to GitHub, without force. The resulting remote tip is `3a
 
 ### M01B — Make-driven verification and local image builds
 
+**Status: PASS for this bounded scope (2026-10-18).**
+
 **Objective:** use the same Make targets for local development and CI, and provide local image builds. Image publication and deployment are deferred. No CI job deploys to the production host.
 
 **Scope:** preserve `make bootstrap`, `test`, `verify`, and `build`; add `make image` for all current Compose images and `make image SERVICE=...` for one image; use those same Make targets in the existing GitHub Actions workflow. The workflow runs for pushes to and pull requests targeting `main`, has `contents: read`, builds but does not publish, and pins actions by full commit SHA. `make image` reuses the Compose Dockerfiles and does not push. STT uses the CPU image definition for ordinary builds; TTS remains health-only. CUDA inference remains a separate manually approved GPU path; a successful image build is not CUDA runtime verification.
@@ -190,6 +192,8 @@ Only `main` was pushed to GitHub, without force. The resulting remote tip is `3a
 **Dependencies:** M01A accepted; canonical Git host and Make target contract reviewed. Go 1.27.2, Python 3.13.9, the existing dependency files and Ubuntu 24.04 hosted runner are selected. Standard hosted runners can assemble CPU-side Linux images without a GPU, subject to the actual workflow build result and runner disk/time limits.
 
 **Acceptance:** local `make verify`, selected and default `make image` builds succeed; unknown image service selection fails before Docker is invoked; the workflow invokes `make bootstrap`, `make verify` and `make image` for the required `main` events with read-only permissions; the actual GitHub Actions run succeeds. This scope does not publish images or change any running STT/Ollama/Dify service.
+
+**Observed verification:** `make verify PYTHON=.venv/bin/python`, `make image SERVICE=stt`, and `make image` passed on the workstation. The unknown-service check exited during Makefile parsing with a clear error. Workflow YAML and the required branch/permission settings were inspected. The pushed commit `5489c637d80ef1ba24cd64168cdfc2886dfc2f94` passed the hosted `foundation` job, including `make bootstrap`, `make verify`, and `make image`: [GitHub Actions run 39156033629](https://github.com/azargarov/speech-platform/actions/runs/39156033629). A bare `make verify` using the host system Python initially failed because that interpreter lacked Ruff; the repository virtualenv invocation passed. No environment dependency was installed to resolve that local interpreter difference.
 
 **Deferred next step:** approve and implement a distinct release workflow for GHCR publication, immutable digest capture and release metadata. Production deployment remains a later explicit operator action. No GHCR permissions or credentials are granted in this milestone.
 
