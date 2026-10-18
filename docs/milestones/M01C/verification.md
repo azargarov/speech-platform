@@ -37,6 +37,7 @@ Status: implementation locally verified; commit, GitHub CI, GHCR publication and
 - `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/release.yaml .github/workflows/verify.yaml` — exit 0.
 - `git diff --check` — exit 0. The historical CUDA baseline remains unchanged at SHA-256 `0c585d62d7d4cf3cf7c74bcf2b9693909cf68ec4529036695c24e882268f0627`.
 - No tag, GHCR publication, registry digest lookup, server access or running-service operation occurred.
+- `.github/workflows/verify.yaml` now includes `make image VARIANT=cuda` on ordinary push/PR runs. Its workflow retains `contents: read`; runner-side CUDA image construction needs no GPU or package-write permission. Hosted execution on the updated workflow is pending.
 
 An initial system-Python Ruff check could not run because Ruff is not installed there; the repository virtualenv was used. An initial unittest module invocation used the wrong import path and an early test draft mistakenly accepted Docker-invalid SemVer build metadata; these were corrected, and the discover-based tests passed.
 

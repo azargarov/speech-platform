@@ -81,9 +81,11 @@ class PublishImageValidation(unittest.TestCase):
 
     def test_build_default_and_release_workflow_variant_are_explicit(self):
         makefile = Path("Makefile").read_text()
+        verify = Path(".github/workflows/verify.yaml").read_text()
         release = Path(".github/workflows/release.yaml").read_text()
         self.assertIn("$(strip $(VARIANT)),cpu", makefile)
         self.assertIn("$(strip $(VARIANT)),cuda", makefile)
+        self.assertIn("make image VARIANT=cuda", verify)
         self.assertIn("make image VARIANT=cuda", release)
         self.assertIn('make publish VERSION="$GITHUB_REF_NAME" VARIANT=cuda', release)
 

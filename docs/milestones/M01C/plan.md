@@ -19,7 +19,7 @@ The image repositories are `ghcr.io/azargarov/voiceservice-gateway`, `voiceservi
 - `make verify PYTHON=.venv/bin/python`, CPU and CUDA STT image builds, and default `make image` pass using the current repository toolchain; CUDA build failure must fail closed without CPU fallback.
 - `make publish` rejects missing/invalid versions; unknown services fail before build or push.
 - Default publication uses CUDA STT; explicit `VARIANT=cpu` uses CPU STT. Both selected and default publication paths reuse `make image`; local auth is required and builds alone never publish.
-- Tag workflow syntax and permissions are validated; publishing depends on successful verification, default CPU builds and explicit CUDA builds.
+- Ordinary read-only verification and the tag workflow both build the CPU default and explicit CUDA variant; publication depends on successful verification/builds and is scoped to the packages-write job.
 - Image labels identify source revision and service role; registry inspection uses actual OCI manifest digest and verifies architecture/source labels.
 - Per-image JSON contains Git source revision, version, repository, OCI digest, platform/architecture and build workflow identity.
 - `releases/stt-cuda-baseline-001.yaml` remains byte-for-byte unchanged.
