@@ -21,6 +21,7 @@ from scripts.collect_stt_image_store_evidence import (
     SubprocessReader,
     _atomic_private_json,
     _parse_inspect_output,
+    _validate_image_record_reference,
     collect_evidence,
 )
 from scripts.stt_deployment_profile import validate_local_artifact_identity
@@ -259,7 +260,6 @@ class CollectorTests(unittest.TestCase):
             "3780e43b86717c877d82bb65c9944c8df7d497efd8446263dbd22b5092f1f406 "
             "(10673 bytes)\n"
         )
-
         self.assertEqual(
             _parse_inspect_output(output, reference),
             {
@@ -270,6 +270,55 @@ class CollectorTests(unittest.TestCase):
                 "size": 1772,
             },
         )
+
+    def test_image_record_reference_accepts_digest_qualified_and_docker_names(self):
+        valid = (
+            "moby-dangling@sha256:"
+            "7f710bf8fca9307d387a5d61ab84361756efa9c3e18a6d60e07b9c42b60eb45c",
+            "docker.io/library/python:3.13-slim",
+            "docker.io/speech-platform/stt-cuda:approved",
+            "registry.example:5000/team/stt@sha256:"
+            "7f710bf8fca9307d387a5d61ab84361756efa9c3e18a6d60e07b9c42b60eb45c",
+        )
+        for reference in valid:
+            with self.subTest(reference=reference):
+                _validate_image_record_reference(reference)
+
+        self.runner.references = [valid[0]]
+        self.runner.inspect_output[valid[0]] = {
+            "mediaType": OCI_MANIFEST,
+            "digest": self.fixture.manifest_digest,
+            "size": len(self.fixture.raw_manifest),
+        }
+        evidence = self._collect()
+        self.assertEqual(evidence["image_record_reference"], valid[0])
+
+    def test_image_record_reference_rejects_unsafe_or_malformed_values(self):
+        invalid = (
+            "moby-dangling@sha256:abc",
+            "moby-dangling@sha256:" + "A" * 64,
+            "moby-dangling@sha256:" + "g" * 64,
+            "moby-dangling@sha256:" + "a" * 64 + "@other",
+            "docker.io//library/python:latest",
+            "docker.io/library/../python:latest",
+            "docker.io/library/python:latest with-space",
+            "docker.io/library/python:latest\n--help",
+            "docker.io/library/python;touch /tmp/x",
+            "docker.io/library/python`id`",
+            "docker.io/library/python$(id)",
+            "docker.io/library/python\x00",
+        )
+        for reference in invalid:
+            with self.subTest(reference=reference):
+                with self.assertRaisesRegex(
+                    CollectionError, "image_record_reference_unsafe"
+                ):
+                    _validate_image_record_reference(reference)
+
+    def test_invalid_namespace_reference_is_not_skipped(self):
+        self.runner.references.append("invalid reference")
+        with self.assertRaisesRegex(CollectionError, "image_record_reference_unsafe"):
+            self._collect()
 
     def test_valid_evidence_matches_existing_typed_contract(self):
         evidence = self._collect()

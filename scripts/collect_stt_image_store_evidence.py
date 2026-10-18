@@ -471,9 +471,11 @@ def _validate_namespace(value: str):
 
 def _validate_image_record_reference(value: str):
     if not isinstance(value, str) or not re.fullmatch(
-        r"(?:sha256:[0-9a-f]{64}|[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
-        r"(?::[0-9]{1,5})?(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,127})*"
-        r"(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?)",
+        r"(?:sha256:[0-9a-f]{64}|"
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?::[0-9]{1,5})?"
+        r"(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,127})*"
+        r"(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?"
+        r"(?:@sha256:[0-9a-f]{64})?)",
         value,
     ):
         raise CollectionError("image_record_reference_unsafe")
