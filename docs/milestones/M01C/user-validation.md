@@ -6,7 +6,7 @@ Status: pending user review.
 
 1. Review the Make target, publisher, release workflow, image labels and metadata schema.
 2. Confirm the package names `voiceservice-stt-cpu` and `voiceservice-stt-cuda`, and the explicit `voiceservice-tts-health-only` identity.
-3. The earlier `v0.1.0` and `v0.1.1` tags remain unchanged. After the corrected implementation passes GitHub CI, review the proposed `v0.1.2` release request separately. No new tag or image will be created/pushed before explicit approval.
+3. The earlier `v0.1.0` and `v0.1.1` tags remain unchanged. The corrected implementation passed GitHub CI in run 39164164869. Review the proposed `v0.1.2` release request separately. No new tag or image will be created/pushed before explicit approval.
 4. Review the release workflow result and each emitted metadata JSON. Inspect each published image using its `repository@sha256:...` reference and confirm OCI revision/role labels and architecture.
 
 ## Expected result

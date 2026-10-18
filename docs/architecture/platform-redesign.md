@@ -209,7 +209,7 @@ Only `main` was pushed to GitHub, without force. The resulting remote tip is `3a
 
 ## M01C-M01G: CI/CD and deployment lifecycle
 
-M01C implementation is in progress; M01D–M01G remain **planned only**. The first `v0.1.1` publication attempt built images but failed during publisher lookup because `docker compose images -q` requires created containers. A Compose-config/direct-inspect fix passed local regression, build and verification checks and awaits GitHub CI; no GHCR release is established. This work does not advance M02/M03/M04 or permit automatic deployment. GHCR package access and model-source policy must be resolved before the dependent work reaches publication or installation.
+M01C implementation is in progress; M01D–M01G remain **planned only**. The first `v0.1.1` publication attempt built images but failed during publisher lookup because `docker compose images -q` requires created containers. A Compose-config/direct-inspect fix passed local regression, build and verification checks plus GitHub Actions run 39164164869 on commit `47f4aa6665fe17fca2c868bd86e17e41f82e4f34`; no GHCR release is established. Preserve `v0.1.0` and `v0.1.1`; propose `v0.1.2` only after this validation and only pending explicit release approval. This work does not advance M02/M03/M04 or permit automatic deployment. GHCR package access and model-source policy must be resolved before the dependent work reaches publication or installation.
 
 ### M01C — GHCR image publication
 

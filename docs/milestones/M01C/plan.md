@@ -1,6 +1,6 @@
 # M01C plan — GHCR image publication
 
-Status: implementation and artifact-action correction are committed; the `v0.1.1` workflow failed after image builds but before publication because image resolution depended on nonexistent Compose containers. The resolution/prevalidation correction is in progress. Preserve `v0.1.0` and `v0.1.1`; do not create another tag until local and GitHub validation passes. GHCR publication and milestone closeout remain pending.
+Status: implementation and artifact-action correction are committed; the `v0.1.1` workflow failed after image builds but before publication because image resolution depended on nonexistent Compose containers. The resolution/prevalidation correction is in progress. Preserve `v0.1.0` and `v0.1.1`; local and GitHub validation now pass; recommend `v0.1.2` for the next controlled release, subject to explicit approval. Do not create the tag in this recovery task. GHCR publication and milestone closeout remain pending.
 
 ## Scope
 
