@@ -1,6 +1,6 @@
 # M02 verification
 
-Status: M02-A/B/C.2b/C.3 and bounded M02-C.4/C.5/C.6A/C.6B-R1 evidence is PASS for accepted scopes. C.5A and C.5B are accepted for deterministic offline fault handling and operator-procedure scope. C.6B Phase A read-only preflight is complete with blockers. Production image build is NOT STARTED; C.6B-R2/R3 and C.6C are NOT STARTED. Overall M02 remains INCOMPLETE.
+Status: M02-A/B/C.2b/C.3 and bounded M02-C.4/C.5/C.6A/C.6B-R1/R2 evidence is PASS for accepted scopes. C.5A and C.5B are accepted for deterministic offline fault handling and operator-procedure scope. C.6B Phase A read-only preflight is complete with blockers. Production image build and C.6B-R3/C.6C are NOT STARTED. Overall M02 remains INCOMPLETE.
 
 ## M02-A audit remediation verification
 
@@ -277,6 +277,20 @@ OBSERVED verification commands:
 User acceptance on 2026-10-18 applies to R1's bounded specification/offline scope only. The future build procedure requires a clean checkout at the expected commit, verifies no staged/unstaged/untracked files, and streams a Git archive of that exact commit as the build context; a SHA build argument alone is not treated as source provenance. Production image build remains NOT STARTED. C.6B-R2/R3, C.6C and overall M02 remain incomplete.
 
 No Docker build/pull/run, host access, CUDA operation, inference, dependency change, model operation, or deployment occurred. M02-C.6B-R1 is accepted only for its offline specification scope; C.6B runtime work and overall M02 remain incomplete.
+
+## M02-C.6B-R2 — model access policy and private configuration tooling
+
+OBSERVED offline checks:
+
+- `.venv/bin/python -m unittest scripts.test_stt_deployment_profile -v` — **34 tests passed** after final review corrections. Coverage includes group-reader ownership/modes and ACL rejection, release immutability/isolation and rollback selection, private config and output paths, deterministic content/path identity across all deployment inputs, and fail-closed resource/GPU/worker identity checks.
+- Focused Ruff checks and formatting for the changed Python files — PASS.
+- `make verify PYTHON=.venv/bin/python` — PASS. This included Go vet/race tests/build, Ruff lint/format checks, application configuration checks, base and CPU/CUDA Compose rendering/static checks, 140 repository script tests, 61 STT tests, AST parsing, and CUDA dependency-lock validation. Compose commands rendered configuration only; no container was created or started.
+- `make governance-check PYTHON=.venv/bin/python` — PASS. Seven skill structures/frontmatter/references validated and two governance tests passed.
+- `git diff --check` — PASS.
+
+INTERPRETATION: these tests establish static policy and configuration wiring only. They do not establish effective target DAC/ACL state or container access. The configuration-set digest detects changed input bytes but is not a signature or authenticity proof.
+
+NOT ESTABLISHED: target UID/GID ownership, model-reader group availability, parent traversal, ACL state, Docker supplementary-group/user namespace behavior, read-only mount access, production image identity, host resource review, or runtime rollback. No target/Docker/GPU operation occurred. C.6B-R2 is accepted only for the static/offline scope; this evidence does not pass C.6B or M02.
 
 ## M02-C.6B Phase A — read-only target preflight; BLOCKED before runtime validation
 

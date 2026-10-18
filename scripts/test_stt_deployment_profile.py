@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import os
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import yaml
 
 from scripts.stt_deployment_profile import (
     compose_environment,
+    configuration_set_sha256,
     load_and_validate,
+    require_private_config_paths,
     validate_rendered_compose,
     write_env_file,
 )
@@ -55,6 +59,8 @@ class DeploymentProfileTests(unittest.TestCase):
         manifest_path = self.release / "manifest.yaml"
         manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
         self.manifest_digest = canonical_manifest_digest(manifest)
+        self.release.rename(self.root / self.manifest_digest)
+        self.release = self.root / self.manifest_digest
 
         application = yaml.safe_load(
             Path("configs/stt-application-cpu.example.yaml").read_text()
@@ -129,6 +135,7 @@ class DeploymentProfileTests(unittest.TestCase):
             "artifact_access": {
                 "service_uid": 65532,
                 "service_gid": 65532,
+                "artifact_owner_uid": os.getuid(),
                 "supplementary_read_gid": self.group,
             },
             "resources": {
@@ -150,7 +157,7 @@ class DeploymentProfileTests(unittest.TestCase):
             },
         }
         for path in (self.release, self.release / "artifact"):
-            path.chmod(0o750)
+            path.chmod(0o2750)
         (self.release / "manifest.yaml").chmod(0o640)
         (self.release / "artifact" / "model.bin").chmod(0o640)
         self.profile_path = self.root / "profile.yaml"
@@ -294,6 +301,9 @@ class DeploymentProfileTests(unittest.TestCase):
                         "com.speech-platform.worker-config-sha256": hashlib.sha256(
                             self.worker_path.read_bytes()
                         ).hexdigest(),
+                        "com.speech-platform.configuration-set-sha256": validated[
+                            "configuration_set_sha256"
+                        ],
                     },
                 },
             },
@@ -317,16 +327,336 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertEqual(
             environment["STT_CUDA_IMAGE"], self.profile["runtime"]["image"]
         )
+        self.assertEqual(
+            environment["STT_CONFIGURATION_SET_SHA256"],
+            configuration_set_sha256(
+                self.profile_path,
+                self.application_path,
+                self.deployment_path,
+                self.worker_path,
+            ),
+        )
         private = self.root / "private"
         env_path = private / "stt-compose.env"
-        write_env_file(env_path, environment)
+        private.mkdir(mode=0o700)
+        private.chmod(0o700)
+        write_env_file(env_path, environment, repository_root=self.root)
         self.assertEqual(env_path.stat().st_mode & 0o777, 0o600)
         self.assertIn("STT_MODEL_MANIFEST_SHA256", env_path.read_text())
+
+    def test_model_release_requires_digest_root_and_group_reader_policy(self):
+        validated = self._validate()
+        self.assertEqual(validated["release_root"].name, self.manifest_digest)
+        for mode in (0o750, 0o2770, 0o2755, 0o3750):
+            with self.subTest(mode=oct(mode)):
+                self.release.chmod(mode)
+                with self.assertRaises(ValueError):
+                    self._validate()
+        self.release.chmod(0o2750)
+
+    def test_model_release_rejects_owner_mismatch(self):
+        self.profile["artifact_access"]["artifact_owner_uid"] = os.getuid() + 1
+        self._write_profile()
+        with self.assertRaisesRegex(ValueError, "ownership"):
+            self._validate()
+
+    def test_model_release_rejects_acl_when_present(self):
+        with mock.patch(
+            "scripts.stt_deployment_profile.os.getxattr", return_value=b"acl"
+        ):
+            with self.assertRaisesRegex(ValueError, "must not use POSIX ACLs"):
+                self._validate()
+
+    def test_permission_validation_does_not_mutate_release_or_expose_neighbor(self):
+        neighbor = self.root / "neighbor-release"
+        neighbor.mkdir(mode=0o700)
+        marker = neighbor / "private-marker"
+        marker.write_bytes(b"not part of the selected release")
+
+        def snapshot():
+            return {
+                path.relative_to(self.root): (
+                    path.stat().st_uid,
+                    path.stat().st_gid,
+                    path.stat().st_mode,
+                    hashlib.sha256(path.read_bytes()).hexdigest()
+                    if path.is_file()
+                    else None,
+                )
+                for path in self.release.rglob("*")
+            }
+
+        before = snapshot()
+        validated = self._validate()
+        self.assertEqual(before, snapshot())
+        rendered = self._compose(validated)
+        model_mounts = [
+            mount
+            for mount in rendered["services"]["stt"]["volumes"]
+            if mount["target"] == "/models"
+        ]
+        self.assertEqual(len(model_mounts), 1)
+        self.assertEqual(Path(model_mounts[0]["source"]), self.release)
+        self.assertEqual(marker.read_bytes(), b"not part of the selected release")
+
+    def test_previous_digest_named_release_can_be_selected_independently(self):
+        prior_root = self.root / "prior-release"
+        prior_artifact = prior_root / "artifact"
+        prior_artifact.mkdir(parents=True)
+        payload = b"prior immutable model bytes"
+        (prior_artifact / "model.bin").write_bytes(payload)
+        revision = "b" * 40
+        manifest = {
+            "manifest_version": 1,
+            "model": {
+                "family": "whisper",
+                "repository": "fixture/model",
+                "revision": revision,
+            },
+            "artifact": {
+                "format": "ctranslate2-whisper",
+                "tool": "fixture-converter",
+                "tool_version": "1.0",
+            },
+            "files": [
+                {
+                    "path": "model.bin",
+                    "size_bytes": len(payload),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                }
+            ],
+        }
+        prior_digest = canonical_manifest_digest(manifest)
+        prior_release = self.root / prior_digest
+        prior_root.rename(prior_release)
+        (prior_release / "manifest.yaml").write_text(
+            yaml.safe_dump(manifest, sort_keys=False)
+        )
+        for path in (prior_release, prior_release / "artifact"):
+            path.chmod(0o2750)
+        (prior_release / "manifest.yaml").chmod(0o640)
+        (prior_release / "artifact" / "model.bin").chmod(0o640)
+
+        prior_app = yaml.safe_load(self.application_path.read_text())
+        prior_app["models"][0]["immutable_revision"] = revision
+        prior_app["models"][0]["artifacts"]["faster-whisper"]["manifest_sha256"] = (
+            prior_digest
+        )
+        prior_app_path = self.root / "prior-application.yaml"
+        self._write_yaml(prior_app_path, prior_app)
+        prior_profile = copy.deepcopy(self.profile)
+        prior_profile["model"].update(
+            {
+                "revision": revision,
+                "manifest_sha256": prior_digest,
+                "host_release_root": str(prior_release),
+            }
+        )
+        prior_profile_path = self.root / "prior-profile.yaml"
+        self._write_yaml(prior_profile_path, prior_profile)
+
+        selected = load_and_validate(
+            prior_profile_path,
+            prior_app_path,
+            self.deployment_path,
+            self.worker_path,
+        )
+        self.assertEqual(selected["release_root"], prior_release)
+        self.assertEqual(selected["model"]["manifest_sha256"], prior_digest)
+        self.assertEqual(self._validate()["release_root"], self.release)
+
+    def test_private_configuration_inputs_reject_examples_and_external_paths(self):
+        private = self.root / "private"
+        private.mkdir(mode=0o700)
+        config = private / "deployment.yaml"
+        config.write_text("schema_version: 1\n")
+        config.chmod(0o600)
+        require_private_config_paths([config], repository_root=self.root)
+        example = private / "deployment.example.yaml"
+        example.write_text("schema_version: 1\n")
+        example.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, "explicit private file"):
+            require_private_config_paths([example], repository_root=self.root)
+        with self.assertRaisesRegex(ValueError, "under private"):
+            require_private_config_paths([self.profile_path], repository_root=self.root)
+        config.chmod(0o640)
+        with self.assertRaisesRegex(ValueError, "permissions are too broad"):
+            require_private_config_paths([config], repository_root=self.root)
+
+    def test_private_configuration_rejects_broad_directory_and_symlink(self):
+        private = self.root / "private"
+        private.mkdir(mode=0o700)
+        nested = private / "deployment"
+        nested.mkdir(mode=0o700)
+        config = nested / "profile.yaml"
+        config.write_text("schema_version: 1\n")
+        config.chmod(0o600)
+        nested.chmod(0o755)
+        with self.assertRaisesRegex(ValueError, "directory permissions are too broad"):
+            require_private_config_paths([config], repository_root=self.root)
+        nested.chmod(0o700)
+        link = private / "profile-link.yaml"
+        link.symlink_to(config)
+        with self.assertRaisesRegex(ValueError, "must not be symlinks"):
+            require_private_config_paths([link], repository_root=self.root)
+
+    def test_private_configuration_rejects_acl_on_input_or_parent(self):
+        private = self.root / "private"
+        private.mkdir(mode=0o700)
+        config = private / "deployment.yaml"
+        config.write_text("schema_version: 1\\n")
+        config.chmod(0o600)
+
+        def acl_on_file(path, attribute, *, follow_symlinks):
+            if Path(path) == config:
+                return b"acl"
+            raise OSError(errno.ENODATA, "no ACL")
+
+        with mock.patch(
+            "scripts.stt_deployment_profile.os.getxattr", side_effect=acl_on_file
+        ):
+            with self.assertRaisesRegex(ValueError, "must not use POSIX ACLs"):
+                require_private_config_paths([config], repository_root=self.root)
+
+        with mock.patch(
+            "scripts.stt_deployment_profile.os.getxattr", return_value=b"acl"
+        ):
+            with self.assertRaisesRegex(ValueError, "must not use POSIX ACLs"):
+                require_private_config_paths([config], repository_root=self.root)
+
+    def test_configuration_set_identity_changes_when_any_input_changes(self):
+        before = configuration_set_sha256(
+            self.profile_path,
+            self.application_path,
+            self.deployment_path,
+            self.worker_path,
+        )
+        self.application_path.write_text(self.application_path.read_text() + "\n")
+        after = configuration_set_sha256(
+            self.profile_path,
+            self.application_path,
+            self.deployment_path,
+            self.worker_path,
+        )
+        self.assertNotEqual(before, after)
+
+    def test_configuration_set_digest_is_deterministic_and_covers_every_input(self):
+        source_paths = {
+            "profile": self.profile_path,
+            "application": self.application_path,
+            "deployment": self.deployment_path,
+            "worker": self.worker_path,
+            "compose_base": Path("deployments/compose/compose.yaml").resolve(),
+            "compose_cuda": Path("deployments/compose/compose.stt-cuda.yaml").resolve(),
+        }
+        copies = {}
+        for role, source in source_paths.items():
+            copy_path = self.root / f"{role}.yaml"
+            copy_path.write_bytes(source.read_bytes())
+            copies[role] = copy_path
+
+        def digest():
+            return configuration_set_sha256(
+                copies["profile"],
+                copies["application"],
+                copies["deployment"],
+                copies["worker"],
+                compose_base_path=copies["compose_base"],
+                compose_cuda_path=copies["compose_cuda"],
+            )
+
+        initial = digest()
+        self.assertEqual(initial, digest())
+        for role, path in copies.items():
+            with self.subTest(role=role):
+                original = path.read_bytes()
+                path.write_bytes(original + b"\\n# reviewed content change\\n")
+                self.assertNotEqual(initial, digest())
+                path.write_bytes(original)
+
+    def test_configuration_set_identity_includes_file_paths_and_compose_inputs(self):
+        app_copy = self.root / "application-copy.yaml"
+        app_copy.write_bytes(self.application_path.read_bytes())
+        relocated = configuration_set_sha256(
+            self.profile_path,
+            app_copy,
+            self.deployment_path,
+            self.worker_path,
+        )
+        original = configuration_set_sha256(
+            self.profile_path,
+            self.application_path,
+            self.deployment_path,
+            self.worker_path,
+        )
+        self.assertNotEqual(original, relocated)
+
+        compose_copy = self.root / "compose-copy.yaml"
+        compose_copy.write_bytes(Path("deployments/compose/compose.yaml").read_bytes())
+        copied_identity = configuration_set_sha256(
+            self.profile_path,
+            self.application_path,
+            self.deployment_path,
+            self.worker_path,
+            compose_base_path=compose_copy,
+        )
+        self.assertNotEqual(original, copied_identity)
+        compose_copy.write_text(compose_copy.read_text() + "\n# reviewed change\n")
+        changed_compose_identity = configuration_set_sha256(
+            self.profile_path,
+            self.application_path,
+            self.deployment_path,
+            self.worker_path,
+            compose_base_path=compose_copy,
+        )
+        self.assertNotEqual(copied_identity, changed_compose_identity)
+
+    def test_generated_env_rejects_output_outside_private_and_symlinks(self):
+        private = self.root / "private"
+        private.mkdir(mode=0o700)
+        private.chmod(0o700)
+        with self.assertRaisesRegex(ValueError, "under private"):
+            write_env_file(
+                self.root / "outside.env", {"A": "b"}, repository_root=self.root
+            )
+        target = private / "target.env"
+        target.write_text("existing\n")
+        link = private / "linked.env"
+        link.symlink_to(target)
+        with self.assertRaisesRegex(ValueError, "must not be a symlink"):
+            write_env_file(link, {"A": "b"}, repository_root=self.root)
+
+    def test_generated_env_rejects_broad_or_symlinked_parent(self):
+        private = self.root / "private"
+        private.mkdir(mode=0o700)
+        private.chmod(0o700)
+        broad = private / "broad"
+        broad.mkdir(mode=0o755)
+        with self.assertRaisesRegex(ValueError, "permissions are too broad"):
+            write_env_file(broad / "compose.env", {"A": "b"}, repository_root=self.root)
+        broad.chmod(0o700)
+        alias = private / "alias"
+        alias.symlink_to(broad, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "must not be symlinks"):
+            write_env_file(alias / "compose.env", {"A": "b"}, repository_root=self.root)
+
+    def test_generated_env_rejects_acl_on_private_output_parent(self):
+        private = self.root / "private"
+        private.mkdir(mode=0o700)
+        with mock.patch(
+            "scripts.stt_deployment_profile.os.getxattr", return_value=b"acl"
+        ):
+            with self.assertRaisesRegex(ValueError, "must not use POSIX ACLs"):
+                write_env_file(
+                    private / "compose.env", {"A": "b"}, repository_root=self.root
+                )
 
     def test_rendered_compose_matches_profile_and_rejects_unsafe_overrides(self):
         validated = self._validate()
         rendered = self._compose(validated)
         validate_rendered_compose(rendered, validated)
+        for label_value in rendered["services"]["stt"]["labels"].values():
+            self.assertNotIn("/private/", label_value)
         mutations = (
             (
                 "gpu",
@@ -380,6 +710,18 @@ class DeploymentProfileTests(unittest.TestCase):
                 "configuration identity",
                 lambda value: value["services"]["stt"]["labels"].update(
                     {"com.speech-platform.worker-config-sha256": "0" * 64}
+                ),
+            ),
+            (
+                "artifact group identity",
+                lambda value: value["services"]["stt"].update(
+                    group_add=["not-the-reader-gid"]
+                ),
+            ),
+            (
+                "configuration set identity",
+                lambda value: value["services"]["stt"]["labels"].update(
+                    {"com.speech-platform.configuration-set-sha256": "0" * 64}
                 ),
             ),
         )
@@ -497,6 +839,13 @@ class DeploymentProfileTests(unittest.TestCase):
         cases = (
             ("host GPU", "device", "host_physical_index", 1, "physical GPU 0"),
             (
+                "container GPU index",
+                "device",
+                "container_cuda_index",
+                1,
+                "single-device CUDA container index",
+            ),
+            (
                 "resource review",
                 "resources",
                 "limits_reviewed",
@@ -521,6 +870,63 @@ class DeploymentProfileTests(unittest.TestCase):
                     self._validate(verify_files=False)
                 self.profile[section][key] = original
 
+    def test_worker_and_model_reader_identity_fail_closed(self):
+        cases = (
+            ("service_uid", 65531, "non-root image user"),
+            ("service_gid", 65531, "non-root image user"),
+            ("supplementary_read_gid", 65532, "explicit non-root group"),
+            ("artifact_owner_uid", 65532, "distinct from worker"),
+        )
+        for key, value, error in cases:
+            with self.subTest(key=key):
+                original = self.profile["artifact_access"][key]
+                self.profile["artifact_access"][key] = value
+                self._write_profile()
+                with self.assertRaisesRegex(ValueError, error):
+                    self._validate(verify_files=False)
+                self.profile["artifact_access"][key] = original
+
+    def test_worker_cuda_selection_must_match_deployment_config(self):
+        deployment = yaml.safe_load(self.deployment_path.read_text())
+        deployment["device_access"]["cuda_device_index"] = 1
+        self._write_yaml(self.deployment_path, deployment)
+        with self.assertRaisesRegex(ValueError, "worker CUDA index"):
+            self._validate(verify_files=False)
+
+    def test_resource_bounds_and_missing_model_identity_fail_closed(self):
+        cases = (
+            ("cpu_limit", 0, "outside the supported range"),
+            ("memory_limit_bytes", 512 * 1024**2, "1..64 GiB"),
+            ("pids_limit", 15, "16..4096"),
+        )
+        for key, value, error in cases:
+            with self.subTest(resource=key):
+                original = self.profile["resources"][key]
+                self.profile["resources"][key] = value
+                self._write_profile()
+                with self.assertRaisesRegex(ValueError, error):
+                    self._validate(verify_files=False)
+                self.profile["resources"][key] = original
+                self._write_profile()
+
+        manifest_identity = self.profile["model"]["manifest_sha256"]
+        self.profile["model"]["manifest_sha256"] = None
+        self._write_profile()
+        with self.assertRaisesRegex(ValueError, "SHA-256 digest"):
+            self._validate(verify_files=False)
+        self.profile["model"]["manifest_sha256"] = manifest_identity
+        self._write_profile()
+
+    def test_review_attestation_must_be_explicit_boolean_true(self):
+        for value in (False, "true", 1, None):
+            with self.subTest(value=value):
+                self.profile["resources"]["limits_reviewed"] = value
+                self._write_profile()
+                with self.assertRaisesRegex(ValueError, "require operator review"):
+                    self._validate(verify_files=False)
+        self.profile["resources"]["limits_reviewed"] = True
+        self._write_profile()
+
     def test_artifact_permissions_and_integrity_fail_closed(self):
         model = self.release / "artifact" / "model.bin"
         model.chmod(0o644)
@@ -530,6 +936,25 @@ class DeploymentProfileTests(unittest.TestCase):
         model.write_bytes(b"modified")
         with self.assertRaises(SpeechFailure):
             self._validate()
+
+    def test_manifest_permissions_symlinks_and_special_files_fail_closed(self):
+        manifest = self.release / "manifest.yaml"
+        manifest.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, "insufficient or too broad"):
+            self._validate()
+        manifest.chmod(0o640)
+
+        unexpected = self.release / "unexpected-link"
+        unexpected.symlink_to(self.release / "manifest.yaml")
+        with self.assertRaisesRegex(ValueError, "ownership or symlink"):
+            self._validate()
+        unexpected.unlink()
+
+        fifo = self.release / "unexpected-fifo"
+        os.mkfifo(fifo, 0o640)
+        with self.assertRaisesRegex(ValueError, "non-regular file"):
+            self._validate()
+        fifo.unlink()
 
     def test_missing_artifact_release_is_not_accepted(self):
         self.profile["model"]["host_release_root"] = str(self.root / "absent")

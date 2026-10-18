@@ -1,6 +1,6 @@
 # M02 implementation
 
-Status: M02-A, M02-B, M02-C.2b, M02-C.3, M02-C.4, M02-C.5, C.6A and C.6B-R1 are PASS for their accepted bounded scopes. C.5 covers deterministic offline failure behavior and the operator recovery procedure; it does not establish real CUDA cleanup, GPU OOM recovery or active GPU workload coexistence. C.6B Phase A read-only preflight completed with blockers. Production image build is NOT STARTED; C.6B-R2/R3 and C.6C are NOT STARTED. Overall M02 remains INCOMPLETE.
+Status: M02-A, M02-B, M02-C.2b, M02-C.3, M02-C.4, M02-C.5, C.6A, C.6B-R1 and C.6B-R2 are PASS for their accepted bounded scopes. C.5 covers deterministic offline failure behavior and the operator recovery procedure; it does not establish real CUDA cleanup, GPU OOM recovery or active GPU workload coexistence. C.6B Phase A read-only preflight completed with blockers. Production image build and C.6B-R3/C.6C are NOT STARTED. Overall M02 remains INCOMPLETE.
 
 ## M02-A implementation record
 
@@ -246,9 +246,23 @@ NOT ESTABLISHED:
 
 The user accepted C.6B-R1 on 2026-10-18 as PASS for production image specification and offline verification only. This acceptance does not authorize or establish a production image build. The documented future build procedure now requires a clean checkout, an expected full commit SHA, an empty `git status --porcelain --untracked-files=all`, and a `git archive` context from that exact commit; the source-revision build argument alone is explicitly not provenance evidence. C.6B-R2/R3 and C.6C remain NOT STARTED; overall M02 remains INCOMPLETE.
 
+## M02-C.6B-R2 model access and private configuration — PASS for accepted offline scope
+
+OBSERVED:
+
+- Extended `scripts/stt_deployment_profile.py` within the existing validator. The model release path must now be named by the canonical manifest SHA-256 and its root, nested directories, manifest and artifact files must have the explicitly configured artifact-owner UID and dedicated reader GID. Directories require setgid plus owner read/write/execute and group read/execute; regular files require owner read/write and group read. Group write and all world permissions are rejected. Symlinks and POSIX ACLs are rejected. Every parent directory is checked for worker traversal and non-writability; the root-owned sticky temporary-directory pattern is handled explicitly. Checks do not modify permissions.
+- Worker UID/GID remains `65532:65532`; the configured numeric dedicated model-reader GID is passed through the existing Compose `group_add`. The validator requires the artifact owner UID and reader GID as deployment inputs. No group-name lookup or assumption about container group inheritance is made. The model bind mount remains read-only, and artifact identity is still checked with the production verifier.
+- Private configuration inputs for `prepare` and `check-rendered` must be explicit files under repository `private/`, not symlinks or `.example.yaml` templates, and must have no group/world permission bits. The private directory must also be restrictive. The command does not silently use templates. Generated Compose env output remains atomic and mode 0600.
+- Added a canonical configuration-set digest over role, resolved source identity and content digest for profile, application, deployment, worker and both Compose files. The generated env file is excluded to avoid a cycle. Only the digest is emitted in the private Compose environment and service label; rendered Compose validation checks it alongside existing per-file identities.
+- Updated the CUDA profile template and deployment runbook with the group-reader policy, private config workflow, operator resource review, versioned digest-root rollback requirements, and explicit target-runtime limitations. No target permission, ACL, private deployment configuration, or service was changed.
+
+INTERPRETATION: the offline validator establishes that a supplied release/config set conforms to the declared POSIX group and privacy policy under the validator's static view. It is fail-closed on ACLs and permissions it cannot inspect. The numeric supplementary GID is the intended container authorization path; it is not evidence that the target Docker runtime presents that effective group or that mount traversal succeeds.
+
+NOT ESTABLISHED: feasibility of the dedicated GID and owner UID on the target, current release ownership/modes/ACLs and parent traversal, effective container groups/user namespace mapping, read-only mount behavior, private target config values/resource approval, or actual rollback. No target access, Docker operation, image build, CUDA, model load or inference occurred. Production image build and C.6B-R3 remain NOT STARTED; C.6C remains NOT STARTED; overall M02 remains INCOMPLETE.
+
 NOT ESTABLISHED:
 
 - No immutable linux/amd64 base manifest digest has been established. No Docker build, pull or image inspection was performed. Production image ID, repository manifest digest, registry, build provenance/attestation and runtime dependency inventory are unresolved.
 - R1 does not resolve the target model directory's group access/traversal blocker, supply private target configuration/resource review, establish GPU UUID mapping, or prove Compose runtime health/readiness, limit enforcement, shutdown, persistent model loading or shared-service behavior.
 
-R1 is not a C.6B runtime phase and is not marked PASS. See [the deployment runbook](../../operations/stt-cuda-deployment.md) for the evidence required before a separately authorized build-validation phase.
+R1 is not a C.6B runtime phase; its separate static/offline acceptance is recorded above. See [the deployment runbook](../../operations/stt-cuda-deployment.md) for the evidence required before a separately authorized build-validation phase.

@@ -24,6 +24,7 @@ services:
       com.speech-platform.application-config-sha256: ${STT_APPLICATION_CONFIG_SHA256:?application config identity must be validated}
       com.speech-platform.deployment-config-sha256: ${STT_DEPLOYMENT_CONFIG_SHA256:?deployment config identity must be validated}
       com.speech-platform.worker-config-sha256: ${STT_WORKER_CONFIG_SHA256:?worker config identity must be validated}
+      com.speech-platform.configuration-set-sha256: ${STT_CONFIGURATION_SET_SHA256:?complete private configuration identity must be validated}
     environment:
       STT_LISTEN_PORT: ${STT_LISTEN_PORT:?set the validated worker listen port}
       STT_HEALTHCHECK_PROBE_TIMEOUT_SECONDS: ${STT_HEALTHCHECK_PROBE_TIMEOUT_SECONDS:?set the health probe timeout}

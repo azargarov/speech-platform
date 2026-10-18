@@ -29,6 +29,7 @@ device:
 artifact_access:
   service_uid: 65532
   service_gid: 65532
+  artifact_owner_uid: REPLACE_WITH_MODEL_STORE_OWNER_UID
   supplementary_read_gid: REPLACE_WITH_DEDICATED_ARTIFACT_GROUP_ID
 resources:
   cpu_limit: 4.0

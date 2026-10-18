@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import math
@@ -88,13 +89,54 @@ def _reject_placeholders(value):
         raise ValueError("deployment profile still contains replacement values")
 
 
-def _group_access(path: Path, expected_gid: int, *, directory: bool):
+def _assert_no_acl(path: Path, *, directory: bool):
+    if not hasattr(os, "getxattr"):
+        raise ValueError("POSIX ACL inspection is unavailable")
+    attributes = ["system.posix_acl_access"]
+    if directory:
+        attributes.append("system.posix_acl_default")
+    for attribute in attributes:
+        try:
+            os.getxattr(path, attribute, follow_symlinks=False)
+        except OSError as exc:
+            if exc.errno in {errno.ENODATA, errno.ENOTSUP, errno.EOPNOTSUPP}:
+                continue
+            raise ValueError("ACL policy cannot be verified") from exc
+        else:
+            raise ValueError("path must not use POSIX ACLs")
+
+
+def _mode_for_identity(info, service_uid: int, service_gids: set[int]):
+    mode = stat.S_IMODE(info.st_mode)
+    if info.st_uid == service_uid:
+        return (mode >> 6) & 0o7
+    if info.st_gid in service_gids:
+        return (mode >> 3) & 0o7
+    return mode & 0o7
+
+
+def _group_access(path: Path, expected_gid: int, expected_uid: int, *, directory: bool):
     info = path.lstat()
-    if stat.S_ISLNK(info.st_mode) or info.st_gid != expected_gid:
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or info.st_gid != expected_gid
+        or info.st_uid != expected_uid
+    ):
         raise ValueError("model release ownership or symlink policy is invalid")
+    _assert_no_acl(path, directory=directory)
     mode = stat.S_IMODE(info.st_mode)
     group_required = 0o050 if directory else 0o040
-    if (mode & group_required) != group_required or mode & 0o007:
+    owner_required = 0o700 if directory else 0o600
+    if (
+        (mode & owner_required) != owner_required
+        or (mode & group_required) != group_required
+        or mode & 0o027
+        or mode & 0o007
+        or (directory and not mode & stat.S_ISGID)
+        or mode & stat.S_ISUID
+        or (not directory and mode & (stat.S_ISGID | stat.S_ISVTX))
+        or (directory and mode & stat.S_ISVTX)
+    ):
         raise ValueError("model release group access is insufficient or too broad")
     if directory and not stat.S_ISDIR(info.st_mode):
         raise ValueError("model release contains a non-directory path")
@@ -102,30 +144,55 @@ def _group_access(path: Path, expected_gid: int, *, directory: bool):
         raise ValueError("model release contains a non-regular file")
 
 
-def validate_model_permissions(release_root, expected_gid: int):
+def validate_model_permissions(
+    release_root,
+    manifest_file,
+    expected_gid: int,
+    expected_owner_uid: int,
+    service_uid: int = 65532,
+    service_gid: int = 65532,
+):
     root = Path(release_root)
-    if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+    try:
+        normalized_root = root.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(
+            "model release root must be an existing absolute directory"
+        ) from exc
+    if (
+        not root.is_absolute()
+        or root != normalized_root
+        or root.is_symlink()
+        or not root.is_dir()
+    ):
         raise ValueError("model release root must be an existing absolute directory")
-    _group_access(root, expected_gid, directory=True)
+    _group_access(root, expected_gid, expected_owner_uid, directory=True)
 
     # The container must be able to traverse each host-side parent to reach
     # the read-only bind mount. Evaluate DAC permissions for the configured
     # service identity and supplementary artifact group without impersonation.
-    service_uid = 65532
-    service_gids = {65532, expected_gid}
+    service_gids = {service_gid, expected_gid}
     for parent in root.parents:
         info = parent.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             raise ValueError("model release parent path contains an unsafe entry")
+        _assert_no_acl(parent, directory=True)
+        permissions = _mode_for_identity(info, service_uid, service_gids)
         mode = stat.S_IMODE(info.st_mode)
-        if info.st_uid == service_uid:
-            executable = bool(mode & stat.S_IXUSR)
-        elif info.st_gid in service_gids:
-            executable = bool(mode & stat.S_IXGRP)
-        else:
-            executable = bool(mode & stat.S_IXOTH)
-        if not executable:
+        sticky_tmp = (
+            info.st_uid == 0 and bool(mode & stat.S_ISVTX) and bool(mode & 0o002)
+        )
+        if (
+            not permissions & 0o1
+            or (permissions & 0o2 and not sticky_tmp)
+            or (mode & 0o002 and not sticky_tmp)
+        ):
             raise ValueError("model release parent is not traversable by worker")
+
+    manifest = Path(manifest_file)
+    if manifest.parent != root or not manifest.is_file():
+        raise ValueError("model manifest must be a regular file in the release root")
+    _group_access(manifest, expected_gid, expected_owner_uid, directory=False)
 
     def fail_walk(error):
         raise ValueError("model release tree cannot be completely inspected") from error
@@ -135,9 +202,92 @@ def validate_model_permissions(release_root, expected_gid: int):
     ):
         current_path = Path(current)
         for name in directories:
-            _group_access(current_path / name, expected_gid, directory=True)
+            _group_access(
+                current_path / name,
+                expected_gid,
+                expected_owner_uid,
+                directory=True,
+            )
         for name in files:
-            _group_access(current_path / name, expected_gid, directory=False)
+            _group_access(
+                current_path / name,
+                expected_gid,
+                expected_owner_uid,
+                directory=False,
+            )
+
+
+def configuration_set_sha256(
+    profile_path,
+    application_path,
+    deployment_path,
+    worker_path,
+    compose_base_path="deployments/compose/compose.yaml",
+    compose_cuda_path="deployments/compose/compose.stt-cuda.yaml",
+):
+    inputs = {
+        "application": application_path,
+        "compose_base": compose_base_path,
+        "compose_cuda": compose_cuda_path,
+        "deployment": deployment_path,
+        "profile": profile_path,
+        "worker": worker_path,
+    }
+    identities = {
+        role: {"path": str(Path(path).resolve()), "sha256": _sha256(path)}
+        for role, path in inputs.items()
+    }
+    canonical = json.dumps(identities, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def require_private_config_paths(paths, repository_root="."):
+    root = Path(repository_root).resolve()
+    private_root = root / "private"
+    if private_root.is_symlink() or not private_root.is_dir():
+        raise ValueError("private configuration directory is unavailable")
+    _assert_no_acl(private_root, directory=True)
+    if private_root.stat().st_mode & 0o077:
+        raise ValueError("private configuration directory permissions are too broad")
+    resolved_private = private_root.resolve()
+    for value in paths:
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(resolved_private)
+        except ValueError as exc:
+            raise ValueError("deployment configuration must be under private/") from exc
+        if candidate.name.endswith(".example.yaml") or not resolved.is_file():
+            raise ValueError(
+                "deployment configuration must be an explicit private file"
+            )
+        if candidate.is_symlink():
+            raise ValueError("private configuration inputs must not be symlinks")
+        _assert_no_acl(resolved, directory=False)
+        if resolved.stat().st_mode & 0o077:
+            raise ValueError("private configuration file permissions are too broad")
+        parent = candidate.parent
+        while parent.resolve() != resolved_private:
+            if (
+                parent.is_symlink()
+                or not parent.is_dir()
+                or parent.stat().st_mode & 0o077
+            ):
+                raise ValueError(
+                    "private configuration directory permissions are too broad"
+                )
+            _assert_no_acl(parent, directory=True)
+            try:
+                parent.resolve().relative_to(resolved_private)
+            except ValueError as exc:
+                raise ValueError(
+                    "deployment configuration must be under private/"
+                ) from exc
+            if parent == parent.parent:
+                raise ValueError("deployment configuration must be under private/")
+            parent = parent.parent
 
 
 def _container_model_path(value, label):
@@ -313,10 +463,16 @@ def load_and_validate(
         r"[A-Za-z0-9][A-Za-z0-9._-]*", model["alias"]
     ):
         raise ValueError("model alias is invalid")
-    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", model["revision"]):
+    if not isinstance(model["revision"], str) or not re.fullmatch(
+        r"(?:[0-9a-f]{40}|[0-9a-f]{64})", model["revision"]
+    ):
         raise ValueError("model revision must be immutable")
-    if not re.fullmatch(r"[0-9a-f]{64}", model["manifest_sha256"]):
+    if not isinstance(model["manifest_sha256"], str) or not re.fullmatch(
+        r"[0-9a-f]{64}", model["manifest_sha256"]
+    ):
         raise ValueError("model manifest identity must be a SHA-256 digest")
+    if not isinstance(model["host_release_root"], str):
+        raise ValueError("model release root must be an explicit host path")
     host_release_root = Path(model["host_release_root"])
     artifact_directory = _container_model_path(
         model["container_artifact_directory"], "artifact directory"
@@ -341,20 +497,36 @@ def load_and_validate(
         or device["container_cuda_index"] != 0
     ):
         raise ValueError("single-device CUDA container index must be 0")
-    if not re.fullmatch(r"GPU-[0-9a-fA-F-]{16,}", device["expected_host_uuid"]):
+    if not isinstance(device["expected_host_uuid"], str) or not re.fullmatch(
+        r"GPU-[0-9a-fA-F-]{16,}", device["expected_host_uuid"]
+    ):
         raise ValueError("expected host GPU UUID must be verified before deployment")
 
     access = profile["artifact_access"]
     _fields(
         access,
-        {"service_uid", "service_gid", "supplementary_read_gid"},
+        {
+            "service_uid",
+            "service_gid",
+            "supplementary_read_gid",
+            "artifact_owner_uid",
+        },
         "artifact_access",
     )
     if access["service_uid"] != 65532 or access["service_gid"] != 65532:
         raise ValueError("CUDA worker identity must match the non-root image user")
     read_gid = access["supplementary_read_gid"]
-    if type(read_gid) is not int or not 1 <= read_gid <= 65535 or read_gid == 65532:
+    if type(read_gid) is not int or not 1 <= read_gid < 2**32 - 1 or read_gid == 65532:
         raise ValueError("artifact read group must be an explicit non-root group")
+    owner_uid = access["artifact_owner_uid"]
+    if (
+        type(owner_uid) is not int
+        or not 0 <= owner_uid < 2**32 - 1
+        or owner_uid == 65532
+    ):
+        raise ValueError("artifact owner UID must be explicit and distinct from worker")
+    if host_release_root.name != model["manifest_sha256"]:
+        raise ValueError("model release directory must be named by its manifest digest")
 
     app = load_application_config(application_config_path)
     deployment = load_deployment_config(deployment_config_path)
@@ -481,7 +653,14 @@ def load_and_validate(
         )
 
     if verify_files:
-        validate_model_permissions(host_release_root, read_gid)
+        validate_model_permissions(
+            host_release_root,
+            host_release_root / manifest_path.relative_to("/models"),
+            read_gid,
+            owner_uid,
+            access["service_uid"],
+            access["service_gid"],
+        )
         host_artifact = ArtifactRoot(
             host_release_root / artifact_directory.relative_to("/models"),
             host_release_root / manifest_path.relative_to("/models"),
@@ -501,6 +680,12 @@ def load_and_validate(
         "model": model,
         "device": device,
         "artifact_access": access,
+        "configuration_set_sha256": configuration_set_sha256(
+            profile_path,
+            application_config_path,
+            deployment_config_path,
+            worker_config_path,
+        ),
         "resources": resources,
         "lifecycle": lifecycle,
         "healthcheck": health,
@@ -550,17 +735,49 @@ def compose_environment(validated, application_path, deployment_path, worker_pat
         "STT_APPLICATION_CONFIG_SHA256": _sha256(validated["application_config_path"]),
         "STT_DEPLOYMENT_CONFIG_SHA256": _sha256(validated["deployment_config_path"]),
         "STT_WORKER_CONFIG_SHA256": _sha256(validated["worker_config_path"]),
+        "STT_CONFIGURATION_SET_SHA256": validated["configuration_set_sha256"],
     }
     return values
 
 
-def write_env_file(path, values):
-    path = Path(path)
-    if "private" not in path.resolve().parts:
-        raise ValueError("generated deployment environment must remain under private/")
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if path.parent.stat().st_mode & 0o077:
-        raise ValueError("generated deployment environment directory must be private")
+def write_env_file(path, values, repository_root="."):
+    root = Path(repository_root).resolve()
+    private_root = root / "private"
+    if private_root.is_symlink() or not private_root.is_dir():
+        raise ValueError("private deployment directory is unavailable")
+    _assert_no_acl(private_root, directory=True)
+    if private_root.stat().st_mode & 0o077:
+        raise ValueError("private deployment directory permissions are too broad")
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    candidate = Path(os.path.abspath(candidate))
+    try:
+        relative = candidate.relative_to(private_root)
+    except ValueError as exc:
+        raise ValueError(
+            "generated deployment environment must remain under private/"
+        ) from exc
+    if not relative.parts or candidate.name in {".", ".."}:
+        raise ValueError("generated deployment environment path is invalid")
+    current = private_root
+    for part in relative.parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError("private deployment directories must not be symlinks")
+        if current.exists():
+            if not current.is_dir() or current.stat().st_mode & 0o077:
+                raise ValueError(
+                    "private deployment directory permissions are too broad"
+                )
+            _assert_no_acl(current, directory=True)
+        else:
+            current.mkdir(mode=0o700)
+    path = candidate
+    if path.is_symlink():
+        raise ValueError("generated deployment environment must not be a symlink")
+    if path.exists() and not path.is_file():
+        raise ValueError("generated deployment environment must be a regular file")
     content_lines = []
     for key, value in sorted(values.items()):
         text = str(value)
@@ -731,6 +948,11 @@ def validate_rendered_compose(config, validated):
     ):
         raise ValueError("rendered deployment profile label does not match")
     if (
+        labels.get("com.speech-platform.configuration-set-sha256")
+        != validated["configuration_set_sha256"]
+    ):
+        raise ValueError("rendered configuration-set identity label does not match")
+    if (
         labels.get("com.speech-platform.model-manifest-sha256")
         != validated["model"]["manifest_sha256"]
     ):
@@ -778,6 +1000,14 @@ def _main():
             sub.add_argument("--output-env", required=True)
     args = parser.parse_args()
     try:
+        require_private_config_paths(
+            (
+                args.profile,
+                args.application_config,
+                args.deployment_config,
+                args.worker_config,
+            )
+        )
         validated = load_and_validate(
             args.profile,
             args.application_config,
