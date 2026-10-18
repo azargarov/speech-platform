@@ -1,6 +1,6 @@
 # M02 verification
 
-Status: M02-A/B/C.2b/C.3 and bounded M02-C.4/C.5/C.6A/C.6B-R1/R2 evidence is PASS for accepted scopes. C.5A and C.5B are accepted for deterministic offline fault handling and operator-procedure scope. C.6B Phase A read-only preflight is complete with blockers. Production image build and C.6B-R3/C.6C are NOT STARTED. Overall M02 remains INCOMPLETE.
+Status: M02-A/B/C.2b/C.3 and bounded M02-C.4/C.5/C.6A/C.6B-R1/R2/Local Image ID Mode evidence is PASS for accepted scopes. C.5A and C.5B are accepted for deterministic offline fault handling and operator-procedure scope. C.6B Phase A read-only preflight is complete with blockers. Image Build A2 completed on the workstation and the resulting production image was statically inspected but not run. Local image create-compatibility passed only on Engine 29.7.2-ce / Compose 5.6.0. Target image transfer and runtime startup/CUDA validation are NOT STARTED. C.6B-R3/C.6C are NOT STARTED. Overall M02 remains INCOMPLETE.
 
 ## M02-A audit remediation verification
 
@@ -323,3 +323,13 @@ Sanitized evidence is preserved on the target at `/home/master/speech-platform-s
 INTERPRETATION: C.5 is closed only for accepted offline fault handling and operator-procedure scope. C.6A evidence is static/offline only, not deployment validation.
 
 NOT ESTABLISHED: real CUDA fault cleanup, GPU OOM recovery, active GPU workload coexistence, persistent deployment, production resource envelope, rollback, or deployed GPU selection/readiness.
+
+## M02-C.6B Local Image ID Mode — offline implementation evidence (PASS for bounded scope)
+
+OBSERVED: the user accepted Local Image ID Mode on 2026-10-18 as PASS for offline implementation/validation only. `.venv/bin/python -m unittest scripts.test_stt_deployment_profile scripts.test_compose -v` — PASS, 53 tests. Coverage includes valid registry/local modes, strict discriminator and field cross-contamination, missing/invalid IDs, mutable references, missing or mismatched build provenance, complete configuration digest changes, exact Engine/Compose version policy, mocked read-only image inspection, exact created-container image/state checks, and retained GPU/filesystem/network/security invariants. Docker calls are mocked in these tests.
+
+OBSERVED: `make verify PYTHON=.venv/bin/python` — PASS. It included Go vet/race tests/build, Ruff checks, configuration validation, static Compose rendering/checks, 149 repository script tests, 61 STT tests, governance structural checks and CUDA lock checks. `make governance-check PYTHON=.venv/bin/python` — PASS; seven skill structures/references and two governance tests passed. `git diff --check` — PASS. Compose rendering is static only. No image operation, image transfer, container create/start, target host, CUDA or inference occurred.
+
+OBSERVED: the separate local-image compatibility experiment passed exact-ID Compose create-only behavior on Engine `29.7.2-ce` / Compose `5.6.0`; it did not start the container. The production A2 image was built and statically inspected, not run. The accepted trust boundaries are recorded: reviewed private profile authorizes image ID; evidence digest binds bytes but is not independent authenticity; labels are supporting consistency evidence; exact-container pre-start verification is an operator-enforced non-atomic gate.
+
+NOT ESTABLISHED: target image transfer/load; production worker startup, CUDA behavior, artifact access, readiness, resource enforcement, shutdown, rollback or shared-service coexistence. Target image transfer and runtime startup/CUDA validation, C.6B-R3, C.6C and overall M02 remain incomplete/not started as documented.

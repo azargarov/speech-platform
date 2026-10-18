@@ -1,6 +1,6 @@
 # M02 implementation
 
-Status: M02-A, M02-B, M02-C.2b, M02-C.3, M02-C.4, M02-C.5, C.6A, C.6B-R1 and C.6B-R2 are PASS for their accepted bounded scopes. C.5 covers deterministic offline failure behavior and the operator recovery procedure; it does not establish real CUDA cleanup, GPU OOM recovery or active GPU workload coexistence. C.6B Phase A read-only preflight completed with blockers. Production image build and C.6B-R3/C.6C are NOT STARTED. Overall M02 remains INCOMPLETE.
+Status: M02-A, M02-B, M02-C.2b, M02-C.3, M02-C.4, M02-C.5, C.6A, C.6B-R1, C.6B-R2 and Local Image ID Mode are PASS for their accepted bounded scopes. C.5 covers deterministic offline failure behavior and the operator recovery procedure; it does not establish real CUDA cleanup, GPU OOM recovery or active GPU workload coexistence. C.6B Phase A read-only preflight completed with blockers. Image Build A2 completed on the workstation; production image ID `sha256:3780e43b86717c877d82bb65c9944c8df7d497efd8446263dbd22b5092f1f406` was inspected, not run. Exact-ID Compose create compatibility passed only on Engine 29.7.2-ce / Compose 5.6.0. Target image transfer and runtime startup/CUDA validation are NOT STARTED. C.6B-R3/C.6C are NOT STARTED. Overall M02 remains INCOMPLETE.
 
 ## M02-A implementation record
 
@@ -240,11 +240,11 @@ INTERPRETATION:
 
 NOT ESTABLISHED:
 
-- No immutable platform-specific Python base digest, clean committed source revision for the build, built production image ID, registry manifest digest or build attestation exists. No image was built or run. The approved validation image remains unsuitable as the production worker.
+- At the R1 final-review checkpoint, no immutable platform-specific Python base digest, clean committed source revision for the build, built production image ID, registry manifest digest or build attestation existed. A2 later recorded the build inputs and local image ID; the image remains unrun. The approved validation image remains unsuitable as the production worker.
 - A future build still requires controlled retrieval of the digest-pinned base and hash-locked wheel artifacts, or a verified local cache; no build-network access or local wheelhouse provenance was inspected.
 - Production-image CUDA library loading and inference, GPU device mapping, effective model access, health/readiness, enforced resource limits, shutdown, target behavior and coexistence remain runtime gates. R1 is accepted only for its offline specification scope; C.6B runtime work and overall M02 remain incomplete.
 
-The user accepted C.6B-R1 on 2026-10-18 as PASS for production image specification and offline verification only. This acceptance does not authorize or establish a production image build. The documented future build procedure now requires a clean checkout, an expected full commit SHA, an empty `git status --porcelain --untracked-files=all`, and a `git archive` context from that exact commit; the source-revision build argument alone is explicitly not provenance evidence. C.6B-R2/R3 and C.6C remain NOT STARTED; overall M02 remains INCOMPLETE.
+Historical record: the user accepted C.6B-R1 on 2026-10-18 as PASS for production image specification and offline verification only. At that checkpoint, no build was authorized or established. A2 was separately authorized and completed later, as recorded below. The build procedure requires a clean checkout, expected full commit SHA, empty `git status --porcelain --untracked-files=all`, and a `git archive` context from that exact commit; the source-revision build argument alone is not provenance evidence. C.6B-R2/R3 and C.6C remain NOT STARTED; overall M02 remains INCOMPLETE.
 
 ## M02-C.6B-R2 model access and private configuration — PASS for accepted offline scope
 
@@ -260,9 +260,16 @@ INTERPRETATION: the offline validator establishes that a supplied release/config
 
 NOT ESTABLISHED: feasibility of the dedicated GID and owner UID on the target, current release ownership/modes/ACLs and parent traversal, effective container groups/user namespace mapping, read-only mount behavior, private target config values/resource approval, or actual rollback. No target access, Docker operation, image build, CUDA, model load or inference occurred. Production image build and C.6B-R3 remain NOT STARTED; C.6C remains NOT STARTED; overall M02 remains INCOMPLETE.
 
-NOT ESTABLISHED:
+## M02-C.6B Local Image ID Mode — PASS for offline scope
 
-- No immutable linux/amd64 base manifest digest has been established. No Docker build, pull or image inspection was performed. Production image ID, repository manifest digest, registry, build provenance/attestation and runtime dependency inventory are unresolved.
-- R1 does not resolve the target model directory's group access/traversal blocker, supply private target configuration/resource review, establish GPU UUID mapping, or prove Compose runtime health/readiness, limit enforcement, shutdown, persistent model loading or shared-service behavior.
+OBSERVED: the strict deployment profile now has an explicit `identity_mode` discriminator. Existing `registry_digest` mode retains its repository-qualified immutable reference and reference-to-local-ID verification. `local_image_id` mode instead requires one exact Docker `sha256:` image ID and a digest-bound private A2 build-evidence record; schema fields from the other mode are rejected. Both retain source commit, platform-specific base manifest digest, CUDA lock, platform, model revision/manifest, resource and GPU policy, and the canonical complete configuration-set digest.
 
-R1 is not a C.6B runtime phase; its separate static/offline acceptance is recorded above. See [the deployment runbook](../../operations/stt-cuda-deployment.md) for the evidence required before a separately authorized build-validation phase.
+OBSERVED: Compose selection uses the validated ID directly in local mode, requires `pull_policy: never`, and rejects build directives, tags and cross-mode label/reference inconsistencies. Existing GPU reservation, CUDA-only policy, non-root user, read-only mounts/root, private networks, resource limits and restart `no` checks remain in force. Local mode fails closed unless Docker Engine is exactly `29.7.2-ce` and Compose exactly `5.6.0`, the pair observed in the bounded create-only compatibility test.
+
+OBSERVED: new read-only `verify-image` and `verify-container` commands validate the configured private evidence and inspect exact IDs. Image verification checks installed image ID, linux/amd64, user 65532:65532, production Python module entrypoint and consistency of provenance labels with profile/build evidence. Container verification requires the full container ID, exact expected `.Image`, and a stopped `created` state before any separately authorized start. These commands do not pull, build, create, start or remove Docker resources. Labels provide consistency evidence, not independent proof of build provenance.
+
+OBSERVED: added ADR-0010, expanded the deployment example/runbook, and reconciled the M02 ledger. A2 is recorded as completed workstation build/inspection; the image was not run. The user accepted Local Image ID Mode on 2026-10-18 for offline scope only. The create-only compatibility result is limited to Engine 29.7.2-ce / Compose 5.6.0. Target image transfer, runtime startup/CUDA validation, C.6B-R3 and C.6C remain NOT STARTED; overall M02 remains INCOMPLETE.
+
+INTERPRETATION: the previous exact-ID Compose test supports only the documented Engine/Compose pair and create-only behavior. The local mode is intended for a private `docker save`/`docker load` workflow; archive SHA-256 protects transfer bytes, while post-load exact image-ID verification and retained private build evidence establish identity consistency. No transfer or target operation occurred here.
+
+NOT ESTABLISHED: current Docker daemon/image presence, target Engine/Compose versions, transfer integrity, target image identity, artifact permissions, GPU UUID mapping, CUDA worker startup, readiness, inference, limits, shutdown, rollback and Ollama/Dify coexistence. No Docker image operation or container create/start occurred for this implementation; canonical verification rendered Compose configuration only. No target access, CUDA, inference or deployment occurred.

@@ -16,6 +16,8 @@ services:
     group_add: ["${STT_ARTIFACT_GID:?set the model artifact read group}"]
     labels:
       com.speech-platform.image-role: stt-worker
+      com.speech-platform.image-identity-mode: ${STT_IMAGE_IDENTITY_MODE:?set the validated image identity mode}
+      com.speech-platform.image-id: ${STT_IMAGE_ID:?set the validated Docker image ID}
       com.speech-platform.source-revision: ${STT_SOURCE_REVISION:?set the verified production source revision}
       com.speech-platform.cuda-lock-sha256: ${STT_CUDA_LOCK_SHA256:?set the verified CUDA dependency-lock digest}
       com.speech-platform.deployment-profile-sha256: ${STT_DEPLOYMENT_PROFILE_SHA256:?profile must be validated}

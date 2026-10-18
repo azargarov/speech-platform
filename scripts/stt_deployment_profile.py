@@ -10,6 +10,7 @@ import math
 import os
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -37,6 +38,10 @@ PROFILE_FIELDS = {
     "lifecycle",
     "healthcheck",
 }
+
+# Local Docker image IDs in Compose were create-tested only on this exact pair.
+LOCAL_IMAGE_ID_ENGINE_VERSIONS = frozenset({"29.7.2-ce"})
+LOCAL_IMAGE_ID_COMPOSE_VERSIONS = frozenset({"5.6.0"})
 
 
 def _fields(value, expected, label):
@@ -68,6 +73,141 @@ def _digest_reference(value, label):
     ):
         raise ValueError(f"{label} must be an immutable sha256 image reference")
     return value
+
+
+def _image_id(value, label="runtime.image_id"):
+    if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+        raise ValueError(f"{label} must be an exact Docker sha256 image ID")
+    return value
+
+
+def validate_local_image_build_evidence(runtime, evidence, evidence_path):
+    """Bind the private build record to the local-image identity in the profile."""
+    if _sha256(evidence_path) != runtime["build_evidence_sha256"]:
+        raise ValueError("production image build evidence digest does not match")
+    if not isinstance(evidence, dict) or evidence.get("status") != (
+        "BUILD_SUCCEEDED_IMAGE_NOT_RUN"
+    ):
+        raise ValueError("production image build evidence is incomplete")
+    image = evidence.get("image")
+    base = evidence.get("base")
+    labels = image.get("labels") if isinstance(image, dict) else None
+    if not isinstance(labels, dict) or not isinstance(base, dict):
+        raise ValueError("production image build evidence is incomplete")
+    base_digest = runtime["base_image"].rsplit("@", 1)[-1]
+    expected = (
+        evidence.get("source_commit") == runtime["source_revision"],
+        evidence.get("dependency_lock_sha256") == runtime["cuda_lock_sha256"],
+        image.get("id") == runtime["image_id"],
+        image.get("platform") == runtime["platform"],
+        base.get("platform") == runtime["base_image_platform"],
+        base.get("platform_manifest_digest") == base_digest,
+        labels.get("org.opencontainers.image.revision") == runtime["source_revision"],
+        labels.get("com.speech-platform.source-revision") == runtime["source_revision"],
+        labels.get("com.speech-platform.image-role") == "stt-worker",
+        labels.get("com.speech-platform.base-image") == runtime["base_image"],
+        labels.get("com.speech-platform.cuda-lock-sha256")
+        == runtime["cuda_lock_sha256"],
+    )
+    if not all(expected):
+        raise ValueError("production image build evidence conflicts with profile")
+
+
+def validate_local_image_inspection(runtime, inspection):
+    """Compare read-only Docker inspection output to validated build identity."""
+    if not isinstance(inspection, list) or len(inspection) != 1:
+        raise ValueError("Docker image inspection did not return exactly one image")
+    image = inspection[0]
+    config = image.get("Config") if isinstance(image, dict) else None
+    if not isinstance(config, dict):
+        raise ValueError("Docker image configuration is unavailable")
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    if not isinstance(labels, dict):
+        raise ValueError("Docker image provenance labels are unavailable")
+    expected = (
+        image.get("Id") == runtime["image_id"],
+        image.get("Os") == "linux",
+        image.get("Architecture") == "amd64",
+        config.get("User") == "65532:65532",
+        config.get("Entrypoint") == ["python", "-m"],
+        labels.get("org.opencontainers.image.revision") == runtime["source_revision"],
+        labels.get("com.speech-platform.source-revision") == runtime["source_revision"],
+        labels.get("com.speech-platform.image-role") == "stt-worker",
+        labels.get("com.speech-platform.base-image") == runtime["base_image"],
+        labels.get("com.speech-platform.cuda-lock-sha256")
+        == runtime["cuda_lock_sha256"],
+    )
+    if not all(expected):
+        raise ValueError("local Docker image identity or provenance mismatch")
+
+
+def validate_created_container_inspection(expected_image_id, inspection):
+    """Require the exact image ID on a stopped, newly created container."""
+    _image_id(expected_image_id, "expected image ID")
+    if not isinstance(inspection, list) or len(inspection) != 1:
+        raise ValueError("Docker container inspection did not return exactly one item")
+    container = inspection[0]
+    if not isinstance(container, dict):
+        raise ValueError("Docker container inspection is invalid")
+    state = container.get("State") if isinstance(container, dict) else None
+    if (
+        container.get("Image") != expected_image_id
+        or not isinstance(state, dict)
+        or state.get("Status") != "created"
+        or state.get("Running") is not False
+    ):
+        raise ValueError("created container image identity or state mismatch")
+
+
+def validate_local_image_runtime_versions(engine_version, compose_version):
+    if engine_version not in LOCAL_IMAGE_ID_ENGINE_VERSIONS:
+        raise ValueError("unsupported Docker Engine version for local image ID mode")
+    if compose_version not in LOCAL_IMAGE_ID_COMPOSE_VERSIONS:
+        raise ValueError("unsupported Docker Compose version for local image ID mode")
+
+
+def _docker_read(args):
+    try:
+        result = subprocess.run(
+            args, check=False, capture_output=True, text=True, timeout=15
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("read-only Docker inspection could not be started") from exc
+    if result.returncode != 0:
+        raise ValueError("read-only Docker inspection failed")
+    return result.stdout.strip()
+
+
+def verify_local_image_runtime_with_docker():
+    validate_local_image_runtime_versions(
+        _docker_read(["docker", "info", "--format", "{{.ServerVersion}}"]),
+        _docker_read(["docker", "compose", "version", "--short"]),
+    )
+
+
+def verify_local_image_with_docker(runtime):
+    verify_local_image_runtime_with_docker()
+    try:
+        inspection = json.loads(
+            _docker_read(["docker", "image", "inspect", runtime["image_id"]])
+        )
+    except json.JSONDecodeError as exc:
+        raise ValueError("Docker image inspection returned invalid data") from exc
+    validate_local_image_inspection(runtime, inspection)
+
+
+def verify_created_container_with_docker(container_id, expected_image_id):
+    if not isinstance(container_id, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", container_id
+    ):
+        raise ValueError("container ID must be a full hexadecimal Docker ID")
+    try:
+        inspection = json.loads(
+            _docker_read(["docker", "container", "inspect", container_id])
+        )
+    except json.JSONDecodeError as exc:
+        raise ValueError("Docker container inspection returned invalid data") from exc
+    validate_created_container_inspection(expected_image_id, inspection)
 
 
 def _positive_number(value, label, maximum):
@@ -224,6 +364,7 @@ def configuration_set_sha256(
     worker_path,
     compose_base_path="deployments/compose/compose.yaml",
     compose_cuda_path="deployments/compose/compose.stt-cuda.yaml",
+    build_evidence_path=None,
 ):
     inputs = {
         "application": application_path,
@@ -237,6 +378,11 @@ def configuration_set_sha256(
         role: {"path": str(Path(path).resolve()), "sha256": _sha256(path)}
         for role, path in inputs.items()
     }
+    if build_evidence_path is not None:
+        identities["image_build_evidence"] = {
+            "path": str(Path(build_evidence_path).resolve()),
+            "sha256": _sha256(build_evidence_path),
+        }
     canonical = json.dumps(identities, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -307,6 +453,7 @@ def load_and_validate(
     *,
     lock_path="services/requirements-stt-cuda.lock",
     dockerfile_path="deployments/compose/worker-stt-cuda.Dockerfile",
+    build_evidence_path=None,
     verify_files=True,
 ):
     profile_path = Path(profile_path)
@@ -319,38 +466,70 @@ def load_and_validate(
         raise ValueError("Compose project name is invalid")
 
     runtime = profile["runtime"]
-    _fields(
-        runtime,
-        {
-            "image",
-            "image_id",
-            "image_reference_verified",
-            "image_role",
-            "platform",
-            "base_image",
-            "base_image_platform",
-            "base_image_platform_verified",
-            "cuda_lock_sha256",
-            "source_revision",
-            "source_revision_verified",
-        },
-        "runtime",
-    )
-    image = _digest_reference(runtime["image"], "runtime.image")
-    if any(token in image.lower() for token in ("validation", "probe")):
-        raise ValueError(
-            "validation-only image references cannot be production workers"
+    if not isinstance(runtime, dict):
+        raise ValueError("runtime must be a mapping")
+    # Validate the base reference before local evidence comparison, which
+    # derives its digest from this value. Malformed input must fail through the
+    # deployment validator rather than leaking an incidental attribute error.
+    base_image = _digest_reference(runtime.get("base_image"), "runtime.base_image")
+    identity_mode = runtime.get("identity_mode")
+    common_runtime_fields = {
+        "identity_mode",
+        "image_role",
+        "platform",
+        "base_image",
+        "base_image_platform",
+        "base_image_platform_verified",
+        "cuda_lock_sha256",
+        "source_revision",
+        "source_revision_verified",
+    }
+    if identity_mode == "registry_digest":
+        _fields(
+            runtime,
+            common_runtime_fields | {"image", "image_id", "image_reference_verified"},
+            "runtime",
         )
-    base_image = _digest_reference(runtime["base_image"], "runtime.base_image")
+        image = _digest_reference(runtime["image"], "runtime.image")
+        if any(token in image.lower() for token in ("validation", "probe")):
+            raise ValueError(
+                "validation-only image references cannot be production workers"
+            )
+        image_id = _image_id(runtime["image_id"])
+        if runtime["image_reference_verified"] is not True:
+            raise ValueError(
+                "built image reference must be verified against its image ID"
+            )
+    elif identity_mode == "local_image_id":
+        _fields(
+            runtime,
+            common_runtime_fields | {"image_id", "build_evidence_sha256"},
+            "runtime",
+        )
+        image_id = _image_id(runtime["image_id"])
+        image = image_id
+        evidence_digest = runtime["build_evidence_sha256"]
+        if not isinstance(evidence_digest, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", evidence_digest
+        ):
+            raise ValueError("local image mode requires a build evidence SHA-256")
+        if build_evidence_path is None:
+            raise ValueError("local image mode requires private build evidence")
+        try:
+            evidence = json.loads(Path(build_evidence_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "local image build evidence is unavailable or invalid"
+            ) from exc
+        validate_local_image_build_evidence(runtime, evidence, build_evidence_path)
+    else:
+        raise ValueError(
+            "runtime.identity_mode must be registry_digest or local_image_id"
+        )
     if runtime["image_role"] != "stt-worker":
         raise ValueError(
             "runtime image must be identified as the production STT worker"
         )
-    image_id = runtime["image_id"]
-    if not isinstance(image_id, str) or not re.fullmatch(
-        r"sha256:[0-9a-f]{64}", image_id
-    ):
-        raise ValueError("built image ID must be a Docker sha256 image ID")
     if image_id == (
         "sha256:b25af1309e1e51e8ce72c227028727cb26014fef512b716fbd11cf8f9fb16540"
     ):
@@ -366,8 +545,6 @@ def load_and_validate(
         raise ValueError(
             "base image linux/amd64 manifest identity requires operator verification"
         )
-    if runtime["image_reference_verified"] is not True:
-        raise ValueError("built image reference must be verified against its image ID")
     if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", runtime["source_revision"]):
         raise ValueError("production application source revision must be immutable")
     if runtime["source_revision_verified"] is not True:
@@ -685,7 +862,9 @@ def load_and_validate(
             application_config_path,
             deployment_config_path,
             worker_config_path,
+            build_evidence_path=build_evidence_path,
         ),
+        "identity_mode": identity_mode,
         "resources": resources,
         "lifecycle": lifecycle,
         "healthcheck": health,
@@ -710,6 +889,8 @@ def compose_environment(validated, application_path, deployment_path, worker_pat
     values = {
         "STT_COMPOSE_PROJECT_NAME": profile["project_name"],
         "STT_CUDA_IMAGE": validated["image"],
+        "STT_IMAGE_IDENTITY_MODE": validated["identity_mode"],
+        "STT_IMAGE_ID": validated["image_id"],
         "STT_SOURCE_REVISION": validated["profile"]["runtime"]["source_revision"],
         "STT_CUDA_LOCK_SHA256": validated["profile"]["runtime"]["cuda_lock_sha256"],
         "STT_PLATFORM": validated["platform"],
@@ -835,6 +1016,9 @@ def validate_rendered_compose(config, validated):
     runtime = validated["profile"]["runtime"]
     if (
         labels.get("com.speech-platform.image-role") != "stt-worker"
+        or labels.get("com.speech-platform.image-identity-mode")
+        != validated["identity_mode"]
+        or labels.get("com.speech-platform.image-id") != validated["image_id"]
         or labels.get("com.speech-platform.source-revision")
         != runtime["source_revision"]
         or labels.get("com.speech-platform.cuda-lock-sha256")
@@ -986,7 +1170,7 @@ def validate_rendered_compose(config, validated):
 def _main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("prepare", "check-rendered"):
+    for name in ("prepare", "check-rendered", "verify-image", "verify-container"):
         sub = subparsers.add_parser(name)
         sub.add_argument("--profile", required=True)
         sub.add_argument("--application-config", required=True)
@@ -996,18 +1180,22 @@ def _main():
         sub.add_argument(
             "--dockerfile", default="deployments/compose/worker-stt-cuda.Dockerfile"
         )
+        sub.add_argument("--build-evidence")
         if name == "prepare":
             sub.add_argument("--output-env", required=True)
+        if name == "verify-container":
+            sub.add_argument("--container-id", required=True)
     args = parser.parse_args()
     try:
-        require_private_config_paths(
-            (
-                args.profile,
-                args.application_config,
-                args.deployment_config,
-                args.worker_config,
-            )
-        )
+        private_inputs = [
+            args.profile,
+            args.application_config,
+            args.deployment_config,
+            args.worker_config,
+        ]
+        if args.build_evidence:
+            private_inputs.append(args.build_evidence)
+        require_private_config_paths(private_inputs)
         validated = load_and_validate(
             args.profile,
             args.application_config,
@@ -1015,6 +1203,7 @@ def _main():
             args.worker_config,
             lock_path=args.lock,
             dockerfile_path=args.dockerfile,
+            build_evidence_path=args.build_evidence,
         )
         if args.command == "prepare":
             write_env_file(
@@ -1029,12 +1218,24 @@ def _main():
             print(
                 "PASS: deployment profile and artifacts verified; private Compose environment written"
             )
-        else:
+        elif args.command == "check-rendered":
             rendered = json.load(sys.stdin)
             validate_rendered_compose(rendered, validated)
             print(
                 "PASS: rendered Compose matches the validated CUDA deployment profile"
             )
+        elif args.command == "verify-image":
+            if validated["identity_mode"] != "local_image_id":
+                raise ValueError("verify-image is for local_image_id mode only")
+            verify_local_image_with_docker(validated["profile"]["runtime"])
+            print("PASS: exact local image ID, platform, user and provenance match")
+        else:
+            if validated["identity_mode"] == "local_image_id":
+                verify_local_image_runtime_with_docker()
+            verify_created_container_with_docker(
+                args.container_id, validated["image_id"]
+            )
+            print("PASS: created, stopped container uses the approved image ID")
     except (
         OSError,
         ValueError,

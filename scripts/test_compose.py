@@ -96,6 +96,10 @@ class ComposeConfig(unittest.TestCase):
             "services": {
                 "stt": {
                     "image": "registry.example.invalid/stt@sha256:" + "0" * 64,
+                    "labels": {
+                        "com.speech-platform.image-identity-mode": "registry_digest",
+                        "com.speech-platform.image-id": "sha256:" + "3" * 64,
+                    },
                     "build": None,
                     "platform": "linux/amd64",
                     "pull_policy": "never",
@@ -129,6 +133,8 @@ class ComposeConfig(unittest.TestCase):
         expected = {
             "project_name": "speech-platform-static",
             "image": config["services"]["stt"]["image"],
+            "identity_mode": "registry_digest",
+            "image_id": "sha256:" + "3" * 64,
             "artifact_gid": "1000",
             "host_gpu": "0",
             "memory_bytes": 1024,
@@ -138,6 +144,66 @@ class ComposeConfig(unittest.TestCase):
         validate_cuda_deployment(config, expected)
         config["services"]["stt"]["gpus"] = "all"
         with self.assertRaisesRegex(ValueError, "broad gpus"):
+            validate_cuda_deployment(config, expected)
+
+    def test_cuda_static_check_accepts_only_explicit_local_image_id(self):
+        config = {
+            "name": "speech-platform-static",
+            "services": {
+                "stt": {
+                    "image": "sha256:" + "3" * 64,
+                    "labels": {
+                        "com.speech-platform.image-identity-mode": "local_image_id",
+                        "com.speech-platform.image-id": "sha256:" + "3" * 64,
+                    },
+                    "build": None,
+                    "platform": "linux/amd64",
+                    "pull_policy": "never",
+                    "restart": "no",
+                    "user": "65532:65532",
+                    "read_only": True,
+                    "ports": [],
+                    "networks": {"stt_private": None},
+                    "group_add": ["1000"],
+                    "deploy": {
+                        "resources": {
+                            "reservations": {
+                                "devices": [
+                                    {
+                                        "device_ids": ["0"],
+                                        "driver": "nvidia",
+                                        "capabilities": ["gpu"],
+                                    }
+                                ]
+                            }
+                        }
+                    },
+                    "mem_limit": 1024,
+                    "cpus": 1,
+                    "pids_limit": 128,
+                    "healthcheck": {"test": ["CMD", "python", "/healthz"]},
+                    "volumes": [{"target": "/models", "read_only": True}],
+                }
+            },
+        }
+        expected = {
+            "project_name": "speech-platform-static",
+            "image": "sha256:" + "3" * 64,
+            "identity_mode": "local_image_id",
+            "image_id": "sha256:" + "3" * 64,
+            "artifact_gid": "1000",
+            "host_gpu": "0",
+            "memory_bytes": 1024,
+            "cpus": 1,
+            "pids": 128,
+        }
+        validate_cuda_deployment(config, expected)
+        expected["image"] = "speech-platform/stt:latest"
+        with self.assertRaisesRegex(ValueError, "validated runtime image"):
+            validate_cuda_deployment(config, expected)
+        expected["image"] = "sha256:" + "3" * 64
+        expected["identity_mode"] = "implicit"
+        with self.assertRaisesRegex(ValueError, "unsupported CUDA image identity"):
             validate_cuda_deployment(config, expected)
 
 

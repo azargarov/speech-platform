@@ -71,9 +71,25 @@ def validate_cuda_deployment(config, expected):
     if stt.get("gpus"):
         raise ValueError("CUDA worker must not use broad gpus allocation")
     if stt.get("image") != expected["image"] or stt.get("build") is not None:
-        raise ValueError("CUDA worker must use only its immutable runtime image")
-    if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", expected["image"]):
-        raise ValueError("CUDA static image reference must be digest-pinned")
+        raise ValueError("CUDA worker must use only its validated runtime image")
+    identity_mode = expected["identity_mode"]
+    image_id = expected["image_id"]
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise ValueError("CUDA expected image ID must be a Docker sha256 ID")
+    if identity_mode == "registry_digest":
+        if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", expected["image"]):
+            raise ValueError("registry_digest mode requires an immutable digest")
+    elif identity_mode == "local_image_id":
+        if expected["image"] != image_id:
+            raise ValueError("local_image_id mode must select the exact image ID")
+    else:
+        raise ValueError("unsupported CUDA image identity mode")
+    labels = stt.get("labels", {})
+    if (
+        labels.get("com.speech-platform.image-identity-mode") != identity_mode
+        or labels.get("com.speech-platform.image-id") != image_id
+    ):
+        raise ValueError("CUDA container image identity labels do not match")
     if stt.get("platform") != "linux/amd64" or stt.get("pull_policy") != "never":
         raise ValueError("CUDA runtime platform and pull policy must be explicit")
     if stt.get("restart") != "no":
@@ -129,6 +145,8 @@ def main():
             {
                 "project_name": os.environ["STT_COMPOSE_PROJECT_NAME"],
                 "image": os.environ["STT_CUDA_IMAGE"],
+                "identity_mode": os.environ["STT_IMAGE_IDENTITY_MODE"],
+                "image_id": os.environ["STT_IMAGE_ID"],
                 "artifact_gid": os.environ["STT_ARTIFACT_GID"],
                 "host_gpu": os.environ["STT_HOST_GPU_DEVICE_ID"],
                 "memory_bytes": int(os.environ["STT_MEMORY_LIMIT_BYTES"]),

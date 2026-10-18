@@ -4,6 +4,9 @@
 schema_version: 1
 project_name: speech-platform-stt-cuda
 runtime:
+  # Select exactly one explicit contract. Registry mode requires `image` and
+  # `image_reference_verified`; local mode requires `build_evidence_sha256`.
+  identity_mode: registry_digest
   image: registry.example.invalid/speech-platform/stt-cuda@sha256:REPLACE_WITH_BUILT_IMAGE_DIGEST
   image_id: sha256:REPLACE_WITH_BUILT_IMAGE_ID
   image_reference_verified: false
@@ -15,6 +18,11 @@ runtime:
   source_revision: REPLACE_WITH_PRODUCTION_SOURCE_REVISION
   source_revision_verified: false
   cuda_lock_sha256: 68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14
+  # For local_image_id mode, remove `image` and `image_reference_verified`,
+  # then add the exact image ID and digest of private build evidence:
+  # identity_mode: local_image_id
+  # image_id: sha256:<64 lowercase hex digits>
+  # build_evidence_sha256: <64 lowercase hex digits>
 model:
   alias: large-v3-turbo
   revision: 0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf
