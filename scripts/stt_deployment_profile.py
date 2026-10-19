@@ -28,6 +28,7 @@ from services.stt.config import (
 )
 from services.stt.domain import SpeechFailure
 from services.worker.server import load_config
+from scripts.stt_cuda_preflight import validate_free_gpu_memory
 
 PROFILE_FIELDS = {
     "schema_version",
@@ -40,6 +41,7 @@ PROFILE_FIELDS = {
     "lifecycle",
     "healthcheck",
 }
+PROFILE_V2_FIELDS = PROFILE_FIELDS | {"gateway"}
 
 # Local Docker image IDs in Compose were create-tested only on this exact pair.
 LOCAL_IMAGE_ID_ENGINE_VERSIONS = frozenset({"29.7.2-ce"})
@@ -47,8 +49,16 @@ LOCAL_IMAGE_ID_COMPOSE_VERSIONS = frozenset({"5.6.0"})
 
 
 def _fields(value, expected, label):
-    if not isinstance(value, dict) or set(value) != set(expected):
-        raise ValueError(f"{label} fields do not match the deployment schema")
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a mapping")
+    missing = sorted(set(expected) - set(value))
+    if missing:
+        raise ValueError(f"{label} is missing required field(s): {', '.join(missing)}")
+    unexpected = sorted(set(value) - set(expected))
+    if unexpected:
+        raise ValueError(
+            f"{label} contains unsupported field(s): {', '.join(unexpected)}"
+        )
 
 
 def _read_yaml(path):
@@ -562,6 +572,7 @@ def validate_model_permissions(
     manifest_file,
     expected_gid: int,
     expected_owner_uid: int,
+    artifact_directory,
     service_uid: int = 65532,
     service_gid: int = 65532,
 ):
@@ -569,6 +580,10 @@ def validate_model_permissions(
     try:
         normalized_root = root.resolve(strict=True)
     except OSError as exc:
+        if exc.errno == errno.EACCES:
+            raise ValueError(
+                "model release path is not readable/traversable by the current account; use the configured artifact-reader group context"
+            ) from exc
         raise ValueError(
             "model release root must be an existing absolute directory"
         ) from exc
@@ -607,11 +622,23 @@ def validate_model_permissions(
         raise ValueError("model manifest must be a regular file in the release root")
     _group_access(manifest, expected_gid, expected_owner_uid, directory=False)
 
+    artifact_root = Path(artifact_directory)
+    if artifact_root.parent != root:
+        raise ValueError("model artifact directory must be directly under its release")
+    _group_access(
+        artifact_root,
+        expected_gid,
+        expected_owner_uid,
+        directory=True,
+    )
+
     def fail_walk(error):
-        raise ValueError("model release tree cannot be completely inspected") from error
+        raise ValueError(
+            "model artifact tree cannot be completely inspected"
+        ) from error
 
     for current, directories, files in os.walk(
-        root, followlinks=False, onerror=fail_walk
+        artifact_root, followlinks=False, onerror=fail_walk
     ):
         current_path = Path(current)
         for name in directories:
@@ -667,7 +694,7 @@ def configuration_set_sha256(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def require_private_config_paths(paths, repository_root="."):
+def require_private_config_paths(paths, repository_root=".", group_read_gid=None):
     root = Path(repository_root).resolve()
     private_root = root / "private"
     if private_root.is_symlink() or not private_root.is_dir():
@@ -692,8 +719,20 @@ def require_private_config_paths(paths, repository_root="."):
         if candidate.is_symlink():
             raise ValueError("private configuration inputs must not be symlinks")
         _assert_no_acl(resolved, directory=False)
-        if resolved.stat().st_mode & 0o077:
-            raise ValueError("private configuration file permissions are too broad")
+        file_info = resolved.stat()
+        file_mode = file_info.st_mode & 0o777
+        if group_read_gid is None:
+            if file_mode & 0o077:
+                raise ValueError("private configuration file permissions are too broad")
+        elif (
+            file_mode & 0o007
+            or file_mode & 0o020
+            or file_mode & ~0o640
+            or (file_mode & 0o040 and file_info.st_gid != group_read_gid)
+        ):
+            raise ValueError(
+                "group-readable configuration must be mode 0640 for the configured reader group"
+            )
         parent = candidate.parent
         while parent.resolve() != resolved_private:
             if (
@@ -740,12 +779,33 @@ def load_and_validate(
 ):
     profile_path = Path(profile_path)
     profile = _read_yaml(profile_path)
-    _fields(profile, PROFILE_FIELDS, "deployment profile")
-    if type(profile["schema_version"]) is not int or profile["schema_version"] != 1:
+    version = profile.get("schema_version")
+    if type(version) is not int or version not in {1, 2}:
         raise ValueError("unsupported deployment profile schema")
+    _fields(
+        profile,
+        PROFILE_FIELDS if version == 1 else PROFILE_V2_FIELDS,
+        "deployment profile",
+    )
+    if version == 1:
+        # Preserve the original v1 Compose default for existing private profiles.
+        profile["gateway"] = {"host_port": 8080, "listen_port": 8080}
     _reject_placeholders(profile)
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,62}", profile["project_name"]):
         raise ValueError("Compose project name is invalid")
+
+    gateway = profile["gateway"]
+    _fields(gateway, {"host_port", "listen_port"}, "gateway")
+    if (
+        type(gateway["host_port"]) is not int
+        or not 1024 <= gateway["host_port"] <= 65535
+    ):
+        raise ValueError("Gateway loopback host port must be in 1024..65535")
+    if (
+        type(gateway["listen_port"]) is not int
+        or not 1 <= gateway["listen_port"] <= 65535
+    ):
+        raise ValueError("Gateway container listen port must be in 1..65535")
 
     runtime = profile["runtime"]
     if not isinstance(runtime, dict):
@@ -978,9 +1038,9 @@ def load_and_validate(
     )
     if (
         type(device["host_physical_index"]) is not int
-        or device["host_physical_index"] != 0
+        or device["host_physical_index"] < 0
     ):
-        raise ValueError("deployment must select host physical GPU 0")
+        raise ValueError("host physical GPU index must be a non-negative integer")
     if (
         type(device["container_cuda_index"]) is not int
         or device["container_cuda_index"] != 0
@@ -1147,6 +1207,7 @@ def load_and_validate(
             host_release_root / manifest_path.relative_to("/models"),
             read_gid,
             owner_uid,
+            host_release_root / artifact_directory.relative_to("/models"),
             access["service_uid"],
             access["service_gid"],
         )
@@ -1201,6 +1262,9 @@ def compose_environment(validated, application_path, deployment_path, worker_pat
     model = validated["model"]
     values = {
         "STT_COMPOSE_PROJECT_NAME": profile["project_name"],
+        "SPEECH_BIND_IP": "127.0.0.1",
+        "SPEECH_PORT": str(profile["gateway"]["host_port"]),
+        "SPEECH_LISTEN_PORT": str(profile["gateway"]["listen_port"]),
         "STT_CUDA_IMAGE": validated["image"],
         "STT_IMAGE_IDENTITY_MODE": validated["identity_mode"],
         "STT_IMAGE_ID": validated["image_id"],
@@ -1308,6 +1372,15 @@ def validate_rendered_compose(config, validated):
         raise ValueError("TTS must remain isolated on its own private network")
     if services["tts"].get("ports") or services["gateway"].get("ports") is None:
         raise ValueError("worker and Gateway host-port configuration is invalid")
+    expected_gateway_port = {
+        "mode": "ingress",
+        "host_ip": "127.0.0.1",
+        "target": validated["profile"]["gateway"]["listen_port"],
+        "published": str(validated["profile"]["gateway"]["host_port"]),
+        "protocol": "tcp",
+    }
+    if services["gateway"].get("ports") != [expected_gateway_port]:
+        raise ValueError("Gateway port must match the loopback deployment profile")
     if config.get("name") != validated["profile"]["project_name"]:
         raise ValueError("rendered Compose project identity does not match profile")
     if stt.get("gpus"):
@@ -1344,10 +1417,8 @@ def validate_rendered_compose(config, validated):
         raise ValueError("rendered CUDA service image policy is unsafe")
     if stt.get("profiles") != ["cuda"]:
         raise ValueError("rendered CUDA service must require the cuda profile")
-    if (
-        stt.get("restart") != "no"
-        or stt.get("stop_grace_period")
-        != f"{validated['lifecycle']['stop_grace_period_seconds']}s"
+    if stt.get("restart") != "no" or stt.get("stop_grace_period") != _compose_duration(
+        validated["lifecycle"]["stop_grace_period_seconds"]
     ):
         raise ValueError("rendered restart or stop policy does not match profile")
     if stt.get("user") != "65532:65532" or stt.get("read_only") is not True:
@@ -1399,7 +1470,7 @@ def validate_rendered_compose(config, validated):
         ("timeout", "timeout_seconds"),
         ("start_period", "start_period_seconds"),
     ):
-        if health.get(key) != f"{validated['healthcheck'][profile_key]}s":
+        if health.get(key) != _compose_duration(validated["healthcheck"][profile_key]):
             raise ValueError(f"rendered health {key} does not match profile")
     if health.get("retries") != validated["healthcheck"]["retries"]:
         raise ValueError("rendered health retries do not match profile")
@@ -1480,10 +1551,77 @@ def validate_rendered_compose(config, validated):
             raise ValueError("rendered configuration identity label does not match")
 
 
+def _compose_duration(seconds):
+    """Format positive whole seconds as Compose renders canonical durations."""
+    minutes, remainder = divmod(int(seconds), 60)
+    if minutes and remainder:
+        return f"{minutes}m{remainder}s"
+    if minutes:
+        return f"{minutes}m"
+    return f"{remainder}s"
+
+
+def preflight_host_gpu(validated, run=subprocess.run):
+    """Read GPU identity and free VRAM before starting this CUDA deployment."""
+    observation = observe_host_gpu(validated, run)
+    minimum_free = observation["threshold_bytes"]
+    free_mib = observation["free_mib"]
+    if not observation["identity_matches"]:
+        raise ValueError("configured host GPU identity does not match the profile")
+    validate_free_gpu_memory(free_mib, minimum_free)
+    print(
+        "PASS: configured GPU identity matches; "
+        f"{free_mib} MiB free meets the reviewed admission gate"
+    )
+
+
+def observe_host_gpu(validated, run=subprocess.run):
+    """Return current GPU identity/headroom without converting low VRAM to error."""
+    deployment = validated["deployment"]
+    device = validated["device"]
+    minimum_free = deployment.minimum_free_gpu_bytes_before_load
+    if minimum_free is None:
+        raise ValueError("CUDA deployment requires a reviewed free-VRAM gate")
+    result = run(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,uuid,memory.free",
+            "--format=csv,noheader,nounits",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    selected = []
+    for line in result.stdout.splitlines():
+        fields = [field.strip() for field in line.split(",")]
+        if len(fields) != 3 or not fields[0].isdigit() or not fields[2].isdigit():
+            raise ValueError("GPU inventory probe returned an invalid row")
+        if int(fields[0]) == device["host_physical_index"]:
+            selected.append((fields[1], int(fields[2])))
+    if len(selected) != 1:
+        raise ValueError("configured host GPU is not uniquely available")
+    uuid, free_mib = selected[0]
+    return {
+        "uuid": uuid,
+        "identity_matches": uuid == device["expected_host_uuid"],
+        "free_mib": free_mib,
+        "free_bytes": free_mib * 1024**2,
+        "threshold_bytes": minimum_free,
+    }
+
+
 def _main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("prepare", "check-rendered", "verify-image", "verify-container"):
+    for name in (
+        "prepare",
+        "check-rendered",
+        "verify-image",
+        "verify-container",
+        "preflight-host",
+    ):
         sub = subparsers.add_parser(name)
         sub.add_argument("--profile", required=True)
         sub.add_argument("--application-config", required=True)
@@ -1545,6 +1683,8 @@ def _main():
             print(
                 "PASS: rendered Compose matches the validated CUDA deployment profile"
             )
+        elif args.command == "preflight-host":
+            preflight_host_gpu(validated)
         elif args.command == "verify-image":
             if validated["identity_mode"] != "local_image_id":
                 raise ValueError("verify-image is for local_image_id mode only")
@@ -1559,6 +1699,7 @@ def _main():
             print("PASS: created, stopped container uses the approved image ID")
     except (
         OSError,
+        subprocess.SubprocessError,
         ValueError,
         KeyError,
         TypeError,

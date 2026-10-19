@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import base64
+import contextlib
 import errno
 import hashlib
 import io
@@ -19,6 +20,7 @@ from scripts.stt_deployment_profile import (
     compose_environment,
     configuration_set_sha256,
     load_and_validate,
+    preflight_host_gpu,
     require_private_config_paths,
     validate_rendered_compose,
     validate_created_container_inspection,
@@ -112,8 +114,9 @@ class DeploymentProfileTests(unittest.TestCase):
         self.worker_path = Path("configs/stt.yaml")
 
         self.profile = {
-            "schema_version": 1,
+            "schema_version": 2,
             "project_name": "speech-platform-test",
+            "gateway": {"host_port": 18080, "listen_port": 8080},
             "runtime": {
                 "identity_mode": "registry_digest",
                 "image": "registry.example.invalid/stt@sha256:" + "1" * 64,
@@ -379,7 +382,15 @@ class DeploymentProfileTests(unittest.TestCase):
             "services": {
                 "gateway": {
                     "networks": {"stt_private": None, "tts_private": None},
-                    "ports": [{}],
+                    "ports": [
+                        {
+                            "mode": "ingress",
+                            "host_ip": "127.0.0.1",
+                            "target": profile["gateway"]["listen_port"],
+                            "published": str(profile["gateway"]["host_port"]),
+                            "protocol": "tcp",
+                        }
+                    ],
                 },
                 "tts": {"networks": {"tts_private": None}},
                 "stt": {
@@ -398,7 +409,7 @@ class DeploymentProfileTests(unittest.TestCase):
                     "platform": "linux/amd64",
                     "pull_policy": "never",
                     "restart": "no",
-                    "stop_grace_period": "125s",
+                    "stop_grace_period": "2m5s",
                     "mem_limit": str(resources["memory_limit_bytes"]),
                     "cpus": resources["cpu_limit"],
                     "pids_limit": resources["pids_limit"],
@@ -432,7 +443,7 @@ class DeploymentProfileTests(unittest.TestCase):
                         "test": ["CMD", "python", "-c", "GET /healthz"],
                         "interval": f"{health['interval_seconds']}s",
                         "timeout": f"{health['timeout_seconds']}s",
-                        "start_period": f"{health['start_period_seconds']}s",
+                        "start_period": "2m10s",
                         "retries": health["retries"],
                     },
                     "volumes": [
@@ -573,13 +584,13 @@ class DeploymentProfileTests(unittest.TestCase):
         evidence_path, _ = self._local_image_evidence()
         self.profile["runtime"].pop("build_evidence_sha256")
         self._write_profile()
-        with self.assertRaisesRegex(ValueError, "fields do not match"):
+        with self.assertRaisesRegex(ValueError, r"missing required field\(s\)"):
             self._validate(build_evidence_path=evidence_path, verify_files=False)
 
         evidence_path, _ = self._local_image_evidence()
         self.profile["runtime"]["image"] = "speech-platform/stt:latest"
         self._write_profile()
-        with self.assertRaisesRegex(ValueError, "fields do not match"):
+        with self.assertRaisesRegex(ValueError, r"unsupported field\(s\)"):
             self._validate(build_evidence_path=evidence_path, verify_files=False)
 
         self.profile["runtime"].pop("image")
@@ -753,7 +764,7 @@ class DeploymentProfileTests(unittest.TestCase):
         runtime["image_store_evidence_sha256"] = hashlib.sha256(
             path.read_bytes()
         ).hexdigest()
-        with self.assertRaisesRegex(ValueError, "fields do not match"):
+        with self.assertRaisesRegex(ValueError, r"missing required field\(s\)"):
             validate_local_artifact_identity(
                 runtime, missing, path, self.image_archive_path
             )
@@ -1157,6 +1168,39 @@ class DeploymentProfileTests(unittest.TestCase):
         config.chmod(0o640)
         with self.assertRaisesRegex(ValueError, "permissions are too broad"):
             require_private_config_paths([config], repository_root=self.root)
+        config_gid = config.stat().st_gid
+        require_private_config_paths(
+            [config], repository_root=self.root, group_read_gid=config_gid
+        )
+        with self.assertRaisesRegex(ValueError, "configured reader group"):
+            require_private_config_paths(
+                [config], repository_root=self.root, group_read_gid=config_gid + 1
+            )
+        config.chmod(0o660)
+        with self.assertRaisesRegex(ValueError, "configured reader group"):
+            require_private_config_paths(
+                [config], repository_root=self.root, group_read_gid=config_gid
+            )
+
+    def test_profile_v1_keeps_the_legacy_loopback_port_default(self):
+        legacy = copy.deepcopy(self.profile)
+        legacy["schema_version"] = 1
+        legacy.pop("gateway")
+        legacy_path = self.root / "legacy-profile.yaml"
+        self._write_yaml(legacy_path, legacy)
+
+        validated = load_and_validate(
+            legacy_path,
+            self.application_path,
+            self.deployment_path,
+            self.worker_path,
+            verify_files=False,
+        )
+
+        self.assertEqual(
+            validated["profile"]["gateway"],
+            {"host_port": 8080, "listen_port": 8080},
+        )
 
     def test_private_configuration_rejects_broad_directory_and_symlink(self):
         private = self.root / "private"
@@ -1512,7 +1556,7 @@ class DeploymentProfileTests(unittest.TestCase):
 
     def test_profile_rejects_gpu_mismatch_resource_review_and_timeout_mismatch(self):
         cases = (
-            ("host GPU", "device", "host_physical_index", 1, "physical GPU 0"),
+            ("host GPU", "device", "host_physical_index", -1, "non-negative"),
             (
                 "container GPU index",
                 "device",
@@ -1619,17 +1663,31 @@ class DeploymentProfileTests(unittest.TestCase):
             self._validate()
         manifest.chmod(0o640)
 
-        unexpected = self.release / "unexpected-link"
+        unexpected = self.release / "artifact" / "unexpected-link"
         unexpected.symlink_to(self.release / "manifest.yaml")
         with self.assertRaisesRegex(ValueError, "ownership or symlink"):
             self._validate()
         unexpected.unlink()
 
-        fifo = self.release / "unexpected-fifo"
+        fifo = self.release / "artifact" / "unexpected-fifo"
         os.mkfifo(fifo, 0o640)
         with self.assertRaisesRegex(ValueError, "non-regular file"):
             self._validate()
         fifo.unlink()
+
+    def test_unrelated_historical_evidence_is_not_modified_or_required(self):
+        evidence = self.release / "historical-evidence"
+        evidence.mkdir(mode=0o700)
+        evidence_file = evidence / "record.txt"
+        evidence_file.write_text("preserve this record")
+        evidence_file.chmod(0o600)
+        before = (evidence_file.read_bytes(), evidence_file.stat().st_mode)
+
+        self._validate()
+
+        self.assertEqual(
+            (evidence_file.read_bytes(), evidence_file.stat().st_mode), before
+        )
 
     def test_missing_artifact_release_is_not_accepted(self):
         self.profile["model"]["host_release_root"] = str(self.root / "absent")
@@ -1641,6 +1699,54 @@ class DeploymentProfileTests(unittest.TestCase):
         self.root.chmod(0o700)
         with self.assertRaisesRegex(ValueError, "parent is not traversable"):
             self._validate()
+
+    def test_host_preflight_requires_configured_gpu_and_free_vram(self):
+        validated = self._validate()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            preflight_host_gpu(
+                validated,
+                run=lambda *args, **kwargs: type(
+                    "Result",
+                    (),
+                    {"stdout": "0, GPU-0123456789abcdef, 1\n"},
+                )(),
+            )
+        self.assertIn("PASS:", output.getvalue())
+
+        with self.assertRaisesRegex(ValueError, "identity does not match"):
+            preflight_host_gpu(
+                validated,
+                run=lambda *args, **kwargs: type(
+                    "Result", (), {"stdout": "0, GPU-wrong, 100\n"}
+                )(),
+            )
+
+        with self.assertRaisesRegex(ValueError, "below the configured"):
+            preflight_host_gpu(
+                validated,
+                run=lambda *args, **kwargs: type(
+                    "Result",
+                    (),
+                    {"stdout": "0, GPU-0123456789abcdef, 0\n"},
+                )(),
+            )
+
+    def test_host_physical_gpu_index_is_profile_configured(self):
+        self.profile["device"]["host_physical_index"] = 1
+        self._write_profile()
+        validated = self._validate()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            preflight_host_gpu(
+                validated,
+                run=lambda *args, **kwargs: type(
+                    "Result",
+                    (),
+                    {"stdout": "0, GPU-other, 0\n1, GPU-0123456789abcdef, 1\n"},
+                )(),
+            )
+        self.assertIn("PASS:", output.getvalue())
 
 
 if __name__ == "__main__":

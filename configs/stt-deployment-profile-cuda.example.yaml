@@ -1,8 +1,11 @@
 # Template only. Copy to ignored private/ and replace every placeholder after
 # host resource, GPU identity, permissions, base-image and built-image review.
 # C.4's 4 CPU / 12 GiB / 128 PID values are experiment references, not capacity.
-schema_version: 1
+schema_version: 2
 project_name: speech-platform-stt-cuda
+gateway:
+  host_port: 18082
+  listen_port: 8080
 runtime:
   # Select exactly one explicit contract. Registry mode requires `image` and
   # `image_reference_verified`; local mode requires `build_evidence_sha256`.

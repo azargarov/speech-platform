@@ -98,8 +98,25 @@ class ModelArtifactProvisioning(unittest.TestCase):
 
         installed = provision_models(release, self.store, self.root, download)
         self.assertEqual(installed[0].status, "installed")
+        existing_files = [
+            path
+            for path in model_directory(self.store, model).rglob("*")
+            if path.is_file()
+        ]
+        before = {
+            path: (path.read_bytes(), path.stat().st_mode, path.stat().st_mtime_ns)
+            for path in existing_files
+        }
         checked = check_models(release, self.store, self.root)
         self.assertEqual(checked[0].status, "verified")
+        self.assertEqual(
+            before,
+            {
+                path: (path.read_bytes(), path.stat().st_mode, path.stat().st_mtime_ns)
+                for path in existing_files
+            },
+            "verification must not rewrite historical artifact files or metadata",
+        )
 
         reused = provision_models(
             release,

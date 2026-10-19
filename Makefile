@@ -10,7 +10,23 @@ PUBLISH_SELECTION :=
 PUBLISH_VERSION := $(strip $(VERSION))
 PUBLISH_VARIANT := $(if $(strip $(VARIANT)),$(strip $(VARIANT)),cuda)
 PLATFORM_RELEASE ?= releases/voiceservice-v0.1.2.yaml
+ENABLED_SERVICES_CONFIG ?= private/deployment/enabled-services.yaml
 MODEL_STORE ?= private/model-store
+PROFILE ?= regular
+ifneq ($(filter plan install,$(MAKECMDGOALS)),)
+ifeq ($(PROFILE),regular)
+STT_DEPLOYMENT_DIR := private/deployment/stt-cuda
+else ifeq ($(PROFILE),experimental)
+STT_DEPLOYMENT_DIR := private/deployment/stt-cuda-experimental
+else
+$(error Unknown deployment PROFILE '$(PROFILE)'; choose regular or experimental)
+endif
+override STT_DEPLOYMENT_PROFILE := $(STT_DEPLOYMENT_DIR)/profile.yaml
+override STT_APPLICATION_CONFIG := $(STT_DEPLOYMENT_DIR)/stt-application.yaml
+override STT_DEPLOYMENT_CONFIG := $(STT_DEPLOYMENT_DIR)/stt-deployment.yaml
+override STT_WORKER_CONFIG := $(STT_DEPLOYMENT_DIR)/stt.yaml
+override STT_COMPOSE_ENV := $(STT_DEPLOYMENT_DIR)/compose.env
+endif
 ifneq ($(filter image,$(MAKECMDGOALS)),)
 ifeq ($(filter $(IMAGE_VARIANT),cpu cuda),)
 $(error Unknown image VARIANT '$(IMAGE_VARIANT)'; choose cpu or cuda)
@@ -46,7 +62,7 @@ else
 $(error Unknown publish service '$(SERVICE)'; choose gateway, stt, or tts)
 endif
 endif
-.PHONY: verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check release-check model-check model-fetch stt-cpu-integration stt-cuda-http-integration
+.PHONY: verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check release-check model-check model-fetch plan install stt-cpu-integration stt-cuda-http-integration
 bootstrap:
 	$(PYTHON) -m pip install -r requirements-dev.txt
 	$(PYTHON) -m pip install --require-hashes -r services/requirements-stt-cpu.lock
@@ -87,6 +103,10 @@ model-check:
 	$(PYTHON) -m scripts.provision_models check --release "$(PLATFORM_RELEASE)" --store "$(MODEL_STORE)"
 model-fetch:
 	$(PYTHON) -m scripts.provision_models fetch --release "$(PLATFORM_RELEASE)" --store "$(MODEL_STORE)"
+plan:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m scripts.stt_deployment plan --service "$(SERVICE)" --enabled-services "$(ENABLED_SERVICES_CONFIG)" --profile "$(STT_DEPLOYMENT_PROFILE)" --application-config "$(STT_APPLICATION_CONFIG)" --deployment-config "$(STT_DEPLOYMENT_CONFIG)" --worker-config "$(STT_WORKER_CONFIG)" --release "$(PLATFORM_RELEASE)" --env-file "$(STT_COMPOSE_ENV)"
+install:
+	$(PYTHON) -m scripts.stt_deployment install --service "$(SERVICE)" --enabled-services "$(ENABLED_SERVICES_CONFIG)" --profile "$(STT_DEPLOYMENT_PROFILE)" --application-config "$(STT_APPLICATION_CONFIG)" --deployment-config "$(STT_DEPLOYMENT_CONFIG)" --worker-config "$(STT_WORKER_CONFIG)" --release "$(PLATFORM_RELEASE)" --env-file "$(STT_COMPOSE_ENV)"
 governance-check:
 	$(PYTHON) scripts/validate_governance.py
 	$(PYTHON) -m unittest discover -s scripts -p 'test_governance.py' -v

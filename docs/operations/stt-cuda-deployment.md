@@ -1,6 +1,6 @@
 # Persistent CUDA STT deployment profile — C.6A
 
-Status: **deployment not ready**. The profile and Compose policy remain design/offline validated; target image-store evidence is now present and passes the existing offline identity validator, but no production profile has been prepared and no production worker has been started. Do not treat the example profile or current private test configs as deployable.
+Status: **regular production profile not ready**. This C.6A profile and Compose policy remain design/offline validated; target image-store evidence is now present and passes the existing offline identity validator, but no regular production profile has been prepared. The separate M01E experimental deployment has since passed its bounded real-host acceptance; that does not constitute production-profile acceptance. See [M01E verification](../milestones/M01E/verification.md).
 
 ## Current image-store evidence review
 
@@ -47,6 +47,8 @@ chmod 600 private/deployment/cuda-stt-initial/profile.yaml private/deployment/cu
 ```
 
 `prepare` strictly loads the existing application, worker and deployment schemas; verifies the CUDA lock digest, model alias/revision/manifest and artifact file hashes; checks static owner/group/mode, setgid, traversal, and no-ACL policy; validates resource and timeout relationships; then writes a mode-0600 Compose environment file under a private directory. All four input configurations must be explicit non-example files under the ignored repository `private/` directory, with mode 0600 or stricter; there is no fallback to the tracked examples. In local-image mode, pass the private A2 build-evidence file (`--build-evidence`), the exact approved `docker save` archive (`--image-archive`), and image-store identity evidence (`--image-store-evidence`). The profile pins the build-evidence and image-store-evidence SHA-256 values; its typed artifact identity pins the archive digest, configuration digest and store-specific identity. The complete configuration-set identity includes each input's logical role, resolved source path and content SHA-256, private evidence-file path/content digests in local mode, and both Compose files' paths/content digests, serialized as sorted compact JSON. The archive bytes are verified against the archive SHA-256 declared in the profile rather than rehashed as a second configuration-set input. Only the resulting digest is placed in a Compose label; it does not expose source paths. The generated environment file is not an input, avoiding a self-reference cycle. Review and approve all resource values in the private profile; C.4's experimental limits are not production recommendations. Preparation and Compose rendering do not invoke CUDA or inference. Static success does not prove effective target permissions or mounted-container access; C.6B-R3 must verify artifact access as UID/GID 65532 plus the configured supplementary group in the actual runtime.
+
+The profile also records the Gateway host and container ports. The host binding is restricted to `127.0.0.1` and validated in the rendered Compose output. For an STT-only `up`, the Gateway is not started; this setting keeps the rendered project deterministic if Gateway is later selected.
 
 ## Permanent model-reader group policy — prepared, target-unverified
 
@@ -350,3 +352,143 @@ The command sequence above is an operator procedure proposal, not authorization 
 **C.6C runtime evidence:** one approved request through the private persistent worker path; response validation and sanitized logs; exact release rollback and re-readiness; project resource inventory; and postflight shared-service health.
 
 Neither phase establishes concurrency capacity, sustained performance, exact peak VRAM, real CUDA OOM recovery or active GPU workload coexistence unless separately authorized and measured. Overall M02 remains incomplete.
+
+## M01E existing artifact and concurrent-start integration
+
+The existing digest-named release can be reused in place. Verification opens
+the manifest and model files for reading, checks their hashes and inspects
+ownership/modes; it does not create, download, rename, chmod, chown, or remove
+anything in the release. Keep `host_release_root` pointed at that exact
+digest-named directory and retain the configured reader group. The container
+mount is read-only. Do not run `model-fetch` for this release: if the checked
+release is valid, `prepare` and `preflight-host` both verify and reuse it.
+
+The normal deployment account may be unable to traverse/enumerate the model
+store parent. Run validation and private environment generation as that same
+account with the configured model-reader group as its primary group. Resolve
+the group name from the numeric GID in the private profile; do not copy a GID
+into tracked application code. Example after setting these shell variables
+from the private profile and local account:
+
+```sh
+DEPLOYMENT_USER="$(id -un)"
+MODEL_READER_GROUP="$(getent group "$MODEL_READER_GID" | cut -d: -f1)"
+test -n "$MODEL_READER_GROUP"
+sudo -u "$DEPLOYMENT_USER" -g "$MODEL_READER_GROUP" -- \
+  .venv/bin/python scripts/stt_deployment_profile.py prepare \
+  --profile private/deployment/cuda-stt-initial/profile.yaml \
+  --application-config private/deployment/cuda-stt-initial/application.yaml \
+  --deployment-config private/deployment/cuda-stt-initial/deployment.yaml \
+  --worker-config private/deployment/cuda-stt-initial/worker.yaml \
+  --build-evidence private/image-build-a2-20261018-01/build-result.json \
+  --image-archive private/results/c6b-image-transfer-20261018-01/stt-cuda-image.tar \
+  --image-store-evidence private/evidence/image-store-evidence.json \
+  --output-env private/deployment/cuda-stt-initial/stt-cuda.compose.env
+```
+
+This preserves the deployment user's ownership of private output and grants
+the process only the model-reader group's existing read/traverse access. It
+does not alter release ownership, modes, or group membership. If the group
+cannot be selected for the deployment account, stop and have the host
+administrator resolve access without changing the historical artifact.
+
+Immediately before any separately authorized CUDA start, repeat the same
+group-context validation with the `preflight-host` subcommand and the same
+profile/config/evidence arguments. It reads `nvidia-smi`, checks the configured
+physical GPU UUID and verifies current free VRAM meets
+`minimum_free_gpu_bytes_before_load`. A low or mismatched result blocks
+startup. The application repeats the free-memory admission check before model
+loading; neither observation reserves VRAM, so rerun preflight immediately
+before startup and stop if another workload changes the headroom. This check
+is read-only and does not start a container.
+
+The deployment profile's Compose project name must be unique on the host.
+Before startup, inspect `docker compose ls` and the rendered Compose project;
+stop if the new project name is already active. The CUDA overlay publishes no
+host ports, mounts its own private configuration files and the existing model
+release read-only, and selects only the configured GPU. Do not use the current
+operational STT project's name or its host paths. Ollama, Dify and the current
+STT project remain outside this deployment's Compose commands.
+
+### Make deployment interface
+
+`make plan SERVICE=stt` and `make install SERVICE=stt` select the `regular`
+profile by default. Set `PROFILE=experimental` to select the separate
+`private/deployment/stt-cuda-experimental/` profile and its three configs;
+`PROFILE=regular` selects `private/deployment/stt-cuda/`. Unknown profile names
+are rejected by Make before the deployment command runs. Each selection also
+uses its own `compose.env` path. `PLATFORM_RELEASE` selects the tracked release
+manifest. The profile's GHCR digest, platform, model revision and manifest
+digest must match that release exactly; local image-ID mode is not accepted by
+these Make targets.
+
+Run `make plan` as the deployment account with the configured model-reader
+group as its primary group. It validates the release and model bytes, performs
+the read-only GPU preflight, renders Compose and checks the chosen project
+namespace, and verifies the locally available image against the configured
+GHCR digest, image ID, platform and provenance labels. The exact digest image
+must already be present locally; `plan` does not pull images, write
+`compose.env`, create directories, change Docker/GPU state, or alter
+installation records. Compose interpolation uses validated values in the child
+process environment and `/dev/null` as its env-file source. Admission shortfalls
+are printed as `BLOCKED` with free memory, configured threshold and reasons.
+`make install` independently repeats strict validation and image/model/project
+checks, then re-reads GPU identity and free VRAM immediately before the only
+mutating command: `docker compose up -d --no-build
+--pull never stt` scoped to the configured project and CUDA overlay. It does
+not issue `down`, `rm`, prune, build, or commands against other Compose
+projects. Existing containers in the chosen project are reusable only when
+they are the `stt` service with the exact immutable image and matching
+deployment identity labels; a different service or identity blocks install.
+The install can create or replace resources belonging to its own configured
+project, so review `make plan` output and the selected project name before a
+separately authorized installation.
+
+### M01E experimental coexistence candidate
+
+The private candidate under ignored
+`private/deployment/stt-cuda-experimental/` uses project
+`speech-platform-stt-cuda-m01e-exp-v012`, loopback Gateway profile binding
+`127.0.0.1:18083` to container port 8080, and worker port 8082. It uses the
+same pinned v0.1.2 CUDA image and digest-addressed read-only model release,
+selects GPU index 0 by the configured UUID, and adds model-reader GID 988 as a
+supplementary group. Profile and service configs are separate private copies;
+the STT worker port is not published.
+
+Threshold evidence: the recorded C.4 three-request sample observed a
+device-wide maximum of 2,795,962,368 bytes (about 2,667 MiB). Before that run,
+14,909 MiB was free on a 15,360 MiB GPU, or about 451 MiB used. The sampled
+increase was about 2,216 MiB. The current user-reported baseline is about
+2,216 MiB used and 12,694 MiB free. A candidate 4,096 MiB admission gate would
+allow the observed approximate 2,216 MiB worker increase plus about 1,880 MiB
+additional headroom. This margin is proposed, not measured reserve capacity.
+The old sample was device-wide, sampled once per second and not process
+attributed; it is not an exact peak. Two-worker use and behavior under active
+Ollama/Dify load are unmeasured. The user approved the 4,096 MiB threshold for
+the experimental profile only. The regular profile retains its 14,336 MiB
+threshold, which blocks admission at the observed 12,694 MiB free level. The
+experimental threshold admitted the read-only plan at that observation; it
+does not establish runtime coexistence or reserve future GPU headroom.
+
+#### Later controlled coexistence test — approval required
+
+1. Capture baseline STT health and GPU memory.
+2. Confirm the experimental Compose project and port are isolated.
+3. Verify the experimental admission threshold and record the approved value.
+4. Start the new CUDA STT container only after explicit approval.
+5. Wait for readiness.
+6. Execute one bounded transcription request.
+7. Capture GPU memory use and relevant sanitized logs.
+8. Confirm the original STT remains healthy.
+9. Verify Ollama and Dify remain unaffected.
+10. Stop the experimental deployment only when explicitly authorized, then
+    confirm the original baseline remains healthy.
+
+This ten-step procedure was documented during M01E Phase A. The user later
+reported successful experimental install/readiness, one real transcription,
+continued health of original and experimental STT, and repeated-install
+idempotency; those bounded results are recorded in [M01E verification](../milestones/M01E/verification.md).
+Parallel inference stress testing was not performed, so concurrent inference
+capacity and sustained headroom remain unverified and overall M01E remains
+open. No current container lifecycle operation is implied by this historical
+acceptance record.
