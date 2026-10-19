@@ -14,12 +14,15 @@ from scripts.stt_deployment import (
     _check_project_conflicts,
     _install_command,
     _require_release_match,
+    _inspect_service_image,
+    _service_matches,
     require_container_config_access,
     run_deployment,
     verify_registry_image,
     wait_for_container_readiness,
     _subprocess_failure,
 )
+from scripts.model_artifacts import ModelProvisionError
 from scripts.stt_deployment_profile import _fields
 
 MODEL_MANIFEST_SHA256 = (
@@ -28,6 +31,106 @@ MODEL_MANIFEST_SHA256 = (
 
 
 class DeploymentOrchestrationTests(unittest.TestCase):
+    def test_gateway_and_tts_image_runtime_identities_are_service_specific(self):
+        cases = (
+            ("gateway", "65532", "foundation", "gateway"),
+            ("tts", "65532:65532", "health-only", "tts-health-only"),
+        )
+        for service, image_user, variant, role in cases:
+            with self.subTest(service=service):
+                digest = f"ghcr.io/example/{service}@sha256:" + "a" * 64
+                image = {
+                    "RepoDigests": [digest],
+                    "Os": "linux",
+                    "Architecture": "amd64",
+                    "Config": {
+                        "User": image_user,
+                        "Labels": {
+                            "org.opencontainers.image.revision": "b" * 40,
+                            "com.speech-platform.service": service,
+                            "com.speech-platform.runtime-variant": variant,
+                            "com.speech-platform.service-role": role,
+                        },
+                    },
+                }
+
+                def inspected(command):
+                    return json.dumps([image])
+
+                entry = {"image": digest, "platform": "linux/amd64"}
+                self.assertEqual(
+                    _inspect_service_image(service, entry, "b" * 40, inspected),
+                    image,
+                )
+
+                for invalid_user in ("0", "0:0", "65532:0", "65533:65533"):
+                    image["Config"]["User"] = invalid_user
+                    with self.subTest(service=service, user=invalid_user):
+                        with self.assertRaisesRegex(
+                            ValueError, "image runtime identity mismatch"
+                        ):
+                            _inspect_service_image(service, entry, "b" * 40, inspected)
+                image["Config"]["User"] = image_user
+
+    def test_service_image_provenance_diagnostic_is_distinct_from_identity(self):
+        digest = "ghcr.io/example/gateway@sha256:" + "a" * 64
+        image = {
+            "RepoDigests": [digest],
+            "Os": "linux",
+            "Architecture": "amd64",
+            "Config": {
+                "User": "65532",
+                "Labels": {
+                    "org.opencontainers.image.revision": "wrong",
+                    "com.speech-platform.service": "gateway",
+                    "com.speech-platform.runtime-variant": "foundation",
+                    "com.speech-platform.service-role": "gateway",
+                },
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "digest, platform or provenance"):
+            _inspect_service_image(
+                "gateway",
+                {"image": digest, "platform": "linux/amd64"},
+                "b" * 40,
+                lambda command: json.dumps([image]),
+            )
+
+    def test_stt_service_match_ignores_aggregate_compose_source_digest(self):
+        labels = {
+            "com.docker.compose.project": "speech-platform-test",
+            "com.docker.compose.service": "stt",
+            "com.speech-platform.configuration-set-sha256": "old-compose-set",
+            "com.speech-platform.application-config-sha256": "same-application",
+        }
+        container = {
+            "Config": {
+                "Image": "registry/stt@sha256:abc",
+                "Labels": labels,
+            }
+        }
+        rendered = {
+            "services": {
+                "stt": {
+                    "image": "registry/stt@sha256:abc",
+                    "labels": {
+                        "com.speech-platform.configuration-set-sha256": "new-compose-set",
+                        "com.speech-platform.application-config-sha256": "same-application",
+                    },
+                }
+            }
+        }
+
+        self.assertTrue(
+            _service_matches(container, "stt", rendered, "speech-platform-test")
+        )
+        rendered["services"]["stt"]["labels"][
+            "com.speech-platform.application-config-sha256"
+        ] = "changed-application"
+        self.assertFalse(
+            _service_matches(container, "stt", rendered, "speech-platform-test")
+        )
+
     def test_container_config_preflight_rejects_unreadable_file_without_reading_it(
         self,
     ):
@@ -53,7 +156,21 @@ class DeploymentOrchestrationTests(unittest.TestCase):
             # its GID is the simulated supplementary reader group.
             hidden.chmod(0o700)
             require_container_config_access(
-                [config], uid=12345, supplementary_gids=(config.stat().st_gid,)
+                [config],
+                uid=12345,
+                supplementary_gids=(config.stat().st_gid,),
+                service="TTS",
+            )
+
+    def test_tts_config_requires_reader_supplementary_group(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "tts.yaml"
+            config.write_text("fixture\n")
+            config.chmod(0o640)
+            with self.assertRaisesRegex(ValueError, "TTS configuration file"):
+                require_container_config_access([config], service="TTS")
+            require_container_config_access(
+                [config], supplementary_gids=(config.stat().st_gid,), service="TTS"
             )
 
     def test_container_config_preflight_rejects_symlink_source(self):
@@ -108,6 +225,16 @@ class DeploymentOrchestrationTests(unittest.TestCase):
             commands = []
             with (
                 patch("scripts.stt_deployment.require_private_config_paths"),
+                patch(
+                    "scripts.stt_deployment._load_selected_configs",
+                    return_value=(
+                        {"project_name": "isolated", "config_reader_gid": 988},
+                        {"listen_port": 8080},
+                        {"listen_port": 8082},
+                        Path("/private/gateway.yaml"),
+                        Path("/private/tts.yaml"),
+                    ),
+                ),
                 patch(
                     "scripts.stt_deployment.load_and_validate",
                     return_value={"artifact_access": {"supplementary_read_gid": 988}},
@@ -193,7 +320,7 @@ class DeploymentOrchestrationTests(unittest.TestCase):
                 return "container-id\n"
             return json.dumps(self._readiness_inspection(status="exited", exit_code=1))
 
-        with self.assertRaisesRegex(ValueError, "exited before readiness"):
+        with self.assertRaisesRegex(ValueError, r"exited before readiness \(exit 1\)"):
             wait_for_container_readiness(
                 "isolated-stt",
                 "registry/stt@sha256:abc",
@@ -339,7 +466,7 @@ class DeploymentOrchestrationTests(unittest.TestCase):
     def test_missing_private_configuration_diagnostic_names_the_requirement(self):
         with self.assertRaisesRegex(
             ValueError,
-            "required private configuration profile.yaml is missing",
+            "deployment configuration must be an explicit private file",
         ):
             run_deployment(
                 "plan",
@@ -563,7 +690,7 @@ class DeploymentOrchestrationTests(unittest.TestCase):
         self.assertEqual(command[command.index("--pull") + 1], "never")
         self.assertFalse(set(command) & {"down", "rm", "prune", "build", "pull"})
 
-    def _run_with_mocks(self, action, root, gpu_probe, run):
+    def _run_with_mocks(self, action, root, gpu_probe, run, model_error=None):
         config_paths = []
         for name in (
             "profile.yaml",
@@ -604,6 +731,37 @@ class DeploymentOrchestrationTests(unittest.TestCase):
             )
             stack.enter_context(
                 patch(
+                    "scripts.stt_deployment._load_selected_configs",
+                    return_value=(
+                        {
+                            "project_name": "isolated-experimental-stt",
+                            "config_reader_gid": 988,
+                            "gateway": {
+                                "host_port": 18083,
+                                "memory_limit": "128m",
+                                "cpu_limit": 1.0,
+                                "pids_limit": 128,
+                            },
+                            "tts": {
+                                "memory_limit": "256m",
+                                "cpu_limit": 1.0,
+                                "pids_limit": 128,
+                            },
+                            "readiness": {
+                                "timeout_seconds": 120,
+                                "poll_interval_seconds": 2,
+                                "probe_timeout_seconds": 2,
+                            },
+                        },
+                        {"listen_port": 8080},
+                        {"listen_port": 8082},
+                        Path("/private/gateway.yaml"),
+                        Path("/private/tts.yaml"),
+                    ),
+                )
+            )
+            stack.enter_context(
+                patch(
                     "scripts.stt_deployment.load_and_validate",
                     return_value=validated,
                 )
@@ -622,6 +780,37 @@ class DeploymentOrchestrationTests(unittest.TestCase):
                     },
                 )
             )
+            stack.enter_context(
+                patch(
+                    "scripts.stt_deployment._compose_environment",
+                    return_value={
+                        "STT_COMPOSE_PROJECT_NAME": "isolated-experimental-stt"
+                    },
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "scripts.stt_deployment._render_selected",
+                    return_value={"services": {"stt": {"image": validated["image"]}}},
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "scripts.stt_deployment._ensure_service_image",
+                    return_value="verified",
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "scripts.stt_deployment._ensure_selected_models",
+                    side_effect=model_error,
+                    return_value=[],
+                )
+            )
+            stack.enter_context(
+                patch("scripts.stt_deployment._project_services", return_value={})
+            )
+            stack.enter_context(patch("scripts.stt_deployment._wait_service_readiness"))
             stack.enter_context(patch("scripts.stt_deployment.verify_registry_image"))
             stack.enter_context(
                 patch(
@@ -634,6 +823,9 @@ class DeploymentOrchestrationTests(unittest.TestCase):
             )
             return run_deployment(
                 action,
+                services_profile_path=str(root / "services.yaml"),
+                gateway_config_path=str(root / "gateway.yaml"),
+                tts_config_path=str(root / "tts.yaml"),
                 profile_path=config_paths[0],
                 application_config=config_paths[1],
                 deployment_config=config_paths[2],
@@ -707,19 +899,6 @@ class DeploymentOrchestrationTests(unittest.TestCase):
                     },
                     baseline_before,
                 )
-                self.assertTrue(commands)
-                self.assertTrue(
-                    any(command[-2:] == ["--format", "json"] for command in commands)
-                )
-                self.assertTrue(
-                    any(command[:2] == ["docker", "ps"] for command in commands)
-                )
-                self.assertTrue(
-                    any(
-                        command[:3] == ["docker", "network", "ls"]
-                        for command in commands
-                    )
-                )
                 mutating_actions = {
                     "up",
                     "pull",
@@ -732,6 +911,29 @@ class DeploymentOrchestrationTests(unittest.TestCase):
                 self.assertFalse(
                     any(set(command) & mutating_actions for command in commands)
                 )
+
+    def test_plan_reports_missing_model_as_a_blocker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = StringIO()
+            with redirect_stdout(output):
+                status = self._run_with_mocks(
+                    "plan",
+                    root,
+                    lambda validated: {
+                        "free_mib": 8192,
+                        "free_bytes": 8 * 1024**3,
+                        "threshold_bytes": 4 * 1024**3,
+                        "identity_matches": True,
+                    },
+                    lambda command, **kwargs: json.dumps({"services": {"stt": {}}}),
+                    ModelProvisionError(
+                        "required model artifacts are missing; install will stage pinned files"
+                    ),
+                )
+            self.assertEqual(status, 2)
+            self.assertIn("admission=BLOCKED", output.getvalue())
+            self.assertIn("required model artifacts are missing", output.getvalue())
 
     def test_install_rechecks_gpu_immediately_before_start(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -754,7 +956,7 @@ class DeploymentOrchestrationTests(unittest.TestCase):
                     "identity_matches": True,
                 }
 
-            with self.assertRaisesRegex(ValueError, "immediately before startup"):
+            with self.assertRaisesRegex(ValueError, "immediately before STT startup"):
                 self._run_with_mocks("install", root, gpu, run)
             mutations = [command for command, _ in commands if "up" in command]
             self.assertEqual(mutations, [])

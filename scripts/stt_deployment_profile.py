@@ -1363,15 +1363,23 @@ def validate_rendered_compose(config, validated):
     stt = services.get("stt", {})
     if set(services) != {"gateway", "stt", "tts"}:
         raise ValueError("rendered Compose services are not the approved set")
-    if set(services["gateway"].get("networks", {})) != {
-        "stt_private",
-        "tts_private",
-    }:
-        raise ValueError("Gateway must retain both private worker networks")
+    expected_network_attachments = {
+        "gateway": {"gateway_publish", "stt_private", "tts_private"},
+        "stt": {"stt_private"},
+        "tts": {"tts_private"},
+    }
+    for name, expected in expected_network_attachments.items():
+        if set(services[name].get("networks", {})) != expected:
+            raise ValueError(f"rendered {name} network attachments are invalid")
     if set(services["tts"].get("networks", {})) != {"tts_private"}:
         raise ValueError("TTS must remain isolated on its own private network")
     if services["tts"].get("ports") or services["gateway"].get("ports") is None:
         raise ValueError("worker and Gateway host-port configuration is invalid")
+    reader_gid = str(validated["artifact_access"]["supplementary_read_gid"])
+    if services["tts"].get("group_add") != [reader_gid]:
+        raise ValueError(
+            "rendered TTS configuration reader group does not match profile"
+        )
     expected_gateway_port = {
         "mode": "ingress",
         "host_ip": "127.0.0.1",
@@ -1430,10 +1438,28 @@ def validate_rendered_compose(config, validated):
     if stt.get("ports") or stt.get("networks") != {"stt_private": None}:
         raise ValueError("rendered STT service must remain private without host ports")
     networks = config.get("networks", {})
-    if set(networks) != {"stt_private", "tts_private"} or any(
-        not value.get("internal", False) for value in networks.values()
+    if set(networks) != {"gateway_publish", "stt_private", "tts_private"}:
+        raise ValueError("rendered Compose network definitions are not approved")
+    gateway_network = networks["gateway_publish"]
+    if (
+        set(gateway_network) - {"name", "driver", "driver_opts", "ipam"}
+        or ("name" in gateway_network and not gateway_network["name"])
+        or gateway_network.get("ipam", {}) != {}
+        or gateway_network.get("driver") != "bridge"
+        or gateway_network.get("internal", False) is not False
+        or gateway_network.get("driver_opts")
+        != {"com.docker.network.bridge.enable_ip_masquerade": "false"}
     ):
-        raise ValueError("rendered worker networks must remain separate and internal")
+        raise ValueError("Gateway publication network configuration is invalid")
+    for name in ("stt_private", "tts_private"):
+        network = networks[name]
+        if (
+            set(network) - {"name", "ipam", "internal"}
+            or ("name" in network and not network["name"])
+            or network.get("ipam", {}) != {}
+            or network.get("internal") is not True
+        ):
+            raise ValueError(f"rendered {name} network must remain internal")
     devices = (
         stt.get("deploy", {})
         .get("resources", {})

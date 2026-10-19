@@ -1,6 +1,6 @@
 # M01E — Target host integration
 
-Status: **Experimental CUDA STT deployment acceptance: PASS for the recorded real-host scope. Overall M01E remains OPEN: parallel inference stress testing and full agreed acceptance/user closeout are outstanding. Do not start M01F.**
+Status: **COMPLETE — PASS. User validation and explicit closeout approval recorded 2026-10-19.** M01F update/rollback and M01G broader target lifecycle validation remain later milestones. Parallel inference stress remains assigned to later runtime/lifecycle validation; Gateway egress isolation was not established. Inference routing is not implemented.
 
 ## Scope
 
@@ -71,10 +71,43 @@ Responsibilities:
    must be completed and reviewed before full M01E acceptance. User validation
    and explicit closeout approval remain required.
 
+## M01E-F — Isolated fresh-install and model-staging rehearsal preparation
+
+Approved rehearsal identity: Compose project
+`speech-platform-m01e-fresh-v012`, Gateway loopback port `18084`, enabled
+services `gateway`, `stt`, and `tts`, immutable release v0.1.2, and a separate
+initially empty model store. Prepare ignored private Gateway/TTS/STT configs,
+CUDA STT profile and generated environment independent from the experimental
+project. Validate that rendered Compose uses only the fresh project, new
+loopback port, private network names and separate read-only model mount.
+
+Prepare the existing content-addressed model provisioner with an explicit
+empty-store check and deployment-compatible owner/group and modes. The pinned
+model identity must come from the release and its manifest; no download is in
+scope. Record read-only GPU consumers and distinguish measured use from
+unmeasured peak/worst-case needs. Prepare a cleanup sequence that requires
+review of exact project/container/network/model-store identity before any
+later destructive operation. Do not launch a third CUDA worker without
+separate approval. Parallel inference stress is not an M01E blocker.
+
+Responsibilities and boundaries: private configs supply deployment-specific
+identity, paths, port and reader group; Compose retains Gateway/STT/TTS
+separation and read-only worker model access; the existing model provisioner
+owns hash verification, staging and atomic digest-directory activation. No
+API contract or service responsibility changes. A narrow planner error-path
+correction is allowed so an absent model appears as a normal blocked plan.
+
+Acceptance for this preparation slice is the ignored config set, rendered
+read-only plan, exact not-run staging/cleanup procedures, actual GPU
+observations, focused tests and `make verify`. Model download, Compose
+installation, container/network lifecycle, cleanup, milestone closeout and
+commit remain outside this authorization.
+
 ## M01E-C — Service selection and dependency resolution
 
-This bounded implementation slice completes deterministic selection and
-read-only plan dispatch only. It does not complete M01E installation acceptance.
+This implementation slice completed deterministic selection and read-only plan
+dispatch. Local implementation acceptance is PASS; it did not complete M01E
+installation acceptance.
 
 - `SERVICE=stt|tts|gateway` selects that enabled service and its dependencies
   from the release descriptor; an empty `SERVICE` selects every service in the
@@ -82,16 +115,48 @@ read-only plan dispatch only. It does not complete M01E installation acceptance.
 - Unknown/disabled services and missing, disabled or cyclic dependencies fail
   before deployment inspection or mutation. Dependency order is deterministic
   and appears in plan output.
-- TTS and Gateway selection is reported as `BLOCKED: NOT IMPLEMENTED` until
-  M01E-D. Neither selection may enter the STT installation path.
+- The resolver is the sole source of service dependencies. M01E-D consumes its
+  deterministic dependency-first result for planning and installation.
 - The service enablement file is private host configuration. Its tracked
   example is a schema/template only.
 
-M01E-D remains responsible for service-scoped installation for Gateway/TTS and
-their dependencies while preserving the validated STT profiles. M01E-E and the
-remaining M01E acceptance remain open for staged artifact handling and broader
-fresh-install/selective-add/coexistence validation specified in the canonical
-roadmap. This breakdown does not reduce roadmap acceptance requirements.
+## M01E-D — Service-scoped multi-service deployment
+
+Local implementation scope: install selected services or the private
+enabled-service set using the release dependency graph; preserve unchanged
+healthy components; add only selected missing/changed services to the dedicated
+Compose project; and report dependency order and intended actions. The tracked
+service profile is a template; project name, reader group, ports, resource
+limits, private config paths and enabled services remain host data.
+
+- The supported runtimes remain the release's Gateway foundation, health-only
+  TTS and the already validated CUDA STT worker. No public STT routing or TTS
+  inference is included.
+- Selected images are checked against immutable release digests, platform and
+  service provenance. Missing selected images may be pulled by exact digest.
+  Missing STT models may be staged by the content-addressed provisioner using
+  the profile's owner and reader group; corrupt existing releases fail without
+  replacement.
+- Each selected missing/changed service is applied individually with Compose
+  dependency handling disabled. Dependencies are still applied because the
+  resolver lists them explicitly. Unselected services and other project names
+  are excluded from lifecycle commands. Healthy services with matching image
+  and configuration identity are skipped.
+- Gateway exposure remains loopback-only. STT and TTS remain on separate
+  internal networks without host ports. Gateway/TTS health endpoints and STT
+  Docker health are checked after selected changes.
+- Local mocked acceptance covers fresh service installs, dependency closure,
+  all-enabled selection, selective addition, healthy reuse, artifact staging
+  and verification failures, readiness failures/timeouts, project scoping and
+  M01E-C STT regressions. Controlled target acceptance is recorded in the
+  final section of [verification.md](verification.md).
+
+M01E-D local implementation and mocked acceptance is **PASS**. M01E-E
+controlled all-enabled installation and current network/health acceptance are
+**PASS for the observed scope**. M01E remains **IN PROGRESS / OPEN** pending
+isolated fresh-install and clean-target artifact-staging rehearsals, parallel
+inference stress, full user validation and explicit closeout. This breakdown
+does not reduce the canonical acceptance requirements.
 
 ## Phase A continuation acceptance
 
@@ -131,4 +196,14 @@ Compose/Engine compatibility, container GPU mapping or runtime coexistence.
 - Experimental `make install` is now covered by user-reported target evidence
   in [verification.md](verification.md). Do not infer authorization for a new
   installation or lifecycle operation from that historical acceptance.
+- M01E-D local implementation validation: focused service-deployment tests,
+  `make governance-check PYTHON=.venv/bin/python`, `make verify
+  PYTHON=.venv/bin/python`, and `git diff --check`; target installation remains
+  unrun.
+- M01E-E TTS recovery validation: confirm host config ownership/mode and
+  container groups; reject unreadable config before Docker lifecycle commands;
+  enforce the configured reader group in rendered Compose; distinguish exit
+  state from genuine runtime drift; run focused regressions, `make compose-check
+  PYTHON=.venv/bin/python`, `make verify PYTHON=.venv/bin/python`, and
+  `git diff --check`; finish with the authorized read-only all-enabled plan.
 - Review the diff and ensure no private/target data or deployment side effects.

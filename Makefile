@@ -11,6 +11,9 @@ PUBLISH_VERSION := $(strip $(VERSION))
 PUBLISH_VARIANT := $(if $(strip $(VARIANT)),$(strip $(VARIANT)),cuda)
 PLATFORM_RELEASE ?= releases/voiceservice-v0.1.2.yaml
 ENABLED_SERVICES_CONFIG ?= private/deployment/enabled-services.yaml
+SERVICES_DEPLOYMENT_CONFIG ?= private/deployment/services.yaml
+GATEWAY_DEPLOYMENT_CONFIG ?= private/deployment/gateway.yaml
+TTS_DEPLOYMENT_CONFIG ?= private/deployment/tts.yaml
 MODEL_STORE ?= private/model-store
 PROFILE ?= regular
 ifneq ($(filter plan install,$(MAKECMDGOALS)),)
@@ -104,9 +107,9 @@ model-check:
 model-fetch:
 	$(PYTHON) -m scripts.provision_models fetch --release "$(PLATFORM_RELEASE)" --store "$(MODEL_STORE)"
 plan:
-	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m scripts.stt_deployment plan --service "$(SERVICE)" --enabled-services "$(ENABLED_SERVICES_CONFIG)" --profile "$(STT_DEPLOYMENT_PROFILE)" --application-config "$(STT_APPLICATION_CONFIG)" --deployment-config "$(STT_DEPLOYMENT_CONFIG)" --worker-config "$(STT_WORKER_CONFIG)" --release "$(PLATFORM_RELEASE)" --env-file "$(STT_COMPOSE_ENV)"
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m scripts.stt_deployment plan --service "$(SERVICE)" --enabled-services "$(ENABLED_SERVICES_CONFIG)" --services-profile "$(SERVICES_DEPLOYMENT_CONFIG)" --gateway-config "$(GATEWAY_DEPLOYMENT_CONFIG)" --tts-config "$(TTS_DEPLOYMENT_CONFIG)" --profile "$(STT_DEPLOYMENT_PROFILE)" --application-config "$(STT_APPLICATION_CONFIG)" --deployment-config "$(STT_DEPLOYMENT_CONFIG)" --worker-config "$(STT_WORKER_CONFIG)" --release "$(PLATFORM_RELEASE)" --env-file "$(STT_COMPOSE_ENV)"
 install:
-	$(PYTHON) -m scripts.stt_deployment install --service "$(SERVICE)" --enabled-services "$(ENABLED_SERVICES_CONFIG)" --profile "$(STT_DEPLOYMENT_PROFILE)" --application-config "$(STT_APPLICATION_CONFIG)" --deployment-config "$(STT_DEPLOYMENT_CONFIG)" --worker-config "$(STT_WORKER_CONFIG)" --release "$(PLATFORM_RELEASE)" --env-file "$(STT_COMPOSE_ENV)"
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m scripts.stt_deployment install --service "$(SERVICE)" --enabled-services "$(ENABLED_SERVICES_CONFIG)" --services-profile "$(SERVICES_DEPLOYMENT_CONFIG)" --gateway-config "$(GATEWAY_DEPLOYMENT_CONFIG)" --tts-config "$(TTS_DEPLOYMENT_CONFIG)" --profile "$(STT_DEPLOYMENT_PROFILE)" --application-config "$(STT_APPLICATION_CONFIG)" --deployment-config "$(STT_DEPLOYMENT_CONFIG)" --worker-config "$(STT_WORKER_CONFIG)" --release "$(PLATFORM_RELEASE)" --env-file "$(STT_COMPOSE_ENV)"
 governance-check:
 	$(PYTHON) scripts/validate_governance.py
 	$(PYTHON) -m unittest discover -s scripts -p 'test_governance.py' -v

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import unittest
-from contextlib import redirect_stdout
-from io import StringIO
 from unittest.mock import patch
 
 from scripts.service_selection import ServiceSelectionError, resolve_services
@@ -65,21 +63,18 @@ class ServiceSelectionTests(unittest.TestCase):
             )
         self.assertEqual(resolve_services(graph, ["z", "app", "b", "a"]), expected)
 
-    def test_unsupported_selection_blocks_without_stt_fallback_or_io(self):
-        for service in ("tts", "gateway"):
+    def test_invalid_and_disabled_selection_fail_before_profile_or_docker(self):
+        for service, enabled in (("unknown", ["stt"]), ("gateway", ["stt"])):
             with self.subTest(service=service):
-                output = StringIO()
                 with (
-                    redirect_stdout(output),
-                    patch(
-                        "scripts.stt_deployment.require_private_config_paths"
-                    ) as private,
+                    patch("scripts.stt_deployment._load_selected_configs") as profile,
                     patch("scripts.stt_deployment._run") as docker,
+                    self.assertRaises(ServiceSelectionError),
                 ):
-                    result = run_deployment(
-                        "plan",
+                    run_deployment(
+                        "install",
                         service=service,
-                        enabled_services=["gateway", "stt", "tts"],
+                        enabled_services=enabled,
                         profile_path="unused",
                         application_config="unused",
                         deployment_config="unused",
@@ -87,10 +82,7 @@ class ServiceSelectionTests(unittest.TestCase):
                         release_path="releases/voiceservice-v0.1.2.yaml",
                         env_file="unused",
                     )
-                self.assertEqual(result, 2)
-                self.assertIn(f"PLAN: services={service}", output.getvalue())
-                self.assertIn("BLOCKED: NOT IMPLEMENTED", output.getvalue())
-                private.assert_not_called()
+                profile.assert_not_called()
                 docker.assert_not_called()
 
 

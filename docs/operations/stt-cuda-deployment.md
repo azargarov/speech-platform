@@ -412,37 +412,74 @@ STT project remain outside this deployment's Compose commands.
 
 ### Make deployment interface
 
-`make plan SERVICE=stt` and `make install SERVICE=stt` select the `regular`
-profile by default. Set `PROFILE=experimental` to select the separate
-`private/deployment/stt-cuda-experimental/` profile and its three configs;
-`PROFILE=regular` selects `private/deployment/stt-cuda/`. Unknown profile names
-are rejected by Make before the deployment command runs. Each selection also
-uses its own `compose.env` path. `PLATFORM_RELEASE` selects the tracked release
-manifest. The profile's GHCR digest, platform, model revision and manifest
-digest must match that release exactly; local image-ID mode is not accepted by
-these Make targets.
+Copy `configs/service-deployment.example.yaml` to ignored
+`private/deployment/services.yaml`; replace its config-reader GID, project,
+loopback host port, and Gateway/TTS resource limits with reviewed host values.
+Copy `configs/gateway.yaml` and `configs/tts.yaml` into private deployment
+files and keep each readable by the configured group at mode `0640` with no
+group-write or world access. Their source files are mounted individually and
+read-only. The private service profile is required for every selection. If
+STT is selected, its existing regular or experimental profile must use the
+same project name, Gateway port/listen port and config-reader group.
 
-Run `make plan` as the deployment account with the configured model-reader
-group as its primary group. It validates the release and model bytes, performs
-the read-only GPU preflight, renders Compose and checks the chosen project
-namespace, and verifies the locally available image against the configured
-GHCR digest, image ID, platform and provenance labels. The exact digest image
-must already be present locally; `plan` does not pull images, write
-`compose.env`, create directories, change Docker/GPU state, or alter
-installation records. Compose interpolation uses validated values in the child
-process environment and `/dev/null` as its env-file source. Admission shortfalls
-are printed as `BLOCKED` with free memory, configured threshold and reasons.
-`make install` independently repeats strict validation and image/model/project
-checks, then re-reads GPU identity and free VRAM immediately before the only
-mutating command: `docker compose up -d --no-build
---pull never stt` scoped to the configured project and CUDA overlay. It does
-not issue `down`, `rm`, prune, build, or commands against other Compose
-projects. Existing containers in the chosen project are reusable only when
-they are the `stt` service with the exact immutable image and matching
-deployment identity labels; a different service or identity blocks install.
-The install can create or replace resources belonging to its own configured
-project, so review `make plan` output and the selected project name before a
-separately authorized installation.
+`make plan SERVICE=gateway` or `make install SERVICE=gateway` selects Gateway
+and its release-declared dependency closure. The same targets with `SERVICE=tts`
+select the health-only TTS foundation and its dependency closure;
+`SERVICE=stt` selects the existing validated CUDA STT path. An empty `SERVICE`
+selects every service listed in the ignored
+`private/deployment/enabled-services.yaml`. Unknown, disabled, missing or
+cyclic selections fail before Docker inspection or artifact staging. Release
+v0.1.2 currently declares no service dependencies. TTS remains health-only and
+Gateway remains the unauthenticated foundation; no STT routing or TTS inference
+is installed by this interface.
+
+`plan` validates the release and only selected service configs, renders the
+Compose project, checks the configured project namespace and shows the
+dependency order, local immutable-image state, model state, GPU admission for
+STT, and each selected service's intended action. It performs read-only
+readiness probes on existing selected services. It does not pull, download,
+create directories, or change Docker resources. Missing pinned images or model
+files are reported with their planned staging operation.
+
+`install` repeats validation before staging. It pulls only missing selected
+images by the release's exact digest and required platform, then verifies the
+digest, platform, runtime identity and provenance labels. If a selected STT
+model directory is absent, the existing content-addressed provisioner stages
+the manifest-pinned files under the profile's release store with mode `2750`
+directories and `0640` files, using the configured owner and reader group.
+Existing artifacts are verified without modification; corrupt existing
+artifacts fail closed and are never overwritten. The deployment account must
+have the configured reader group as its primary group and write access to the
+already existing model-store parent to stage a new artifact. Re-run `make plan`
+after correcting any staging precondition.
+
+For containers, the orchestrator processes the resolver's dependency-first
+service list. It skips healthy selected services whose immutable image and
+deployment identity match. It invokes `docker compose up` separately for each
+missing or changed selected service, always with the configured project,
+`--no-deps`, `--no-build` and `--pull never`; only a changed selected service
+can be recreated. Unselected services and other Compose projects are not
+included in those commands. Gateway's sole host binding is loopback-only and
+uses a dedicated `gateway_publish` bridge with IP masquerading disabled;
+STT and TTS remain on their own internal worker networks with no published
+ports. The v0.1.2 Distroless Gateway image has no in-container HTTP health
+probe, so the orchestrator verifies Docker's realized host-port mapping and
+then probes `/healthz` from the host. TTS is probed on its internal health
+endpoint and STT must report Docker health `healthy` within its profile-bounded
+readiness window. A failure stops dependency processing and is reported.
+
+The STT `configuration-set-sha256` label also covers both Compose source files,
+so extending the base file for another service can change that aggregate even
+when the existing STT deployment is identical. Existing STT reuse therefore
+requires every component configuration identity label to match and the
+inspected runtime configuration, image, isolated network and health to match;
+the aggregate digest remains provenance and does not alone trigger recreation.
+
+Do not treat `make plan` as host acceptance. Readiness/publication tests are
+local only; a real Gateway port mapping and loopback request after adding the
+dedicated bridge still need target validation. No multi-service target-host
+installation is implied by this procedure. Controlled M01E-E installation and
+service health acceptance remain pending.
 
 ### M01E experimental coexistence candidate
 

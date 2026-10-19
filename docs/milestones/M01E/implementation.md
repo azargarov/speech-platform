@@ -1,5 +1,32 @@
 # M01E Phase A implementation record
 
+## M01E-F2 controlled fresh installation — 2026-10-19
+
+Executed one operator-approved canonical `make install` with explicit private
+configuration paths for all enabled services and model store
+`/var/tmp/speech-platform-m01e-fresh-v012/model-store`. The isolated project
+created Gateway, CUDA STT and health-only TTS containers using the immutable
+v0.1.2 release. Installation and all defined post-install checks passed; exact
+commands, identities, topology, GPU and preservation evidence are in
+[verification.md](verification.md). No existing container was changed, and no
+cleanup or milestone advancement was performed. M01E remains open pending user
+validation and closeout.
+
+## M01E-E controlled multi-service deployment outcome — 2026-10-19
+
+The previously pending M01E-E all-enabled deployment was subsequently completed
+under the controlled host procedure. The user reports successful all-enabled
+installation, real CUDA inference and a successful repeated install; the
+current host inspection independently confirms the running deployment and
+container identity. The initial missing immutable Gateway/TTS images, Gateway
+publication failure on the old private-only attachment, and TTS config reader
+group failure and their fixes remain described in the later sections and
+[verification.md](verification.md). The fresh-install rehearsal from an empty
+VoiceService project and model staging from an empty artifact cache were not
+established by this deployment, because the existing STT service and verified
+model were reused. The separate M01E-F1 staging rehearsal is recorded below.
+No M01F work was started.
+
 ## Design and changes
 
 - Kept artifact ownership and permissions checks in the existing deployment
@@ -173,6 +200,115 @@ user closeout.
 - The correction does not change immutable image provenance, model validation,
   GPU admission, or startup command scope.
 
+## M01E-D — Service-scoped multi-service deployment
+
+### Design and boundaries
+
+- Kept `scripts.service_selection.resolve_services` as the sole owner of the
+  dependency graph. The deployment command consumes its dependency-first order
+  and does not encode a second graph.
+- Kept release image/model identities in the validated release descriptor.
+  `scripts.stt_deployment` validates selected service configuration and images,
+  stages missing immutable images/model artifacts, inspects only the configured
+  Compose project, and applies only selected missing or changed components.
+- Added a strict private multi-service profile for the shared project name,
+  config-reader GID, loopback Gateway port, Gateway/TTS resource limits and
+  bounded readiness probes. Gateway and TTS config files are separate private
+  inputs and bind-mounted read-only. The tracked profile is a template.
+- Added identity labels for Gateway/TTS from each selected image, config bytes,
+  resource settings, project reader group and the tracked Compose definition.
+  A healthy service with matching immutable image, identity labels, runtime
+  resources, mounts, networks and port bindings is skipped.
+- Compose commands name one service at a time, use the configured project,
+  `--no-deps`, `--no-build` and `--pull never`. Declared dependencies still get
+  processed because the resolver returns them explicitly. There is no
+  `down`, prune, rollback or general update operation.
+- Gateway health is checked through its configured loopback port; health-only
+  TTS is checked at its internal `/healthz` endpoint using the existing worker
+  image; STT retains Docker health, the GPU UUID/free-memory admission gate,
+  strict configuration identity, and artifact group-access validation.
+  Gateway stays on both internal worker networks; STT and TTS stay on their
+  separate internal networks with no published worker ports.
+
+### Artifact staging and safety
+
+- The release descriptor remains authoritative for exact image digests and
+  platforms. Missing selected images are pulled by that digest and platform,
+  then checked for the exact repo digest, platform, service role, runtime
+  variant, source revision and nonroot identity before any container operation.
+- A missing selected STT model uses the existing content-addressed provisioner
+  and the release manifest. New artifacts are staged with `2750` directories
+  and `0640` files only when the process owner, primary reader group and
+  existing model-store parent match the private profile. Existing files are
+  verified without rewrite; corrupt existing releases are never replaced.
+- Staging and all validation happen before Compose `up`. A failed selection,
+  config, image, model, GPU, project-identity, loopback-port or network check
+  stops before container changes. Project inspection and Compose lifecycle
+  commands filter/use only the configured project, preserving the operational
+  STT baseline, Ollama and Dify.
+- This implementation does not add STT routing to Gateway, TTS inference,
+  image publication, update/rollback commands, or target-host deployment.
+
+### Compatibility and acceptance
+
+The existing `SERVICE=stt` selection and experimental/regular profile
+validation remain available. It now shares the private service profile and
+project identity with selectively installed Gateway/TTS components. Existing
+operators must prepare that new profile and matching Gateway/TTS private config
+files before using the expanded Make interface.
+
+Focused mocked tests cover Gateway-only and TTS-only fresh installs, dependency
+closure, all-enabled selection, selective addition, changed-service isolation,
+healthy reuse, image/model staging and verification errors, readiness failure
+and timeout, project scoping, invalid selections and STT regression behavior.
+No target plan/install, image pull, model download, or container lifecycle
+command was run for M01E-D.
+
+## M01E-E — Gateway readiness and publication verification
+
+- The immutable v0.1.2 Gateway image is a Distroless image with `/gateway` as
+  its only executable entrypoint and no image healthcheck. Its existing
+  `/healthz` endpoint is the available liveness check; `/readyz` intentionally
+  remains 503 until inference routing exists. Compose cannot run an HTTP
+  healthcheck inside this image without changing the image.
+- Gateway readiness remains an orchestrator-side standard-library HTTP request
+  to the configured host loopback port. The check now first requires Docker's
+  realized `NetworkSettings.Ports` mapping and reports missing publication,
+  unhealthy state, and timeout/missing image healthcheck separately.
+- Docker Engine 29.1.3 inspection showed requested loopback `PortBindings`
+  while actual `NetworkSettings.Ports` was null. The container was attached
+  only to the two internal worker bridges. Add a dedicated `gateway_publish`
+  bridge for Gateway while leaving STT and TTS on their internal networks; its
+  bridge IP masquerading is disabled. See proposed [ADR 0013](../../adr/0013-gateway-port-publication.md).
+- Regression tests cover an absent actual publication, unhealthy state,
+  timeout with no image healthcheck, and successful HTTP readiness without a
+  Docker healthcheck. No running containers were changed and no release image
+  was rebuilt or published.
+
+## M01E-E — TTS configuration access and failure diagnostics
+
+- Root cause: the real-host TTS file was owned by `1000:988` with mode `0640`;
+  the pinned release image ran as `65532:65532`, and rendered Compose supplied
+  no supplementary groups. The configured reader group therefore had no
+  effect in the container. The direct file bind mount does not require its host
+  parent directories to be traversable by UID 65532.
+- TTS now receives `SERVICE_CONFIG_READER_GID`, matching the existing Gateway
+  config reader policy. The shared and deployment-specific Compose validators
+  require the configured group, while private config validation continues to
+  reject world-readable files and the runtime stays nonroot.
+- Gateway and TTS config byte hashes now have service-specific labels. Existing
+  legacy whole-Compose identity labels cannot by themselves trigger unrelated
+  service replacement; new config labels and exact runtime inspection retain
+  per-service drift checks.
+- The existing preflight verifies file access for UID 65532 plus configured
+  groups before Docker inspection or container creation. Its failure now names
+  the affected service. Runtime readiness reports an exited state and exit
+  code before evaluating configuration drift; running containers retain strict
+  image, deployment identity, mount, group, network, port and resource checks.
+- Regression coverage exercises TTS reader-group access and denial without the
+  group, private-parent bind semantics, required Compose group, wrong runtime
+  mount replacement, exited-container diagnostics, and live runtime drift.
+
 ## Phase B experimental deployment acceptance record
 
 - The original permission failure was caused by the container identity
@@ -214,3 +350,65 @@ user closeout.
 - No Gateway/TTS installation, artifact staging, target operation, container
   operation or M01F work was performed. This slice does not advance or close
   M01E.
+
+## M01E-F — isolated rehearsal preparation — 2026-10-19
+
+Prepared the approved fresh project `speech-platform-m01e-fresh-v012` with
+loopback Gateway port `18084`, all three services enabled, and independent
+ignored private Gateway, TTS, STT, CUDA application/deployment, deployment
+profile and generated environment files. The profile retains the immutable
+v0.1.2 image/model identities and uses a dedicated empty model store at
+`/var/tmp/speech-platform-m01e-fresh-v012/model-store`, owned `1000:988` with
+setgid mode `2750`. The profile points to the manifest-digest child. STT
+worker access remains UID/GID `65532:65532`, supplementary GID 988 and a
+read-only model mount.
+
+The `/var/tmp` store path is necessary because the worker cannot traverse the
+host home/repository path required for a model store under `private/`. It is a
+separate host path from `/srv/speech-platform/models`; the existing store was
+not changed. It remains host-managed temporary storage and must be confirmed
+present before any later staging.
+
+Added [the M01E-F rehearsal procedure](../../operations/m01e-fresh-install-rehearsal.md)
+with the exact read-only plan, the existing provisioner API invocation for a
+later approved download, the Hugging Face revision/manifest identity, owner,
+reader group and file modes, and a gated exact-project cleanup design. No
+artifact was fetched; the model store remains empty. No container or network
+was started, stopped, or changed.
+
+The actual empty-store plan exposed an uncaught `ModelProvisionError` that
+produced a traceback instead of a normal blocked plan. Updated the plan path to
+report that error as a blocker and added regression coverage. This changes
+plan diagnostics only; it does not change install behavior or model staging.
+
+## M01E-F1 resumed staging — 2026-10-19
+
+Executed the previously approved staging procedure after the operator supplied
+the read-only metadata fingerprint baseline for `/srv/speech-platform/models`.
+Repeated preflight confirmed the rehearsal target remained empty with the
+expected `1000:988` ownership and `2750` modes, enough disk space, no symlinks,
+and a distinct operational-store path that was not writable by the staging
+identity. The existing provisioner downloaded and verified the pinned
+large-v3-turbo artifact, then activated its digest-named release directory
+with `1000:988` ownership and `2750`/`0640` modes. `make model-check` and a
+second provisioner invocation with a download-refusing callback passed. The
+fresh-project read-only plan is READY.
+
+The CLI `prepare` command rejected the expected group-readable private config
+files because its path check omitted the reader GID. Direct profile validation
+and environment generation succeeded, so no implementation change was made
+during the rehearsal. An unprivileged attempt to assume worker UID 65532 was
+denied by the host; the identity-level read probe and operational-store
+post-inventory remain pending operator evidence. No containers, networks,
+operational-store metadata, Ollama, Dify or existing STT deployments were
+changed. Detailed commands and evidence are in [verification.md](verification.md).
+
+## Final validation reconciliation — 2026-10-19
+
+The operator supplied the F1 worker probe result (UID/GID `65532:65532`,
+supplementary GID 988, six readable artifact files) and matching operational
+store metadata fingerprint. Final F2 idempotency validation captured exact
+container/runtime identities before a READY read-only plan, then performed one
+repeated install; all three services were unchanged and retained their
+identities. See the final verification section for command results and the
+acceptance matrix. No deployment cleanup or M01F work was performed.

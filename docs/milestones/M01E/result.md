@@ -1,31 +1,28 @@
-# M01E result — open
+# M01E result — COMPLETE
 
-Status: **Experimental CUDA STT deployment acceptance: PASS for the bounded
-real-host scope recorded below. Overall M01E remains OPEN pending the full
-agreed acceptance scope, user validation and explicit closeout approval.**
+Status: **PASS. Closed after operator user validation and explicit closeout
+approval on 2026-10-19.**
 
-The user-reported target evidence records a READY experimental plan, successful
-install and readiness, a real transcription with HTTP 200 (`en`, 1.399 seconds),
-health of both original and experimental STT, post-inference GPU memory, and
-matching container identity/timestamps after repeated installation. The
-experimental profile uses a 4,096 MiB pre-load admission threshold. The regular
-profile retains its separate 14,336 MiB threshold.
+The canonical M01E acceptance matrix passes for the evidence scopes recorded in
+[verification.md](verification.md). This includes clean model staging and
+reuse, isolated all-enabled fresh installation, non-root worker read access,
+health/readiness, required network and port topology, preservation of observed
+existing services, and repeated-install idempotency. The repeated install
+preserved Gateway, STT and TTS container IDs, start timestamps, restart
+counters, immutable image IDs and Compose configuration hashes. Full target
+commands, outputs, provenance and limitations remain in the verification
+record.
 
-The initial private config access failure and Compose-based readiness probe
-failure, plus their implementation corrections, are documented in
-[implementation.md](implementation.md) and [verification.md](verification.md).
+Limitations remain explicit: the matching model-store metadata fingerprint
+does not prove complete model file-content preservation; per-image pull
+transcripts were not retained; Dify preservation evidence is at container and
+health level; effective Gateway egress isolation was not established; and
+parallel inference stress was not performed. None changes the accepted M01E
+criteria. Inference routing is not implemented.
 
-Parallel inference stress testing was not performed. Concurrency behavior,
-sustained performance and peak/process-attributed GPU use under parallel
-inference remain NOT ESTABLISHED. The bounded deployment PASS does not satisfy
-that remaining agreed scope and does not close M01E. M01F has not started.
-
-## M01E-C result — service selection
-
-The M01E-C implementation acceptance is satisfied by deterministic release
-dependency resolution, private enabled-service validation, explicit resolved
-service plan output, early rejection of invalid selections, and explicit
-`BLOCKED: NOT IMPLEMENTED` dispatch for enabled TTS/Gateway selections. Focused
-tests and full local verification are recorded in [verification.md](verification.md).
-This phase result does not close M01E. M01E-D, M01E-E, remaining canonical
-acceptance, user validation and explicit closeout remain outstanding.
+Parallel inference stress remains for later runtime/lifecycle validation.
+M01F owns update and rollback implementation and checks; M01G owns broader
+real-host lifecycle validation. Do not start M01F without separate
+authorization. No running containers or experimental deployments were changed
+or removed, and the staged model store remains in place. This closeout does not
+authorize a push.

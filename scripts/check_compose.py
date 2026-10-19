@@ -10,7 +10,7 @@ from pathlib import Path
 import yaml
 
 
-def validate(config, expected_port, expected_bind):
+def validate(config, expected_port, expected_bind, expected_config_gid="65532"):
     if type(expected_port) is not int or not 1 <= expected_port <= 65535:
         raise ValueError("effective Gateway listen port must be in 1..65535")
     try:
@@ -19,20 +19,42 @@ def validate(config, expected_port, expected_bind):
         raise ValueError("Gateway bind address must be an IP address") from exc
 
     networks = config["networks"]
-    if set(networks) != {"stt_private", "tts_private"}:
-        raise ValueError("only the STT-private and TTS-private networks are allowed")
-    if any(not network["internal"] for network in networks.values()):
-        raise ValueError("worker networks must be internal")
+    if set(networks) != {"gateway_publish", "stt_private", "tts_private"}:
+        raise ValueError("Gateway publication and private worker networks are required")
+    gateway_publish = networks["gateway_publish"]
+    if (
+        set(gateway_publish) - {"name", "driver", "driver_opts", "ipam"}
+        or ("name" in gateway_publish and not gateway_publish["name"])
+        or gateway_publish.get("ipam", {}) != {}
+        or gateway_publish.get("internal", False) is not False
+        or gateway_publish.get("driver") != "bridge"
+        or gateway_publish.get("driver_opts", {}).get(
+            "com.docker.network.bridge.enable_ip_masquerade"
+        )
+        != "false"
+    ):
+        raise ValueError("Gateway publication network must disable bridge masquerading")
+    for name in ("stt_private", "tts_private"):
+        network = networks[name]
+        if (
+            set(network) - {"name", "ipam", "internal"}
+            or ("name" in network and not network["name"])
+            or network.get("ipam", {}) != {}
+            or network.get("internal") is not True
+        ):
+            raise ValueError("worker networks must be internal")
     services = config["services"]
     if set(services) != {"gateway", "stt", "tts"}:
         raise ValueError("unexpected Compose service set")
     gateway = services["gateway"]
-    if set(gateway["networks"]) != {"stt_private", "tts_private"}:
-        raise ValueError("Gateway must connect to both private worker networks")
+    if set(gateway["networks"]) != {"gateway_publish", "stt_private", "tts_private"}:
+        raise ValueError("Gateway must connect to its publication and worker networks")
     if set(services["stt"]["networks"]) != {"stt_private"}:
         raise ValueError("STT must connect only to the STT-private network")
     if set(services["tts"]["networks"]) != {"tts_private"}:
         raise ValueError("TTS must connect only to the TTS-private network")
+    if services["tts"].get("group_add") != [str(expected_config_gid)]:
+        raise ValueError("TTS configuration reader supplementary group does not match")
     if gateway["environment"].get("SPEECH_LISTEN_PORT") != str(expected_port):
         raise ValueError(
             "Compose Gateway listen port does not match effective configuration"
@@ -138,7 +160,10 @@ def main():
     except ValueError as exc:
         raise ValueError("SPEECH_LISTEN_PORT must be an integer") from exc
     bind = os.environ.get("SPEECH_BIND_IP") or "127.0.0.1"
-    validate(rendered, port, bind)
+    config_gid = os.environ.get("SERVICE_CONFIG_READER_GID") or "65532"
+    if not config_gid.isdecimal() or not 1 <= int(config_gid) <= 65535:
+        raise ValueError("SERVICE_CONFIG_READER_GID must be in 1..65535")
+    validate(rendered, port, bind, config_gid)
     if os.environ.get("STT_CUDA_STATIC_CHECK") == "1":
         validate_cuda_deployment(
             rendered,

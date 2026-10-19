@@ -141,11 +141,25 @@ class Acceptance(unittest.TestCase):
         compose = yaml.safe_load(
             (ROOT / "deployments/compose/compose.yaml").read_text()
         )
-        self.assertEqual(set(compose["networks"]), {"stt_private", "tts_private"})
-        self.assertTrue(all(n["internal"] for n in compose["networks"].values()))
+        self.assertEqual(
+            set(compose["networks"]),
+            {"gateway_publish", "stt_private", "tts_private"},
+        )
+        self.assertTrue(
+            all(
+                compose["networks"][name]["internal"]
+                for name in ("stt_private", "tts_private")
+            )
+        )
+        self.assertEqual(
+            compose["networks"]["gateway_publish"]["driver_opts"][
+                "com.docker.network.bridge.enable_ip_masquerade"
+            ],
+            "false",
+        )
         self.assertEqual(
             set(compose["services"]["gateway"]["networks"]),
-            {"stt_private", "tts_private"},
+            {"gateway_publish", "stt_private", "tts_private"},
         )
         self.assertEqual(set(compose["services"]["stt"]["networks"]), {"stt_private"})
         self.assertEqual(set(compose["services"]["tts"]["networks"]), {"tts_private"})

@@ -1,0 +1,17 @@
+# Template only. Copy to ignored private/ and review every deployment value.
+schema_version: 1
+project_name: speech-platform-m01e-services
+config_reader_gid: REPLACE_WITH_REVIEWED_GROUP_ID
+gateway:
+  host_port: 18080
+  memory_limit: 128m
+  cpu_limit: 1.0
+  pids_limit: 128
+tts:
+  memory_limit: 256m
+  cpu_limit: 1.0
+  pids_limit: 128
+readiness:
+  timeout_seconds: 120
+  poll_interval_seconds: 2
+  probe_timeout_seconds: 2

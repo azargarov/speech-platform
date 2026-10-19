@@ -381,7 +381,11 @@ class DeploymentProfileTests(unittest.TestCase):
             "name": profile["project_name"],
             "services": {
                 "gateway": {
-                    "networks": {"stt_private": None, "tts_private": None},
+                    "networks": {
+                        "gateway_publish": None,
+                        "stt_private": None,
+                        "tts_private": None,
+                    },
                     "ports": [
                         {
                             "mode": "ingress",
@@ -392,7 +396,12 @@ class DeploymentProfileTests(unittest.TestCase):
                         }
                     ],
                 },
-                "tts": {"networks": {"tts_private": None}},
+                "tts": {
+                    "networks": {"tts_private": None},
+                    "group_add": [
+                        str(validated["artifact_access"]["supplementary_read_gid"])
+                    ],
+                },
                 "stt": {
                     "profiles": ["cuda"],
                     "image": validated["image"],
@@ -503,6 +512,12 @@ class DeploymentProfileTests(unittest.TestCase):
                 },
             },
             "networks": {
+                "gateway_publish": {
+                    "driver": "bridge",
+                    "driver_opts": {
+                        "com.docker.network.bridge.enable_ip_masquerade": "false"
+                    },
+                },
                 "stt_private": {"internal": True},
                 "tts_private": {"internal": True},
             },
@@ -1378,6 +1393,48 @@ class DeploymentProfileTests(unittest.TestCase):
             self.assertNotIn("/private/", label_value)
         mutations = (
             (
+                "gateway must attach to the publication network",
+                lambda value: value["services"]["gateway"]["networks"].pop(
+                    "gateway_publish"
+                ),
+            ),
+            (
+                "unexpected service attachment",
+                lambda value: value["services"]["tts"]["networks"].update(
+                    stt_private=None
+                ),
+            ),
+            (
+                "unexpected network definition",
+                lambda value: value["networks"].update(untrusted={}),
+            ),
+            (
+                "missing publication network definition",
+                lambda value: value["networks"].pop("gateway_publish"),
+            ),
+            (
+                "internal publication network",
+                lambda value: value["networks"]["gateway_publish"].update(
+                    internal=True
+                ),
+            ),
+            (
+                "enabled publication masquerading",
+                lambda value: value["networks"]["gateway_publish"][
+                    "driver_opts"
+                ].update({"com.docker.network.bridge.enable_ip_masquerade": "true"}),
+            ),
+            (
+                "non-loopback Gateway publication",
+                lambda value: value["services"]["gateway"]["ports"][0].update(
+                    host_ip="0.0.0.0"
+                ),
+            ),
+            (
+                "published TTS port",
+                lambda value: value["services"]["tts"].update(ports=[{"target": 8082}]),
+            ),
+            (
                 "gpu",
                 lambda value: value["services"]["stt"]["deploy"]["resources"][
                     "reservations"
@@ -1436,6 +1493,10 @@ class DeploymentProfileTests(unittest.TestCase):
                 lambda value: value["services"]["stt"].update(
                     group_add=["not-the-reader-gid"]
                 ),
+            ),
+            (
+                "TTS config reader group",
+                lambda value: value["services"]["tts"].update(group_add=[]),
             ),
             (
                 "configuration set identity",

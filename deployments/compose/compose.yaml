@@ -1,7 +1,7 @@
-name: speech-platform
+name: ${SERVICE_PROJECT_NAME:-speech-platform}
 services:
   gateway:
-    image: speech-platform-gateway:local
+    image: ${GATEWAY_IMAGE:-speech-platform-gateway:local}
     build:
       context: ../..
       dockerfile: deployments/compose/gateway.Dockerfile
@@ -12,12 +12,16 @@ services:
     ports:
       - "${SPEECH_BIND_IP:-127.0.0.1}:${SPEECH_PORT:-8080}:${SPEECH_LISTEN_PORT:-8080}"
     volumes:
-      - ../../configs/gateway.yaml:/config/gateway.yaml:ro
-    networks: [stt_private, tts_private]
+      - ${GATEWAY_CONFIG:-../../configs/gateway.yaml}:/config/gateway.yaml:ro
+    networks: [gateway_publish, stt_private, tts_private]
     environment:
       SPEECH_LISTEN_PORT: "${SPEECH_LISTEN_PORT:-8080}"
+    labels:
+      com.speech-platform.deployment-identity-sha256: ${GATEWAY_DEPLOYMENT_IDENTITY_SHA256:-unmanaged}
+      com.speech-platform.configuration-sha256: ${GATEWAY_CONFIG_SHA256:-unmanaged}
     read_only: true
     user: "65532:65532"
+    group_add: ["${SERVICE_CONFIG_READER_GID:-65532}"]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     mem_limit: ${GATEWAY_MEMORY:-128m}
@@ -36,6 +40,7 @@ services:
     networks: [stt_private]
     read_only: true
     user: "65532:65532"
+    group_add: ["${SERVICE_CONFIG_READER_GID:-65532}"]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     mem_limit: ${STT_MEMORY:-256m}
@@ -44,7 +49,7 @@ services:
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
   tts:
-    image: speech-platform-tts-health-only:local
+    image: ${TTS_IMAGE:-speech-platform-tts-health-only:local}
     build:
       context: ../..
       dockerfile: deployments/compose/worker.Dockerfile
@@ -53,10 +58,11 @@ services:
         SERVICE_ROLE: tts-health-only
     command: ["services.tts.main", "--config", "/config/tts.yaml"]
     volumes:
-      - ../../configs/tts.yaml:/config/tts.yaml:ro
+      - ${TTS_CONFIG:-../../configs/tts.yaml}:/config/tts.yaml:ro
     networks: [tts_private]
     read_only: true
     user: "65532:65532"
+    group_add: ["${SERVICE_CONFIG_READER_GID:-65532}"]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     mem_limit: ${TTS_MEMORY:-256m}
@@ -64,7 +70,14 @@ services:
     pids_limit: ${TTS_PIDS:-128}
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
+    labels:
+      com.speech-platform.deployment-identity-sha256: ${TTS_DEPLOYMENT_IDENTITY_SHA256:-unmanaged}
+      com.speech-platform.configuration-sha256: ${TTS_CONFIG_SHA256:-unmanaged}
 networks:
+  gateway_publish:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
   stt_private:
     internal: true
   tts_private:

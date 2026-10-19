@@ -119,8 +119,69 @@ def provision_models(
     store_root: str | Path,
     repository_root: Path,
     download_file: DownloadFile,
+    *,
+    directory_mode: int = 0o700,
+    file_mode: int = 0o600,
+    expected_owner_uid: int | None = None,
+    expected_group_gid: int | None = None,
 ) -> list[ModelResult]:
-    root = _store_root(store_root, create=True)
+    if directory_mode not in {0o700, 0o750, 0o2750} or file_mode not in {
+        0o600,
+        0o640,
+    }:
+        raise ModelProvisionError("model staging modes are invalid")
+    if (expected_owner_uid is None) != (expected_group_gid is None):
+        raise ModelProvisionError(
+            "model staging owner and group must be configured together"
+        )
+    if expected_group_gid is not None and (
+        directory_mode != 0o2750 or file_mode != 0o640
+    ):
+        raise ModelProvisionError("group-readable staging requires modes 2750 and 0640")
+    if expected_owner_uid is not None and os.geteuid() != expected_owner_uid:
+        raise ModelProvisionError(
+            "model staging owner does not match the deployment profile"
+        )
+    if expected_group_gid is not None and os.getegid() != expected_group_gid:
+        raise ModelProvisionError(
+            "model staging requires the configured reader group as the primary group"
+        )
+    root_path = Path(store_root)
+    root_preexisting = root_path.exists()
+    if expected_group_gid is not None and not root_path.parent.is_dir():
+        raise ModelProvisionError("model staging store parent must already exist")
+    if (
+        expected_group_gid is not None
+        and root_path.parent.stat().st_gid != expected_group_gid
+    ):
+        raise ModelProvisionError(
+            "model staging store parent must use the configured reader group"
+        )
+    root = _store_root(root_path, create=True)
+    if not root_preexisting and (
+        expected_owner_uid is not None or expected_group_gid is not None
+    ):
+        os.chmod(root, directory_mode)
+    if expected_owner_uid is not None or expected_group_gid is not None:
+        root_info = root.stat()
+        root_mode = root_info.st_mode & 0o7777
+        if (
+            (not root.is_dir())
+            or (
+                expected_owner_uid is not None
+                and root_info.st_uid != expected_owner_uid
+            )
+            or (
+                expected_group_gid is not None
+                and root_info.st_gid != expected_group_gid
+            )
+            or (expected_group_gid is not None and root_mode & 0o007)
+            or (expected_group_gid is not None and root_mode & 0o020)
+            or (expected_group_gid is not None and (root_mode & 0o2750) != 0o2750)
+        ):
+            raise ModelProvisionError(
+                "model staging store ownership does not match the deployment profile"
+            )
     results = []
     for service_name, service in release["services"].items():
         for model in service["required_model_artifacts"]:
@@ -140,9 +201,9 @@ def provision_models(
                 os.chmod(staging, 0o700)
                 staging_manifest = staging / "manifest.yaml"
                 shutil.copyfile(manifest_path, staging_manifest)
-                os.chmod(staging_manifest, 0o600)
+                os.chmod(staging_manifest, file_mode)
                 staged_artifacts = staging / "artifact"
-                staged_artifacts.mkdir(mode=0o700)
+                staged_artifacts.mkdir(mode=directory_mode)
                 for entry in artifact_manifest["files"]:
                     relative_path = PurePosixPath(entry["path"])
                     target = staged_artifacts.joinpath(*relative_path.parts)
@@ -152,7 +213,28 @@ def provision_models(
                         raise ModelProvisionError(
                             f"download did not produce a regular file for {entry['path']}"
                         )
-                    os.chmod(target, 0o600)
+                    os.chmod(target, file_mode)
+
+                for directory in sorted(
+                    (path for path in staging.rglob("*") if path.is_dir()),
+                    key=lambda path: len(path.parts),
+                    reverse=True,
+                ):
+                    os.chmod(directory, directory_mode)
+                os.chmod(staging, directory_mode)
+                if expected_owner_uid is not None or expected_group_gid is not None:
+                    for path in (staging, *staging.rglob("*")):
+                        info = path.stat()
+                        if (
+                            expected_owner_uid is not None
+                            and info.st_uid != expected_owner_uid
+                        ) or (
+                            expected_group_gid is not None
+                            and info.st_gid != expected_group_gid
+                        ):
+                            raise ModelProvisionError(
+                                "staged model ownership differs from the deployment profile"
+                            )
 
                 _verify_directory(model, staging)
                 try:

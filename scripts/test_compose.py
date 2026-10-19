@@ -8,6 +8,12 @@ from scripts.check_compose import validate, validate_cuda_deployment
 def rendered(port=8080, bind="127.0.0.1"):
     return {
         "networks": {
+            "gateway_publish": {
+                "driver": "bridge",
+                "driver_opts": {
+                    "com.docker.network.bridge.enable_ip_masquerade": "false"
+                },
+            },
             "stt_private": {"internal": True},
             "tts_private": {"internal": True},
         },
@@ -22,7 +28,11 @@ def rendered(port=8080, bind="127.0.0.1"):
                 "mem_limit": "134217728",
                 "cpus": 1,
                 "pids_limit": 128,
-                "networks": {"stt_private": None, "tts_private": None},
+                "networks": {
+                    "gateway_publish": None,
+                    "stt_private": None,
+                    "tts_private": None,
+                },
             },
             "stt": worker("stt_private"),
             "tts": worker("tts_private"),
@@ -39,6 +49,7 @@ def worker(network):
         "mem_limit": "268435456",
         "cpus": 1,
         "pids_limit": 128,
+        "group_add": ["65532"],
         "networks": {network: None},
     }
 
@@ -49,6 +60,14 @@ class ComposeConfig(unittest.TestCase):
 
     def test_port_override(self):
         validate(rendered(8765), 8765, "127.0.0.1")
+
+    def test_tts_requires_config_reader_group(self):
+        config = rendered()
+        config["services"]["tts"]["group_add"] = ["988"]
+        validate(config, 8080, "127.0.0.1", "988")
+        config["services"]["tts"].pop("group_add")
+        with self.assertRaisesRegex(ValueError, "TTS configuration reader"):
+            validate(config, 8080, "127.0.0.1", "988")
 
     def test_invalid_port(self):
         with self.assertRaisesRegex(ValueError, "1..65535"):
@@ -88,6 +107,31 @@ class ComposeConfig(unittest.TestCase):
         config = rendered()
         config["networks"]["tts_private"]["internal"] = False
         with self.assertRaisesRegex(ValueError, "networks must be internal"):
+            validate(config, 8080, "127.0.0.1")
+
+    def test_gateway_publication_network_disables_masquerading(self):
+        config = rendered()
+        config["networks"]["gateway_publish"]["driver_opts"][
+            "com.docker.network.bridge.enable_ip_masquerade"
+        ] = "true"
+        with self.assertRaisesRegex(ValueError, "disable bridge masquerading"):
+            validate(config, 8080, "127.0.0.1")
+
+    def test_network_definitions_reject_extra_unreviewed_options(self):
+        config = rendered()
+        config["networks"]["gateway_publish"]["attachable"] = True
+        with self.assertRaisesRegex(ValueError, "disable bridge masquerading"):
+            validate(config, 8080, "127.0.0.1")
+
+        config = rendered()
+        config["networks"]["stt_private"]["driver"] = "overlay"
+        with self.assertRaisesRegex(ValueError, "worker networks"):
+            validate(config, 8080, "127.0.0.1")
+
+    def test_extra_network_declaration_is_rejected(self):
+        config = rendered()
+        config["networks"]["unexpected"] = {"internal": True}
+        with self.assertRaisesRegex(ValueError, "networks are required"):
             validate(config, 8080, "127.0.0.1")
 
     def test_cuda_static_check_rejects_broad_gpu_allocation(self):

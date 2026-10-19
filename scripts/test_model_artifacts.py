@@ -1,6 +1,7 @@
 """Synthetic tests for immutable model cache validation and staging."""
 
 import hashlib
+import os
 import io
 import json
 import tempfile
@@ -126,6 +127,28 @@ class ModelArtifactProvisioning(unittest.TestCase):
         )
         self.assertEqual(reused[0].status, "reused")
         self.assertEqual(downloads, ["weights.bin"])
+
+    def test_group_readable_staging_uses_the_configured_owner_and_reader_group(self):
+        model, contents = self.create_model()
+        store = self.root / "group-readable-store"
+        results = provision_models(
+            self.release(model),
+            store,
+            self.root,
+            self.write_download(contents),
+            directory_mode=0o2750,
+            file_mode=0o640,
+            expected_owner_uid=os.geteuid(),
+            expected_group_gid=os.getegid(),
+        )
+        self.assertEqual(results[0].status, "installed")
+        directory = model_directory(store, model)
+        self.assertEqual(directory.stat().st_mode & 0o7777, 0o2750)
+        self.assertEqual((directory / "manifest.yaml").stat().st_mode & 0o777, 0o640)
+        self.assertEqual(
+            (directory / "artifact/weights.bin").stat().st_mode & 0o777, 0o640
+        )
+        self.assertEqual(directory.stat().st_gid, os.getegid())
 
     def test_missing_cache_is_reported_without_network_activity(self):
         model, _ = self.create_model()
