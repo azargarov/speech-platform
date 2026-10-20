@@ -63,6 +63,7 @@ class FakeApplication:
         language="auto",
         timestamps=False,
         context=None,
+        output_language="auto",
     ):
         lease.finish()
         if self.failure is not None:
@@ -116,6 +117,17 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         metrics_body = await metrics.text()
         self.assertIn('speech_stt_requests_total{outcome="success"} 1', metrics_body)
         self.assertNotIn("synthetic transcript", metrics_body)
+
+    async def test_source_language_alias_conflict_is_rejected(self):
+        form = self.form(timestamps="false")
+        form.add_field("source_language", "ru")
+        response = await self.client.post(
+            "/internal/v1/transcriptions",
+            data=form,
+            headers={"X-Request-Timeout-Ms": "4000"},
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual((await response.json())["code"], "invalid_input")
 
     async def test_bad_timeout_and_unsupported_stream_are_safe_json(self):
         bad_timeout = await self.client.post(

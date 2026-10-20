@@ -122,6 +122,71 @@ class DecodeTests(unittest.TestCase):
 
 
 class AdapterContractTests(unittest.TestCase):
+    def test_translation_to_english_preserves_raw_text_and_rejects_other_targets(self):
+        class FakeModel:
+            def __init__(self):
+                self.tasks = []
+
+            def transcribe(self, _audio, **kwargs):
+                self.tasks.append(kwargs["task"])
+                text = "Hello there" if kwargs["task"] == "translate" else "Привет"
+                return iter(
+                    [SimpleNamespace(start=0.0, end=0.2, text=text)]
+                ), SimpleNamespace(language="ru", language_probability=0.91)
+
+        class Resampler:
+            def __init__(self, **_kwargs):
+                pass
+
+            def resample(self, frame):
+                return [] if frame is None else [frame]
+
+        class Frame:
+            def to_ndarray(self):
+                return numpy.zeros((1, 3200), dtype=numpy.float32)
+
+        class Container:
+            streams = SimpleNamespace(audio=[object()])
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def decode(self, **_kwargs):
+                return [Frame()]
+
+        modules = SimpleNamespace(
+            av=SimpleNamespace(
+                open=lambda *_args, **_kwargs: Container(), AudioResampler=Resampler
+            ),
+            numpy=numpy,
+        )
+        model = FakeModel()
+        loaded = FasterWhisperLoadedModel(
+            model,
+            ModelMetadata(ModelIdentity("whisper", "a" * 40), frozenset(), True, True),
+            options(),
+            modules,
+        )
+        translated = loaded.transcribe(
+            TranscriptionRequest(wav_bytes(), "audio/wav", output_language="en"),
+            OperationContext(),
+        )
+        self.assertEqual(translated.transcription, "Привет")
+        self.assertEqual(translated.text, "Hello there")
+        self.assertEqual(translated.output_language, "en")
+        self.assertTrue(translated.translated)
+        self.assertEqual(translated.language_probability, 0.91)
+        self.assertEqual(model.tasks, ["transcribe", "translate"])
+        with self.assertRaises(SpeechFailure) as caught:
+            loaded.transcribe(
+                TranscriptionRequest(wav_bytes(), "audio/wav", output_language="sv"),
+                OperationContext(),
+            )
+        self.assertEqual(caught.exception.code, FailureCode.UNSUPPORTED_TRANSLATION)
+
     def test_cpu_load_uses_local_artifact_explicit_precision_and_threads(self):
         calls = {}
 
@@ -155,6 +220,9 @@ class AdapterContractTests(unittest.TestCase):
         self.assertEqual(calls["cpu_threads"], 2)
         self.assertTrue(calls["local_files_only"])
         self.assertTrue(loaded.metadata.segment_timestamps)
+        self.assertIsNotNone(loaded._model)
+        loaded.unload(OperationContext())
+        self.assertIsNone(loaded._model)
 
     def test_unsupported_cuda_compute_type_fails_without_cpu_fallback(self):
         modules = SimpleNamespace(

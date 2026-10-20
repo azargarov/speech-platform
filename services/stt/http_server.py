@@ -56,11 +56,10 @@ def create_http_app(application):
                 context = _operation_context(
                     request, application.config.admission.request_timeout_seconds
                 )
-                if request.content_length is None:
-                    raise SpeechFailure(
-                        FailureCode.INVALID_INPUT, "content length is required"
-                    )
-                if request.content_length > maximum:
+                if (
+                    request.content_length is not None
+                    and request.content_length > maximum
+                ):
                     raise SpeechFailure(FailureCode.INPUT_LIMIT)
                 if request.content_type != "multipart/form-data":
                     raise SpeechFailure(FailureCode.UNSUPPORTED_MEDIA_TYPE)
@@ -77,6 +76,8 @@ def create_http_app(application):
                             not in {
                                 "audio",
                                 "language",
+                                "source_language",
+                                "output_language",
                                 "model",
                                 "timestamps",
                                 "stream",
@@ -116,7 +117,20 @@ def create_http_app(application):
                         raise SpeechFailure(
                             FailureCode.INVALID_INPUT, "audio is required"
                         )
-                    language = fields.get("language", "auto")
+                    if (
+                        "language" in fields
+                        and "source_language" in fields
+                        and fields["language"].lower()
+                        != fields["source_language"].lower()
+                    ):
+                        raise SpeechFailure(
+                            FailureCode.INVALID_INPUT,
+                            "language and source_language conflict",
+                        )
+                    language = fields.get(
+                        "source_language", fields.get("language", "auto")
+                    )
+                    output_language = fields.get("output_language", "auto")
                     model = fields.get("model")
                     timestamps = _boolean(fields.get("timestamps", "false"))
                     if _boolean(fields.get("stream", "false")):
@@ -130,11 +144,24 @@ def create_http_app(application):
                             language,
                             timestamps,
                             context,
+                            output_language,
                         )
                     )
                     result = await _wait_for_result(worker_task, context, request)
                 set_outcome("success")
-                payload = {"text": result.text, "language": result.language}
+                payload = {
+                    "text": result.text,
+                    "language": result.language,
+                    "transcription": result.transcription
+                    if result.transcription is not None
+                    else result.text,
+                    "detected_language": result.language,
+                    "source_language": result.language,
+                    "output_language": result.output_language or result.language,
+                    "translated": result.translated,
+                }
+                if result.language_probability is not None:
+                    payload["language_probability"] = result.language_probability
                 if result.segments is not None:
                     payload["segments"] = [
                         {
@@ -163,6 +190,15 @@ def create_http_app(application):
                     set_outcome("timeout")
                     raise ConnectionResetError
                 raise
+            except web.HTTPRequestEntityTooLarge:
+                set_outcome("input_limit")
+                return web.json_response(
+                    {
+                        "code": FailureCode.INPUT_LIMIT.value,
+                        "message": "request exceeds the configured limit",
+                    },
+                    status=413,
+                )
             except (ValueError, web.HTTPException):
                 set_outcome("invalid_input")
                 return web.json_response(
@@ -294,6 +330,8 @@ def _metric_outcome(code):
         FailureCode.INVALID_INPUT,
         FailureCode.UNSUPPORTED_OPTION,
         FailureCode.UNSUPPORTED_MEDIA_TYPE,
+        FailureCode.UNSUPPORTED_DETECTED_LANGUAGE,
+        FailureCode.UNSUPPORTED_TRANSLATION,
     }:
         return "invalid_input"
     if code == FailureCode.OVERLOADED:

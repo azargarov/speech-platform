@@ -5,6 +5,7 @@ import (
 	"gopkg.in/yaml.v3"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -20,6 +21,9 @@ type Config struct {
 	WriteTimeout    string `yaml:"write_timeout"`
 	IdleTimeout     string `yaml:"idle_timeout"`
 	ShutdownTimeout string `yaml:"shutdown_timeout"`
+	STTURL          string `yaml:"stt_url"`
+	APIToken        string `yaml:"api_token"`
+	STTTimeout      string `yaml:"stt_timeout"`
 }
 
 const PublicMaxRequestBytes int64 = 25 * 1024 * 1024
@@ -47,6 +51,9 @@ func Load(path string) (Config, error) {
 		}
 		c.ListenPort = port
 	}
+	if value, ok := os.LookupEnv("SPEECH_API_TOKEN"); ok && value != "" {
+		c.APIToken = value
+	}
 	return c, c.Validate()
 }
 func (c Config) Validate() error {
@@ -58,6 +65,17 @@ func (c Config) Validate() error {
 		if e != nil || d <= 0 {
 			return fmt.Errorf("all timeouts must be positive durations")
 		}
+	}
+	workerURL, err := url.Parse(c.STTURL)
+	if err != nil || workerURL.Scheme != "http" || workerURL.Host == "" || workerURL.User != nil || workerURL.RawQuery != "" || workerURL.Fragment != "" || workerURL.Path != "" && workerURL.Path != "/" {
+		return fmt.Errorf("stt_url is required")
+	}
+	if c.APIToken != "" && len(c.APIToken) < 32 {
+		return fmt.Errorf("SPEECH_API_TOKEN must contain at least 32 characters when configured")
+	}
+	sttTimeout, err := time.ParseDuration(c.STTTimeout)
+	if err != nil || sttTimeout <= 0 || sttTimeout > 10*time.Minute {
+		return fmt.Errorf("stt_timeout must be a positive duration no greater than 10m")
 	}
 	return nil
 }

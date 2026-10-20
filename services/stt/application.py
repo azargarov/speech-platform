@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import re
 import time
 
 from services.stt.admission import AdmissionController
@@ -32,6 +31,7 @@ from services.stt.supervisor import InferenceSupervisor
 SUPPORTED_MEDIA_TYPES = frozenset(
     {"audio/wav", "audio/flac", "audio/mpeg", "audio/ogg", "audio/mp4"}
 )
+STT_V1_LANGUAGES = frozenset({"ru", "en", "sv"})
 
 
 class ModelCatalog:
@@ -155,26 +155,32 @@ class STTApplication:
                 )
             language = None
         else:
-            if not re.fullmatch(
-                r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*", request.language
-            ):
+            language_code = request.language.lower()
+            if language_code not in STT_V1_LANGUAGES:
                 raise SpeechFailure(
-                    FailureCode.INVALID_INPUT, "language must be a BCP-47 tag"
-                )
-            language_code = request.language.lower().split("-", 1)[0]
-            if metadata.languages and language_code not in {
-                item.lower() for item in metadata.languages
-            }:
-                raise SpeechFailure(
-                    FailureCode.UNSUPPORTED_OPTION, "requested language is unavailable"
+                    FailureCode.INVALID_INPUT,
+                    "source_language must be auto, ru, en, or sv",
                 )
             language = language_code
+        output_language = request.output_language
+        if not isinstance(
+            output_language, str
+        ) or output_language.lower() not in STT_V1_LANGUAGES | {"auto"}:
+            raise SpeechFailure(
+                FailureCode.INVALID_INPUT, "output_language must be auto, ru, en, or sv"
+            )
+        output_language = output_language.lower()
         if request.timestamps and not metadata.segment_timestamps:
             raise SpeechFailure(
                 FailureCode.UNSUPPORTED_OPTION, "segment timestamps are unavailable"
             )
         normalized = TranscriptionRequest(
-            request.audio, media_type, model.alias, language, request.timestamps
+            request.audio,
+            media_type,
+            model.alias,
+            language,
+            request.timestamps,
+            output_language,
         )
         try:
             result = self._admission.submit(normalized, context, _upload_lease)
@@ -183,11 +189,17 @@ class STTApplication:
                 self._latch_fault()
             raise
         self._validate_result(result)
+        if result.language.lower() not in STT_V1_LANGUAGES:
+            raise SpeechFailure(FailureCode.UNSUPPORTED_DETECTED_LANGUAGE)
         result_size = len(
             json.dumps(
                 {
                     "text": result.text,
                     "language": result.language,
+                    "transcription": result.transcription,
+                    "language_probability": result.language_probability,
+                    "output_language": result.output_language,
+                    "translated": result.translated,
                     "segments": [segment.__dict__ for segment in result.segments]
                     if result.segments is not None
                     else None,
@@ -212,10 +224,13 @@ class STTApplication:
         language: str | None = None,
         timestamps: bool = False,
         context: OperationContext | None = None,
+        output_language: str = "auto",
     ):
         audio = upload_lease.finish()
         return self.transcribe(
-            TranscriptionRequest(audio, media_type, model_alias, language, timestamps),
+            TranscriptionRequest(
+                audio, media_type, model_alias, language, timestamps, output_language
+            ),
             context,
             _upload_lease=upload_lease,
         )
@@ -265,6 +280,26 @@ class STTApplication:
         ):
             raise SpeechFailure(
                 FailureCode.BACKEND_FAILED, "inference returned an invalid result"
+            )
+        if result.transcription is not None and not isinstance(
+            result.transcription, str
+        ):
+            raise SpeechFailure(
+                FailureCode.BACKEND_FAILED, "inference returned invalid transcription"
+            )
+        if result.language_probability is not None and (
+            type(result.language_probability) not in (float, int)
+            or not math.isfinite(result.language_probability)
+            or not 0 <= result.language_probability <= 1
+        ):
+            raise SpeechFailure(
+                FailureCode.BACKEND_FAILED,
+                "inference returned invalid language probability",
+            )
+        if type(result.translated) is not bool:
+            raise SpeechFailure(
+                FailureCode.BACKEND_FAILED,
+                "inference returned invalid translation status",
             )
         if result.segments is None:
             return

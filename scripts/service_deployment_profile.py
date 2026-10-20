@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from urllib.parse import urlparse
 from pathlib import Path
 
 import yaml
@@ -33,6 +34,7 @@ GATEWAY_FIELDS = {
     "idle_timeout",
     "shutdown_timeout",
 }
+GATEWAY_OPTIONAL_FIELDS = {"stt_url", "stt_timeout"}
 
 
 def _fields(value, expected: set[str], label: str) -> None:
@@ -47,6 +49,20 @@ def _fields(value, expected: set[str], label: str) -> None:
         if extra:
             details.append("unsupported " + ", ".join(sorted(extra)))
         raise ValueError(f"{label} fields are invalid: {'; '.join(details)}")
+
+
+def _duration_seconds(value: str) -> float:
+    components = re.findall(r"([0-9]+(?:\.[0-9]+)?)(ns|us|µs|ms|s|m|h)", value)
+    multiplier = {
+        "ns": 1e-9,
+        "us": 1e-6,
+        "µs": 1e-6,
+        "ms": 1e-3,
+        "s": 1,
+        "m": 60,
+        "h": 3600,
+    }
+    return sum(float(number) * multiplier[unit] for number, unit in components)
 
 
 def _resource_settings(value: dict, label: str) -> dict:
@@ -117,7 +133,19 @@ def load_gateway_config(path: str | Path) -> dict:
             config = yaml.load(stream, Loader=StrictLoader)
     except (OSError, yaml.YAMLError, ValueError) as error:
         raise ValueError("Gateway configuration is unavailable or invalid") from error
-    _fields(config, GATEWAY_FIELDS, "Gateway configuration")
+    if not isinstance(config, dict):
+        raise ValueError("Gateway configuration must be a mapping")
+    missing = GATEWAY_FIELDS - set(config)
+    extra = set(config) - GATEWAY_FIELDS - GATEWAY_OPTIONAL_FIELDS
+    if missing or extra:
+        parts = []
+        if missing:
+            parts.append("missing " + ", ".join(sorted(missing)))
+        if extra:
+            parts.append("unsupported " + ", ".join(sorted(extra)))
+        raise ValueError(
+            "Gateway configuration fields are invalid: " + "; ".join(parts)
+        )
     if config["listen_host"] != "0.0.0.0":
         raise ValueError("Gateway listen_host must accept the isolated container port")
     port = config["listen_port"]
@@ -132,16 +160,18 @@ def load_gateway_config(path: str | Path) -> dict:
         value = config[key]
         if not isinstance(value, str) or not GO_DURATION_PATTERN.fullmatch(value):
             raise ValueError(f"Gateway {key} must be a positive Go duration")
-        components = re.findall(r"([0-9]+(?:\.[0-9]+)?)(ns|us|µs|ms|s|m|h)", value)
-        multiplier = {
-            "ns": 1e-9,
-            "us": 1e-6,
-            "µs": 1e-6,
-            "ms": 1e-3,
-            "s": 1,
-            "m": 60,
-            "h": 3600,
-        }
-        if sum(float(number) * multiplier[unit] for number, unit in components) <= 0:
+        if _duration_seconds(value) <= 0:
             raise ValueError(f"Gateway {key} must be a positive Go duration")
+    if "stt_url" in config:
+        worker = urlparse(
+            config["stt_url"] if isinstance(config["stt_url"], str) else ""
+        )
+        if worker.scheme != "http" or not worker.netloc or worker.path not in ("", "/"):
+            raise ValueError("Gateway stt_url must be an internal HTTP origin")
+    if "stt_timeout" in config:
+        value = config["stt_timeout"]
+        if not isinstance(value, str) or not GO_DURATION_PATTERN.fullmatch(value):
+            raise ValueError("Gateway stt_timeout must be a positive Go duration")
+        if _duration_seconds(value) <= 0:
+            raise ValueError("Gateway stt_timeout must be a positive Go duration")
     return config

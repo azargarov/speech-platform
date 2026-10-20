@@ -152,34 +152,54 @@ class FasterWhisperLoadedModel:
             segments, info = self._model.transcribe(
                 audio,
                 language=request.language,
+                task="transcribe",
                 beam_size=self._options.beam_size,
                 word_timestamps=False,
                 vad_filter=False,
             )
-            result_segments = []
-            text_parts = []
-            result_bytes = 0
-            for segment in segments:
-                context.check()
-                text = str(segment.text)
-                result_bytes += len(text.encode("utf-8")) + (
-                    64 if request.timestamps else 0
-                )
-                if result_bytes > self._options.max_result_bytes:
-                    raise SpeechFailure(FailureCode.RESOURCE_EXHAUSTED)
-                text_parts.append(text)
-                if request.timestamps:
-                    result_segments.append(
-                        Segment(float(segment.start), float(segment.end), text)
-                    )
+            transcription, result_segments = _collect_segments(
+                segments, request, context, self._options.max_result_bytes
+            )
             context.check()
             language = getattr(info, "language", None)
             if not isinstance(language, str) or not language:
                 raise SpeechFailure(FailureCode.LANGUAGE_UNDETECTED)
+            language = language.lower()
+            output_language = request.output_language
+            target = language if output_language == "auto" else output_language
+            text = transcription
+            translated = False
+            if target != language:
+                if language not in {"ru", "en", "sv"}:
+                    raise SpeechFailure(FailureCode.UNSUPPORTED_DETECTED_LANGUAGE)
+                if target != "en":
+                    raise SpeechFailure(FailureCode.UNSUPPORTED_TRANSLATION)
+                translated_segments, _ = self._model.transcribe(
+                    audio,
+                    language=language,
+                    task="translate",
+                    beam_size=self._options.beam_size,
+                    word_timestamps=False,
+                    vad_filter=False,
+                )
+                text, _ = _collect_segments(
+                    translated_segments,
+                    request,
+                    context,
+                    self._options.max_result_bytes,
+                )
+                translated = True
+            probability = getattr(info, "language_probability", None)
+            if request.language is not None or type(probability) not in (int, float):
+                probability = None
             return TranscriptionResult(
-                "".join(text_parts),
+                text,
                 language,
                 tuple(result_segments) if request.timestamps else None,
+                transcription,
+                float(probability) if probability is not None else None,
+                target,
+                translated,
             )
         except SpeechFailure:
             raise
@@ -191,6 +211,23 @@ class FasterWhisperLoadedModel:
     def unload(self, context: OperationContext):
         context.check()
         self._model = None
+
+
+def _collect_segments(segments, request, context, maximum):
+    parts = []
+    timestamps = []
+    size = 0
+    for segment in segments:
+        context.check()
+        text = str(segment.text)
+        size += len(text.encode("utf-8")) + (64 if request.timestamps else 0)
+        if size > maximum:
+            raise SpeechFailure(FailureCode.RESOURCE_EXHAUSTED)
+        parts.append(text)
+        if request.timestamps:
+            timestamps.append(Segment(float(segment.start), float(segment.end), text))
+    context.check()
+    return "".join(parts), timestamps
 
 
 def _decode_audio(audio_bytes, options, context, modules):

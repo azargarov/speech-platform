@@ -18,6 +18,7 @@ from services.stt.domain import (
     OperationContext,
     SpeechFailure,
     TranscriptionRequest,
+    TranscriptionResult,
     VerifiedArtifact,
 )
 from services.stt.lifecycle import Lifecycle, ModelState, WorkerState
@@ -544,6 +545,24 @@ class SupervisorTests(unittest.TestCase):
 
 
 class ApplicationTests(unittest.TestCase):
+    def test_v1_language_validation_and_unsupported_detection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory)
+            with self.assertRaises(SpeechFailure) as invalid:
+                app.transcribe(
+                    TranscriptionRequest(b"x", "audio/wav", output_language="de")
+                )
+            self.assertEqual(invalid.exception.code, FailureCode.INVALID_INPUT)
+            app.runner.transcribe = lambda _request, _context: TranscriptionResult(
+                "text", "de"
+            )
+            with self.assertRaises(SpeechFailure) as unsupported:
+                app.transcribe(TranscriptionRequest(b"x", "audio/wav"))
+            self.assertEqual(
+                unsupported.exception.code, FailureCode.UNSUPPORTED_DETECTED_LANGUAGE
+            )
+            app.close()
+
     def test_success_alias_capabilities_and_release(self):
         with tempfile.TemporaryDirectory() as directory:
             app = make_application(directory)
@@ -561,14 +580,23 @@ class ApplicationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             app = make_application(directory, auto=False, timestamps=False)
-            for request in (
-                TranscriptionRequest(b"x", "audio/wav"),
-                TranscriptionRequest(b"x", "audio/wav", language="fr"),
-                TranscriptionRequest(b"x", "audio/wav", timestamps=True),
+            for request, expected in (
+                (
+                    TranscriptionRequest(b"x", "audio/wav"),
+                    FailureCode.UNSUPPORTED_OPTION,
+                ),
+                (
+                    TranscriptionRequest(b"x", "audio/wav", language="fr"),
+                    FailureCode.INVALID_INPUT,
+                ),
+                (
+                    TranscriptionRequest(b"x", "audio/wav", timestamps=True),
+                    FailureCode.UNSUPPORTED_OPTION,
+                ),
             ):
                 with self.assertRaises(SpeechFailure) as caught:
                     app.transcribe(request)
-                self.assertEqual(caught.exception.code, FailureCode.UNSUPPORTED_OPTION)
+                self.assertEqual(caught.exception.code, expected)
             app.close()
 
     def test_recoverable_resource_failure_releases_admission_for_next_request(self):

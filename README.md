@@ -1,41 +1,135 @@
 # Speech Platform
 
-Application-agnostic, self-hosted speech services. The product name is VoiceService; the repository remains `speech-platform`. The repository contains a production STT worker and a CUDA STT runtime smoke baseline. The target-local STT baseline in [releases/stt-cuda-baseline-001.yaml](releases/stt-cuda-baseline-001.yaml) records a healthy container and two successful HTTP transcriptions. This is a working experimental runtime, not a reproducible platform installation or capacity guarantee. The Gateway's public inference routes/authentication and TTS inference remain unimplemented; see [PLANS.md](PLANS.md) and the [architecture redesign plan](docs/architecture/platform-redesign.md).
+Speech Platform is a self-hosted set of reusable speech services. STT v1 is the first product release: a CUDA faster-whisper worker behind one Gateway API. It supports Russian, English and Swedish transcription, automatic or request-selected spoken language, and request-selected output language. TTS remains health-only. Voice dictation and text transformation are future work.
 
-## Development
+Git releases and the root `compose.yaml` are the normal deployment source of truth. The persistent model store stays on the host and is mounted read-only. Ordinary install and recovery do not use `private/deployment/`, generation state or snapshots. See [ADR 0018](docs/adr/0018-git-compose-product-operations.md).
 
-Requires Go 1.27.2, Python 3.13.9, Docker Engine with Compose, and Make. No GPU is needed for verification or image builds. The GitHub Actions workflow uses the same Make targets on Ubuntu 24.04.
+## Requirements
+
+- Linux x86_64 with Docker Engine and the Docker Compose plugin.
+- NVIDIA GPU, driver and NVIDIA Container Toolkit configured for Docker.
+- Python 3.13.9, Go 1.27.2 and Make for local verification and image builds.
+- The verified `large-v3-turbo` model release in a host model store readable by the STT worker. The default is `/srv/speech-platform/models`; model files are not downloaded at startup.
+- A host port available for the Gateway (default 8080).
+
+The model identity is manifest SHA-256 `86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6`, release `v0.1.2`, model `large-v3-turbo`. Keep existing files in place; this deployment mounts the digest directory read-only.
+
+## Install
+
+Use a supported STT v1 Git release. The `v0.1.2` model release identifies the model artifact; it is not itself a release containing this new Gateway and Compose product path.
+
+```sh
+git clone <repository-url> speech-platform
+cd speech-platform
+git checkout <supported-stt-v1-release>
+cp .env.example .env
+chmod 600 .env
+${EDITOR:-vi} .env
+make plan
+make install
+make status
+```
+
+Configure these values in `.env` when needed:
+
+- `MODEL_STORE`: absolute path to the existing model store.
+- `STT_GPU_DEVICE`: host GPU index; the worker sees the selected device as GPU 0.
+- `SPEECH_BIND_IP` and `SPEECH_PORT`: API bind address and port. The default bind is loopback.
+- `SPEECH_API_TOKEN`: required when the host API bind is not loopback. Use a random secret of at least 32 characters. Keep `.env` private.
+- `SPEECH_API_URL`: optional HTTPS URL for the TLS reverse proxy used by `make test-stt`; configure it for non-loopback exposure. The Gateway itself serves HTTP, so keep its host port loopback-only unless a firewall permits access only from the TLS proxy.
+- `MODEL_READ_GID`: supplementary group allowed to read model artifacts (default 988).
+
+`make plan` validates Docker/Compose, NVIDIA GPU selection, the pinned release and model artifact, API exposure settings and rendered Compose configuration. It does not start or change containers. `make install` requires a clean Git checkout, builds the pinned-source images, starts the canonical Compose project, waits for readiness and prints the API endpoint. Re-running it is safe. It acts only on the configured Compose project name (`speech-platform` by default).
+
+If the model-store parent is root-owned, run `sudo -v` before `make plan`; the command uses cached sudo authorization for the read-only artifact check. It does not make Compose run as root. Add the operator to the Docker access group using the host’s normal administration process.
+
+The install builds from the checked-out Git source. Docker base images, CUDA Python dependencies and model artifact identity are pinned. The STT v1 changes have not been published as a new image or Git release; use a supported tag after one is approved and created.
+
+## STT API
+
+`POST /v1/stt/transcriptions` accepts multipart audio with optional `source_language`, `output_language`, `model` and `timestamps` fields. Audio formats are WAV, FLAC, MP3, Ogg/Opus and MP4/M4A. Maximum request size is 25 MiB and the default inference deadline is 180 seconds to allow raw transcription plus a translation pass.
+
+```sh
+curl --fail-with-body \
+  -F 'audio=@sample.wav;type=audio/wav' \
+  -F 'source_language=auto' \
+  -F 'output_language=auto' \
+  http://127.0.0.1:8080/v1/stt/transcriptions
+```
+
+For non-loopback exposure, include the configured bearer token:
+
+```sh
+curl --fail-with-body -H "Authorization: Bearer $SPEECH_API_TOKEN" \
+  -F 'audio=@sample.wav;type=audio/wav' \
+  -F 'source_language=ru' -F 'output_language=en' \
+  https://<host>/v1/stt/transcriptions
+```
+
+`source_language` is `auto`, `ru`, `en` or `sv`; `output_language` has the same values. Both default to `auto`. A legacy `language` field remains as a source-language alias. If both source fields are supplied, they must agree. Detected unsupported languages return `unsupported_detected_language`; the service never silently substitutes a language.
+
+The response retains `text` and `language` for compatibility and adds explicit fields:
+
+```json
+{
+  "detected_language": "ru",
+  "source_language": "ru",
+  "output_language": "en",
+  "transcription": "Доброе утро.",
+  "text": "Good morning.",
+  "translated": true,
+  "language_probability": 0.98
+}
+```
+
+`transcription` is always the original-language transcript. `text` is the requested output. When source and output match, `text` equals `transcription` and `translated` is false. With `output_language=auto`, output remains in the detected source language. Faster-whisper translation is supported only to English; Russian or Swedish speech can request English output. Cross-language output to Russian or Swedish returns `unsupported_translation`. No other language pair is advertised as working. `language_probability` appears only when automatic detection supplies it; forced source selection does not invent confidence.
+
+| Spoken language | `auto` | `ru` | `en` | `sv` |
+| --- | --- | --- | --- | --- |
+| Russian | Russian transcript | Russian transcript | English translation | Explicitly unsupported |
+| English | English transcript | Explicitly unsupported | English transcript | Explicitly unsupported |
+| Swedish | Swedish transcript | Explicitly unsupported | English translation | Swedish transcript |
+
+Automatic detection of a language outside Russian, English and Swedish returns `unsupported_detected_language` (422).
+
+Use `make test-stt AUDIO=private/audio/sample.wav SOURCE_LANGUAGE=auto OUTPUT_LANGUAGE=auto` to submit a local file through Gateway. The command prints detected/output metadata and transcription to the invoking terminal; audio is not copied into logs by the service.
+
+## Operate and recover
+
+```sh
+make status
+make logs
+curl -fsS http://127.0.0.1:8080/healthz
+curl -fsS http://127.0.0.1:8080/readyz
+```
+
+`healthz` confirms Gateway process liveness. `readyz` confirms the STT worker has loaded its model and accepts work. `make logs` follows the configured project logs. Docker Compose restarts crashed services. If configuration or model files are unavailable, inspect the logs and restore the expected configuration or artifact permissions.
+
+Redeploy a known-good release with:
+
+```sh
+git checkout <known-good-release>
+make plan
+make install
+```
+
+This rebuilds and applies the selected checkout’s compatible configuration. It does not require snapshot restoration, generation adoption, NAS or an external backup. Updating follows the same path after checking out the new supported release.
+
+## Development and verification
 
 ```sh
 python3 -m venv .venv
 make bootstrap PYTHON=.venv/bin/python
 make verify PYTHON=.venv/bin/python
-make image SERVICE=stt
 ```
 
-`make fmt` intentionally rewrites formatting. `make verify` checks formatting without rewriting files. Python dependencies are direct pins; transitive dependencies are not locked yet.
+`make verify` runs lint, strict configuration and Compose checks, release and governance validation, tests, builds and dependency-lock checks. A real GPU test needs local audio and a safe isolated GPU window. Keep audio fixtures under ignored `private/`; never commit private audio or transcripts.
 
-`make image` builds all current Compose service images locally; `make image SERVICE=gateway|stt|tts` selects one. It never publishes images. STT uses the existing CPU image definition for ordinary builds, so no GPU or private model artifacts are required. The TTS image is currently health-only and does not provide TTS inference.
+## Roadmap
 
-`.github/workflows/verify.yaml` runs `make bootstrap`, `make verify`, and `make image` for pushes to `main` and pull requests targeting `main`. It has read-only repository permissions and does not publish images or deploy. GHCR publication is deferred to a separately authorized next step.
+- **STT v1:** Russian, English and Swedish transcription with automatic and forced source selection. English translation is available through Whisper's built-in translation task; cross-language Russian/Swedish targets need a separately qualified local backend.
+- **TTS:** future inference milestone. Current TTS process is health-only.
+- **Voice dictation and text transformation:** future separate optional service after STT v1. It will preserve raw transcription and offer per-request `raw`, `clean`, `business`, `friendly`, `casual` and `formal_to_casual` modes through a configurable local LLM. It will not put an LLM in the STT worker and should continue to allow ordinary STT when the transformation service is unavailable. Desktop shortcuts and insertion must account for Linux Wayland restrictions; mobile mode selection can follow.
+- **Transcript Refinement:** optional future text-processing capability; it will remain separate from raw STT.
 
-## Local process
-
-```sh
-go run ./cmd/gateway --config configs/gateway.yaml
-# separate shells
-.venv/bin/python -m services.stt.main --config configs/stt.yaml
-.venv/bin/python -m services.tts.main --config configs/tts.yaml
-```
-
-Sample configuration binds all interfaces for containers. For direct host runs, change listen_host to loopback. Do not run on an untrusted host network.
-
-## Private data and local benchmarks
-
-Keep private audio, credentials, local fixtures and other sensitive test data under the root `private/` directory. That directory is ignored by Git and excluded from Docker build contexts; do not force-add its contents. The local benchmark sample is `private/audio/russian.m4a`. Benchmark code should read `SPEECH_BENCHMARK_AUDIO`; use `scripts/with-benchmark-audio.sh` to set the default or override the path for a command. See [M00 benchmark notes](benchmarks/README.md) for local archive instructions.
-
-## Container and deployment status
-
-The CUDA STT smoke deployment is already running on the target recorded by the baseline. Do not use the generic foundation Compose commands below as instructions to recreate or replace that service. The tracked Compose files include CPU/foundation defaults and a separate validated CUDA overlay; the successful smoke used ignored, target-specific configuration. A supported `make install`/`update`/`rollback` interface is proposed but is not implemented yet. Preserve the running service until a separately reviewed migration and rollback path is approved.
-
-See [architecture](docs/architecture/overview.md), the [redesign and migration plan](docs/architecture/platform-redesign.md), [contracts](api/openapi/public-v1.yaml), [operations](docs/operations/runbook.md), [milestone plan](PLANS.md), and [baseline record](releases/stt-cuda-baseline-001.yaml).
+See [PLANS.md](PLANS.md), [public API contract](api/openapi/public-v1.yaml), and [architecture decisions](docs/adr/).

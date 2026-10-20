@@ -2,9 +2,11 @@ package gateway
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFoundation(t *testing.T) {
@@ -12,8 +14,11 @@ func TestFoundation(t *testing.T) {
 	for _, tc := range []struct {
 		method, path string
 		status       int
-	}{{"GET", "/metrics", 200}, {"GET", "/healthz", 200}, {"GET", "/readyz", 503}, {"POST", "/v1/stt/transcriptions", 404}, {"POST", "/v1/tts/speech", 404}, {"GET", "/v1/stt/models", 404}, {"GET", "/v1/tts/voices", 404}} {
+	}{{"GET", "/metrics", 200}, {"GET", "/healthz", 200}, {"GET", "/readyz", 503}, {"POST", "/v1/stt/transcriptions", 503}, {"POST", "/v1/tts/speech", 404}, {"GET", "/v1/stt/models", 404}, {"GET", "/v1/tts/voices", 404}} {
 		r := httptest.NewRequest(tc.method, tc.path, nil)
+		if tc.path == "/v1/stt/transcriptions" {
+			r.Header.Set("Content-Type", "multipart/form-data; boundary=x")
+		}
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
 		if w.Code != tc.status {
@@ -28,9 +33,10 @@ func TestRequestSizeLimit(t *testing.T) {
 		name string
 		body string
 		want int
-	}{{"at_limit", "1234", 404}, {"over_limit", "12345", 413}, {"unknown_length_over_limit", "12345", 413}} {
+	}{{"at_limit", "1234", 503}, {"over_limit", "12345", 413}, {"unknown_length_over_limit", "12345", 413}} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRequest("POST", "/v1/stt/transcriptions", strings.NewReader(tc.body))
+			r.Header.Set("Content-Type", "multipart/form-data; boundary=x")
 			if tc.name == "unknown_length_over_limit" {
 				r.ContentLength = -1
 			}
@@ -46,5 +52,42 @@ func TestRequestSizeLimit(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSTTProxyForwardsBoundedRequestAndRequiresConfiguredToken(t *testing.T) {
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/readyz" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.URL.Path != "/internal/v1/transcriptions" || r.Header.Get("X-Request-Timeout-Ms") != "180000" || r.ContentLength <= 0 {
+			t.Errorf("bad forwarded request: %#v", r)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"text":"ok","transcription":"ok","language":"en","detected_language":"en","source_language":"en","output_language":"en","translated":false}`))
+	}))
+	defer worker.Close()
+	proxy := NewSTTProxy(worker.URL, "12345678901234567890123456789012", 180*time.Second)
+	h := HandlerWithSTT(proxy, 1024, proxy)
+	unauthorized := httptest.NewRequest("POST", "/v1/stt/transcriptions", strings.NewReader("payload"))
+	unauthorized.Header.Set("Content-Type", "multipart/form-data; boundary=x")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, unauthorized)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status=%d", w.Code)
+	}
+	r := httptest.NewRequest("POST", "/v1/stt/transcriptions", strings.NewReader("--x--\r\n"))
+	r.Header.Set("Content-Type", "multipart/form-data; boundary=x")
+	r.Header.Set("Authorization", "Bearer 12345678901234567890123456789012")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"transcription":"ok"`) {
+		t.Fatalf("status=%d response=%s", w.Code, w.Body.String())
+	}
+	ready := httptest.NewRecorder()
+	h.ServeHTTP(ready, httptest.NewRequest("GET", "/readyz", nil))
+	if ready.Code != http.StatusOK {
+		t.Fatalf("readiness=%d", ready.Code)
 	}
 }

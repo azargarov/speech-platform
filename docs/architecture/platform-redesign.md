@@ -1,10 +1,18 @@
 # VoiceService platform architecture and migration plan
 
-Status: canonical implementation roadmap. M01C–M01E and M01F-A are closed for their recorded scopes; M01F remains active with M01F-B as the next implementation slice; M01G remains proposed and unaccepted. M01C published VoiceService images to GHCR, while the current CUDA STT smoke deployment remains distinct from a managed platform installation. The project owner identifies GitHub as the primary Git host and GHCR as the distribution registry. The repository remains `speech-platform`; VoiceService is the intended product name.
+Status: historical deployment roadmap, superseded for normal operation by [ADR 0018](../adr/0018-git-compose-product-operations.md). M01C–M01E and M01F-A/B1/B2 retain their recorded outcomes. M01F-B3.1 implementation and evidence remain preserved as optional lifecycle tooling; G0 adoption and snapshot capture are not installation prerequisites. The active product priority is M02-D, STT v1 completion. The repository remains `speech-platform`; Speech Platform is the product name.
+
+## Current operating decision
+
+One tracked production configuration in a supported Git release and Docker Compose define normal install, operation and recovery. A clean checkout must not depend on `private/deployment/`. The host configures its model-store root, GPU, bind address and port through validated local settings. Model files remain external and read-only. Process crashes use Compose restart policies; configuration or model failures are diagnosed and repaired by checking out a known-good release and reinstalling it. Generations, snapshots, deployment histories, automatic rollback, external backup and NAS remain optional. This decision supersedes older requirements that made B1/B2/B3 lifecycle workflows mandatory for ordinary deployment; historical test/evidence records are unchanged.
+
+The accepted M01E deployment path and legacy deployment tools remain available for their recorded scopes. They are not the new product installation interface. Do not infer that prior M01E private-config deployment is equivalent to the clean-checkout product path.
+
+The M01C–M01G plan below is retained as historical planning and acceptance evidence. Its sequencing and requirements for private host configuration, generations, snapshots, mandatory rollback and M04-gated public routing are superseded for normal operation by ADR 0018. Do not use those old milestones as STT v1 installation prerequisites. The current product slice is M02-D; optional STT lifecycle work, TTS and future text transformation are tracked in [PLANS.md](../../PLANS.md).
 
 ## Executive recommendation
 
-Keep the current one-repository, one-host, Docker Compose architecture. Preserve the working CUDA STT baseline and the current non-root, read-only model, resource-limit, private-network and no-runtime-download properties. Simplify by making one Make interface call the existing checks and Compose definitions, and by replacing the experimental local-only image path with immutable OCI image digests when registry publication is approved. Do not introduce an orchestrator, remote deployment controller, or separate service repositories.
+Keep the one-repository, one-host, Docker Compose architecture. The root `compose.yaml`, validated `.env`, and pinned Git source commit define the product deployment. Keep the working CUDA STT baseline protected, mount the verified persistent model store read-only, and use restart policies for process crashes. Build service images locally from the checked-out source and immutable base/dependency inputs; registry publication is a separate operator decision. Do not introduce an orchestrator, remote deployment controller, or separate service repositories.
 
 Treat the currently working STT deployment as a protected reference, not as proof that the tracked Compose stack is already a reproducible installation. The successful deployment used a private standalone Compose file. `releases/stt-cuda-baseline-001.yaml` records its runtime identity and checksums; its private config and audio are ignored by Git. Preserve the running container and those private inputs until a separately approved migration has a tested rollback.
 
@@ -25,11 +33,11 @@ flowchart LR
     TTS --> MT[Read-only pinned voice/model release]
 ```
 
-The diagram describes the target, not current API readiness: the Go Gateway currently exposes health, readiness, metrics and a not-found fallback; public STT/TTS routing and authentication are still M04 work. The TTS entry point is a health-only process, not an inference provider. The working smoke baseline currently exposes STT directly on loopback and is not the future public Gateway path.
+The diagram is the historical M01 target. The root `compose.yaml` is now the canonical product deployment and includes a Gateway-to-STT route, worker-backed readiness and optional bearer authentication when a non-loopback bind is configured. The TTS entry point remains health-only. The earlier direct STT smoke baseline remains protected and is not replaced by product installation.
 
 ## Repository findings
 
-Findings below come from the checked-out source and the baseline record. They do not establish the current remote server state beyond the recorded successful smoke test.
+The table is a historical M01 baseline inventory. It records what existed before the M02-D STT product path and does not override ADR 0018 or claim current remote host state.
 
 | Area | Current evidence | Design consequence |
 |---|---|---|
@@ -43,7 +51,7 @@ Findings below come from the checked-out source and the baseline record. They do
 | Release/evidence | `releases/stt-cuda-baseline-001.yaml` records image, model, private configuration digests, host/runtime details, successful audio results and limitations. `releases/README.md` explains its use. It is an experiment baseline, not yet a platform release manifest or installable release. | Preserve it verbatim as historical evidence. Introduce any future release descriptor separately and link it to, rather than overwrite, the baseline. |
 | Operational tooling | Several validators, diagnostic launchers, resource sampling and the one-time containerd evidence collector support prior C.4/C.6 evidence. | Retain validators used by deployment and failure reporting. Keep experiment-only launchers and the `ctr` collector out of normal install/update paths; retire only after references and evidence are archived. |
 
-### Current gaps and avoidable complexity
+### Gaps recorded in the historical M01 baseline
 
 1. The operational success is not yet reproducible from tracked deployment inputs: the effective Compose/config files are private and only checksummed by the baseline.
 2. `README.md` still contains M01-era claims that inference is unavailable and shows generic Compose `up` as if it were the current runtime procedure. That is stale relative to the recorded STT smoke test.

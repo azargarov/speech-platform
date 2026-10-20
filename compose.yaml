@@ -1,0 +1,121 @@
+name: ${COMPOSE_PROJECT_NAME:-speech-platform}
+services:
+  gateway:
+    image: speech-platform-gateway:${SOURCE_REVISION:-local}
+    build:
+      context: .
+      dockerfile: deployments/compose/gateway.Dockerfile
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-local}
+    command: ["--config", "/config/gateway.yaml"]
+    ports:
+      - "${SPEECH_BIND_IP:-127.0.0.1}:${SPEECH_PORT:-8080}:8080"
+    environment:
+      SPEECH_LISTEN_PORT: "8080"
+      SPEECH_API_TOKEN: "${SPEECH_API_TOKEN:-}"
+    volumes:
+      - ./configs/gateway.yaml:/config/gateway.yaml:ro
+    depends_on:
+      stt:
+        condition: service_healthy
+    networks: [publish, stt_private]
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: ${GATEWAY_MEMORY_LIMIT:-256m}
+    cpus: ${GATEWAY_CPU_LIMIT:-1}
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "/healthcheck", "http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+  stt:
+    image: speech-platform-stt-cuda:${SOURCE_REVISION:-local}
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: deployments/compose/worker-stt-cuda.Dockerfile
+      args:
+        STT_CUDA_BASE_IMAGE: python:3.13.9-slim@sha256:326df678c20c78d465db501563f3492d17c42a4afe33a1f2bf5406a1d56b0e86
+        STT_SOURCE_REVISION: ${SOURCE_REVISION:-local}
+        STT_CUDA_LOCK_SHA256: 68ba66ac4a14ee59ddabd25ce0b5efd25e6e387cb9c1f430b0c4946767d62b14
+    command:
+      - services.stt.main
+      - --config
+      - /config/stt.yaml
+      - --application-config
+      - /config/application.yaml
+      - --deployment-config
+      - /config/deployment.yaml
+    volumes:
+      - ./configs/stt.yaml:/config/stt.yaml:ro
+      - ./configs/stt-product-application.yaml:/config/application.yaml:ro
+      - ./configs/stt-product-deployment.yaml:/config/deployment.yaml:ro
+      - ${MODEL_STORE:?set MODEL_STORE}/${MODEL_MANIFEST_SHA256:?set pinned model digest}:/models:ro
+    networks: [stt_private]
+    restart: unless-stopped
+    stop_grace_period: ${STT_STOP_GRACE_PERIOD:-15s}
+    read_only: true
+    user: "65532:65532"
+    group_add: ["${MODEL_READ_GID:-988}"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: ${STT_GPU_MEMORY_LIMIT:-12g}
+    cpus: ${STT_CPU_LIMIT:-4}
+    pids_limit: ${STT_PIDS_LIMIT:-128}
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/readyz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 180s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${STT_GPU_DEVICE:-0}"]
+              capabilities: [gpu]
+  tts:
+    image: speech-platform-tts:${SOURCE_REVISION:-local}
+    build:
+      context: .
+      dockerfile: deployments/compose/worker.Dockerfile
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-local}
+        SERVICE_ROLE: tts-health-only
+    command: ["services.tts.main", "--config", "/config/tts.yaml"]
+    volumes:
+      - ./configs/tts.yaml:/config/tts.yaml:ro
+    networks: [tts_private]
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: ${TTS_MEMORY_LIMIT:-256m}
+    cpus: ${TTS_CPU_LIMIT:-1}
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8082/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+networks:
+  publish:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+  stt_private:
+    internal: true
+  tts_private:
+    internal: true

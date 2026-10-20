@@ -2,10 +2,9 @@ openapi: 3.0.3
 info:
   title: Speech Platform public API
   version: 1.0.0
-  description: Design contract; no /v1 routes are implemented in M01. Bearer authentication
-    is required for all public operations in M04. Default total request limit 25 MiB;
+  description: STT transcription route is implemented. Optional bearer authentication is enforced when configured; non-loopback host exposure requires a secret token. Default total request limit 25 MiB;
     TTS text ceiling 10000 characters. Deployment limits and deadlines are configured
-    and may be stricter; clients handle 413 and 504. Default deadline 60 seconds;
+    and may be stricter; clients handle 413 and 504. Default deadline 180 seconds;
     upload read deadline 30 seconds. Client disconnect cancels the Gateway context and
     requests downstream cancellation; resource cleanup may finish asynchronously, and
     no result is returned to a disconnected client. Deadline exhaustion returns 504
@@ -15,11 +14,12 @@ info:
     audio or transcript payloads.
 security:
 - bearerAuth: []
+- {}
 paths:
   /v1/stt/transcriptions:
     post:
       operationId: transcribe
-      summary: Transcribe audio (contract only in M01)
+      summary: Transcribe audio and optionally translate to English
       x-maxRequestSizeBytes: 26214400
       requestBody:
         required: true
@@ -41,8 +41,18 @@ paths:
                   default: auto
                   minLength: 1
                   maxLength: 64
-                  description: BCP-47 tag, or auto for automatic detection. Unsupported
-                    languages return 400.
+                  enum: [auto, ru, en, sv]
+                  description: Deprecated compatibility alias for source_language.
+                source_language:
+                  type: string
+                  enum: [auto, ru, en, sv]
+                  default: auto
+                  description: Spoken language or automatic detection. Unsupported detected languages return 422.
+                output_language:
+                  type: string
+                  enum: [auto, ru, en, sv]
+                  default: auto
+                  description: auto or same-language output returns transcription. Cross-language output is currently available only to English using Whisper translation; other pairs return unsupported_translation.
                 model:
                   type: string
                   minLength: 1
@@ -265,6 +275,23 @@ components:
           type: string
         language:
           type: string
+          description: Compatibility alias for detected_language.
+        transcription:
+          type: string
+          description: Raw transcription in the detected spoken language.
+        detected_language:
+          type: string
+        source_language:
+          type: string
+        output_language:
+          type: string
+        language_probability:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Present only for automatic detection when provided by the model.
+        translated:
+          type: boolean
         segments:
           type: array
           description: Present only when supported and requested. Seconds relative

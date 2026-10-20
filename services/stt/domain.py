@@ -18,6 +18,8 @@ class FailureCode(StrEnum):
     INPUT_LIMIT = "input_limit"
     DECODE_FAILED = "decode_failed"
     LANGUAGE_UNDETECTED = "language_undetected"
+    UNSUPPORTED_DETECTED_LANGUAGE = "unsupported_detected_language"
+    UNSUPPORTED_TRANSLATION = "unsupported_translation"
     OVERLOADED = "overloaded"
     NOT_READY = "not_ready"
     CANCELLED = "cancelled"
@@ -55,6 +57,8 @@ _PUBLIC_MESSAGES = {
     FailureCode.INPUT_LIMIT: "request exceeds the configured limit",
     FailureCode.DECODE_FAILED: "audio could not be decoded",
     FailureCode.LANGUAGE_UNDETECTED: "language could not be detected",
+    FailureCode.UNSUPPORTED_DETECTED_LANGUAGE: "detected language is not supported",
+    FailureCode.UNSUPPORTED_TRANSLATION: "requested translation is unavailable",
     FailureCode.OVERLOADED: "service capacity is full",
     FailureCode.NOT_READY: "service is not ready",
     FailureCode.CANCELLED: "request was cancelled",
@@ -85,6 +89,8 @@ def safe_error(failure: SpeechFailure) -> tuple[int, ErrorResponse]:
         FailureCode.INPUT_LIMIT: 413,
         FailureCode.DECODE_FAILED: 422,
         FailureCode.LANGUAGE_UNDETECTED: 422,
+        FailureCode.UNSUPPORTED_DETECTED_LANGUAGE: 422,
+        FailureCode.UNSUPPORTED_TRANSLATION: 400,
         FailureCode.OVERLOADED: 429,
         FailureCode.NOT_READY: 503,
         FailureCode.CANCELLED: 504,
@@ -104,6 +110,7 @@ class TranscriptionRequest:
     model_alias: str | None = None
     language: str | None = None
     timestamps: bool = False
+    output_language: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -118,6 +125,10 @@ class TranscriptionResult:
     text: str
     language: str
     segments: tuple[Segment, ...] | None = None
+    transcription: str | None = None
+    language_probability: float | None = None
+    output_language: str | None = None
+    translated: bool = False
 
 
 @dataclass(frozen=True)

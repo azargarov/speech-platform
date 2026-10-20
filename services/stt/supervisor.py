@@ -209,6 +209,7 @@ class InferenceSupervisor:
                 "audio": encoded_audio,
                 "media_type": request.media_type,
                 "language": request.language,
+                "output_language": request.output_language,
                 "timestamps": request.timestamps,
                 "deadline": context.deadline,
             }
@@ -280,6 +281,10 @@ class InferenceSupervisor:
                 )
                 if response["segments"] is not None
                 else None,
+                response["transcription"],
+                response["language_probability"],
+                response["output_language"],
+                response["translated"],
             )
 
     def shutdown(self, timeout_seconds: float):
@@ -396,12 +401,27 @@ class InferenceSupervisor:
             "text",
             "language",
             "segments",
+            "transcription",
+            "language_probability",
+            "output_language",
+            "translated",
         }:
             raise IPCProtocolError("invalid result response")
         if (
             not isinstance(response["text"], str)
             or not isinstance(response["language"], str)
             or not response["language"]
+            or not isinstance(response["transcription"], str)
+            or (
+                response["language_probability"] is not None
+                and (
+                    type(response["language_probability"]) not in (int, float)
+                    or not _finite_number(response["language_probability"])
+                    or not 0 <= response["language_probability"] <= 1
+                )
+            )
+            or not isinstance(response["output_language"], str)
+            or type(response["translated"]) is not bool
         ):
             raise IPCProtocolError("invalid result fields")
         segments = response["segments"]
@@ -595,6 +615,7 @@ def _child_main(
                     selection.alias,
                     message["language"],
                     message["timestamps"],
+                    message["output_language"],
                 )
                 result = model.transcribe(
                     request, OperationContext(message["deadline"], cancel_event)
@@ -603,6 +624,12 @@ def _child_main(
                     "type": "result",
                     "text": result.text,
                     "language": result.language,
+                    "transcription": result.transcription
+                    if result.transcription is not None
+                    else result.text,
+                    "language_probability": result.language_probability,
+                    "output_language": result.output_language or result.language,
+                    "translated": result.translated,
                     "segments": [
                         {
                             "start_seconds": segment.start_seconds,

@@ -39,8 +39,17 @@ paths:
                   default: auto
                   minLength: 1
                   maxLength: 64
-                  description: BCP-47 tag, or auto for automatic detection. Unsupported
-                    languages return 400.
+                  enum: [auto, ru, en, sv]
+                  description: Deprecated compatibility alias for source_language.
+                source_language:
+                  type: string
+                  enum: [auto, ru, en, sv]
+                  default: auto
+                output_language:
+                  type: string
+                  enum: [auto, ru, en, sv]
+                  default: auto
+                  description: Cross-language output is supported only to English; unsupported targets return an explicit error.
                 model:
                   type: string
                   minLength: 1
@@ -169,6 +178,21 @@ components:
           type: string
         language:
           type: string
+        transcription:
+          type: string
+          description: Raw transcription in the detected source language.
+        detected_language:
+          type: string
+        source_language:
+          type: string
+        output_language:
+          type: string
+        language_probability:
+          type: number
+          minimum: 0
+          maximum: 1
+        translated:
+          type: boolean
         segments:
           type: array
           description: Present only when supported and requested. Seconds relative

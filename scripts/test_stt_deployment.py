@@ -403,15 +403,15 @@ class DeploymentOrchestrationTests(unittest.TestCase):
 
     def test_make_profile_selection_maps_each_profile_to_its_private_directory(self):
         cases = (
-            ("plan", None, "private/deployment/stt-cuda/"),
-            ("plan", "regular", "private/deployment/stt-cuda/"),
+            ("legacy-plan", None, "private/deployment/stt-cuda/"),
+            ("legacy-plan", "regular", "private/deployment/stt-cuda/"),
             (
-                "plan",
+                "legacy-plan",
                 "experimental",
                 "private/deployment/stt-cuda-experimental/",
             ),
             (
-                "install",
+                "legacy-install",
                 "experimental",
                 "private/deployment/stt-cuda-experimental/",
             ),
@@ -452,7 +452,7 @@ class DeploymentOrchestrationTests(unittest.TestCase):
                 "make",
                 "--no-print-directory",
                 "-n",
-                "plan",
+                "legacy-plan",
                 "SERVICE=stt",
                 "PROFILE=unknown",
             ],

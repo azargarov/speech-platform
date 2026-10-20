@@ -1,0 +1,8 @@
+schema_version: 2
+artifacts:
+  large-v3-turbo:
+    directory: /models/artifact
+    manifest: /models/manifest.yaml
+device_access:
+  cuda_device_index: 0
+  minimum_free_gpu_bytes_before_load: 6442450944

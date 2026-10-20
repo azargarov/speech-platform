@@ -229,13 +229,44 @@ async def _close_and_record(client, application, state, report_path, timeout_sec
 
 
 def _validate_response(body: object, maximum_duration: float) -> dict:
-    if not isinstance(body, dict) or set(body) != {"text", "language", "segments"}:
+    required = {"text", "language", "segments"}
+    optional = {
+        "transcription",
+        "detected_language",
+        "source_language",
+        "output_language",
+        "translated",
+        "language_probability",
+    }
+    if (
+        not isinstance(body, dict)
+        or not required <= body.keys()
+        or body.keys() - required - optional
+    ):
         raise ValueError("transcription response schema is invalid")
     if not isinstance(body["text"], str) or not body["text"].strip():
         raise ValueError("transcription response text is invalid")
     language = body["language"]
     if not isinstance(language, str) or not re.fullmatch(r"[A-Za-z-]{2,16}", language):
         raise ValueError("transcription language metadata is invalid")
+    for field in ("transcription",):
+        if field in body and not isinstance(body[field], str):
+            raise ValueError("transcription response text is invalid")
+    for field in ("detected_language", "source_language", "output_language"):
+        if field in body and (
+            not isinstance(body[field], str)
+            or not re.fullmatch(r"[a-z]{2}", body[field])
+        ):
+            raise ValueError("transcription language metadata is invalid")
+    if "translated" in body and type(body["translated"]) is not bool:
+        raise ValueError("translation status metadata is invalid")
+    probability = body.get("language_probability")
+    if probability is not None and (
+        type(probability) not in (int, float)
+        or not math.isfinite(probability)
+        or not 0 <= probability <= 1
+    ):
+        raise ValueError("transcription language probability is invalid")
     segments = body["segments"]
     if not isinstance(segments, list) or not segments:
         raise ValueError("transcription segments are invalid")

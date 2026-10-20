@@ -14,10 +14,10 @@ ENABLED_SERVICES_CONFIG ?= private/deployment/enabled-services.yaml
 SERVICES_DEPLOYMENT_CONFIG ?= private/deployment/services.yaml
 GATEWAY_DEPLOYMENT_CONFIG ?= private/deployment/gateway.yaml
 TTS_DEPLOYMENT_CONFIG ?= private/deployment/tts.yaml
-MODEL_STORE ?= private/model-store
+MODEL_STORE ?= /srv/speech-platform/models
 LOCK_ROOT ?= $(SPEECH_PLATFORM_LOCK_ROOT)
 PROFILE ?= regular
-ifneq ($(filter plan install,$(MAKECMDGOALS)),)
+ifneq ($(filter legacy-plan legacy-install,$(MAKECMDGOALS)),)
 ifeq ($(PROFILE),regular)
 STT_DEPLOYMENT_DIR := private/deployment/stt-cuda
 else ifeq ($(PROFILE),experimental)
@@ -66,7 +66,7 @@ else
 $(error Unknown publish service '$(SERVICE)'; choose gateway, stt, or tts)
 endif
 endif
-.PHONY: verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check release-check model-check model-fetch plan install stt-cpu-integration stt-cuda-http-integration
+.PHONY: verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check release-check model-check model-fetch plan install legacy-plan legacy-install status logs test-stt stt-cpu-integration stt-cuda-http-integration
 bootstrap:
 	$(PYTHON) -m pip install -r requirements-dev.txt
 	$(PYTHON) -m pip install --require-hashes -r services/requirements-stt-cpu.lock
@@ -82,9 +82,11 @@ lint:
 config:
 	go run ./cmd/gateway --config configs/gateway.yaml --check-config
 	$(PYTHON) -m services.stt.main --config configs/stt.yaml --check-config
+	$(PYTHON) -m services.stt.main --config configs/stt.yaml --application-config configs/stt-product-application.yaml --deployment-config configs/stt-product-deployment.yaml --check-config
 	$(PYTHON) -m services.tts.main --config configs/tts.yaml --check-config
 compose-check:
 	$(COMPOSE) config --quiet
+	docker compose --env-file .env.example -f compose.yaml config --quiet
 	$(COMPOSE) config --format json | $(PYTHON) scripts/check_compose.py
 	STT_CPU_LOCK_SHA256=$$(sha256sum services/requirements-stt-cpu.lock | cut -d' ' -f1) STT_APPLICATION_CONFIG=$(CURDIR)/configs/stt-application-cpu.example.yaml STT_DEPLOYMENT_CONFIG=$(CURDIR)/configs/stt-deployment-cpu.example.yaml STT_MODEL_ROOT=/models docker compose -f deployments/compose/compose.yaml -f deployments/compose/compose.stt-cpu.yaml config --format json | $(PYTHON) scripts/check_compose.py
 	SOURCE_REVISION=$$(git rev-parse HEAD) STT_CUDA_LOCK_SHA256=$$(sha256sum services/requirements-stt-cuda.lock | cut -d' ' -f1) STT_APPLICATION_CONFIG=$(CURDIR)/configs/stt-application-cpu.example.yaml STT_DEPLOYMENT_CONFIG=$(CURDIR)/configs/stt-deployment-cpu.example.yaml STT_MODEL_ROOT=/models docker compose -f deployments/compose/compose.yaml -f deployments/compose/compose.stt-cuda-build.yaml config --quiet
@@ -108,8 +110,18 @@ model-check:
 model-fetch:
 	$(PYTHON) -m scripts.provision_models fetch --release "$(PLATFORM_RELEASE)" --store "$(MODEL_STORE)"
 plan:
-	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m scripts.stt_deployment plan --service "$(SERVICE)" --enabled-services "$(ENABLED_SERVICES_CONFIG)" --services-profile "$(SERVICES_DEPLOYMENT_CONFIG)" --gateway-config "$(GATEWAY_DEPLOYMENT_CONFIG)" --tts-config "$(TTS_DEPLOYMENT_CONFIG)" --profile "$(STT_DEPLOYMENT_PROFILE)" --application-config "$(STT_APPLICATION_CONFIG)" --deployment-config "$(STT_DEPLOYMENT_CONFIG)" --worker-config "$(STT_WORKER_CONFIG)" --release "$(PLATFORM_RELEASE)" --env-file "$(STT_COMPOSE_ENV)"
+	$(PYTHON) scripts/product_deployment.py plan
 install:
+	$(PYTHON) scripts/product_deployment.py install
+status:
+	$(PYTHON) scripts/product_deployment.py status
+logs:
+	$(PYTHON) scripts/product_deployment.py logs
+test-stt:
+	$(PYTHON) scripts/product_deployment.py test-stt $(if $(AUDIO),--audio "$(AUDIO)") $(if $(SOURCE_LANGUAGE),--source-language "$(SOURCE_LANGUAGE)") $(if $(OUTPUT_LANGUAGE),--output-language "$(OUTPUT_LANGUAGE)")
+legacy-plan:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m scripts.stt_deployment plan --service "$(SERVICE)" --enabled-services "$(ENABLED_SERVICES_CONFIG)" --services-profile "$(SERVICES_DEPLOYMENT_CONFIG)" --gateway-config "$(GATEWAY_DEPLOYMENT_CONFIG)" --tts-config "$(TTS_DEPLOYMENT_CONFIG)" --profile "$(STT_DEPLOYMENT_PROFILE)" --application-config "$(STT_APPLICATION_CONFIG)" --deployment-config "$(STT_DEPLOYMENT_CONFIG)" --worker-config "$(STT_WORKER_CONFIG)" --release "$(PLATFORM_RELEASE)" --env-file "$(STT_COMPOSE_ENV)"
+legacy-install:
 	SPEECH_PLATFORM_LOCK_ROOT="$(LOCK_ROOT)" PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m scripts.stt_deployment install --service "$(SERVICE)" --enabled-services "$(ENABLED_SERVICES_CONFIG)" --services-profile "$(SERVICES_DEPLOYMENT_CONFIG)" --gateway-config "$(GATEWAY_DEPLOYMENT_CONFIG)" --tts-config "$(TTS_DEPLOYMENT_CONFIG)" --profile "$(STT_DEPLOYMENT_PROFILE)" --application-config "$(STT_APPLICATION_CONFIG)" --deployment-config "$(STT_DEPLOYMENT_CONFIG)" --worker-config "$(STT_WORKER_CONFIG)" --release "$(PLATFORM_RELEASE)" --env-file "$(STT_COMPOSE_ENV)"
 governance-check:
 	$(PYTHON) scripts/validate_governance.py
