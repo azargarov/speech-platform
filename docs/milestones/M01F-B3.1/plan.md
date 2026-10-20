@@ -1,6 +1,15 @@
 # M01F-B3.1 — Baseline adoption planning and validation
 
-Status: **IMPLEMENTATION AUTHORIZED; operator review pending.**
+Status: **DEFERRED by ADR 0018; implementation retained as optional lifecycle tooling.**
+
+## Current disposition
+
+Git + Docker Compose are the normal deployment and recovery path. B3.1
+snapshot capture and G0 adoption are not prerequisites for STT v1 and are not
+being advanced in this product slice. No real snapshot or G0 state was
+created. Existing implementation, tests, operator-reported model-integrity
+and worker-read evidence, and historical runtime-preflight records remain
+preserved. This disposition does not mark B3.1 acceptance or closeout as PASS.
 
 ## Scope
 

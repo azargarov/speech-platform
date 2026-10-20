@@ -691,3 +691,13 @@ expected hash.
   `.venv/bin/python -m unittest scripts.test_snapshot_capture_adapter
   scripts.test_restore_snapshot -v` passed 31 tests. The final
   `make verify PYTHON=.venv/bin/python` rerun after that change also exited 0.
+
+## Product-roadmap disposition — 2026-10-20
+
+ADR 0018 selects Git + Docker Compose as the normal operating model. B3.1
+snapshot capture, G0 adoption and private deployment state are deferred
+optional lifecycle capabilities; they are not STT v1 prerequisites. Earlier
+model verification, worker-read access and read-only runtime preflight remain
+historical evidence for their recorded scopes. The proposed one-time capture
+command is not authorized by this disposition and was not run. This roadmap
+change does not rewrite historical B3.1 evidence or claim B3.1 acceptance.
