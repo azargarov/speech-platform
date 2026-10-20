@@ -1,6 +1,6 @@
 # VoiceService platform architecture and migration plan
 
-Status: canonical implementation roadmap; M01C–M01G are proposed and not accepted or closed. The project owner identifies GitHub as the primary Git host and GHCR as the distribution registry. No VoiceService image has been published to GHCR and the current CUDA STT smoke deployment is not a managed platform installation. Pre-existing uncommitted M01C-related worktree changes are not treated as accepted milestone evidence here. The repository remains `speech-platform`; VoiceService is the intended product name.
+Status: canonical implementation roadmap. M01C–M01E and M01F-A are closed for their recorded scopes; M01F remains active with M01F-B as the next implementation slice; M01G remains proposed and unaccepted. M01C published VoiceService images to GHCR, while the current CUDA STT smoke deployment remains distinct from a managed platform installation. The project owner identifies GitHub as the primary Git host and GHCR as the distribution registry. The repository remains `speech-platform`; VoiceService is the intended product name.
 
 ## Executive recommendation
 
@@ -242,6 +242,7 @@ M01C is **PASS; closed 2026-10-18** after controlled `v0.1.2` publication and us
 - **Dependencies:** M01E accepted; M01D immutable release contract; validated prior release and recovery procedure.
 - **Acceptance and verification:** inject staging and post-activation failures; show no live change on staging failure; selective update leaves unrelated services untouched; rollback restores previous image/model/config identity and applicable functionality; report downtime and cleanup uncertainty; preserve original CUDA baseline recovery until migration acceptance.
 - **Exclusions:** zero-downtime claims, automatic retry/rollback loops, shared GPU concurrency assumptions, model/config garbage collection before retention policy.
+- **Architecture and slices:** M01F remains one canonical milestone. M01F-A finalized architecture only; M01F-B/C/D are implementation slices beneath it, not replacements for these canonical requirements. The accepted details are in [M01F-A](../milestones/M01F-A/design.md) and [ADRs 0014–0016](../adr/0014-host-local-deployment-state.md). Implementation remains separately gated. M01F-B is next: durable state, planner, approval and adoption foundation. M01F-C covers selected update and failure recording; M01F-D covers separately approved rollback and recovery rehearsal. No slice advances M01F automatically.
 
 ### M01G — End-to-end deployment validation
 
