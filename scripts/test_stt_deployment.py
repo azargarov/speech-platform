@@ -832,6 +832,7 @@ class DeploymentOrchestrationTests(unittest.TestCase):
                 worker_config=config_paths[3],
                 release_path="releases/voiceservice-v0.1.2.yaml",
                 env_file=str(root / "compose.env"),
+                lock_root=root / "deployment-locks",
                 run=run,
                 gpu_probe=gpu_probe,
             )
@@ -939,7 +940,7 @@ class DeploymentOrchestrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             commands = []
-            probes = iter((2 * 1024**2, 0))
+            probes = iter((2 * 1024**2, 2 * 1024**2, 0))
 
             def run(command, **kwargs):
                 commands.append((command, kwargs))

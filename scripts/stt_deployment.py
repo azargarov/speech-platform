@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -23,6 +25,7 @@ from scripts.model_artifacts import (
     model_directory,
     provision_models,
 )
+from scripts.project_lock import ProjectLock
 from scripts.release_manifest import REPOSITORY_ROOT, load_release
 from scripts.service_deployment_profile import (
     load_gateway_config,
@@ -60,17 +63,79 @@ def _run(
     *,
     input_text: str | None = None,
     environment: dict[str, str] | None = None,
+    lock_fd: int | None = None,
+    timeout: float = 60,
 ) -> str:
-    result = subprocess.run(
+    process = subprocess.Popen(
         command,
-        input=input_text,
-        check=True,
-        capture_output=True,
+        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=60,
         env=environment,
+        start_new_session=True,
+        pass_fds=(() if lock_fd is None else (lock_fd,)),
     )
-    return result.stdout
+    try:
+        stdout, stderr = process.communicate(input=input_text, timeout=timeout)
+    except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
+        # The process group owns the inherited lock descriptor, so a coordinator
+        # interruption cannot release it while a Compose client is alive.
+        for sig, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):
+            try:
+                os.killpg(process.pid, sig)
+            except ProcessLookupError:
+                break
+            try:
+                process.communicate(timeout=grace)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        else:
+            raise UncertainSubprocessError(
+                "deployment subprocess termination could not be confirmed"
+            ) from None
+        if error.__class__ is subprocess.TimeoutExpired:
+            if lock_fd is not None:
+                raise UncertainSubprocessError(
+                    "deployment subprocess timed out; operation outcome is uncertain"
+                ) from None
+            raise subprocess.TimeoutExpired(command, timeout) from None
+        raise
+    if _process_group_exists(process.pid):
+        for sig, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):
+            try:
+                os.killpg(process.pid, sig)
+            except ProcessLookupError:
+                break
+            deadline = time.monotonic() + grace
+            while _process_group_exists(process.pid) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            if not _process_group_exists(process.pid):
+                break
+        raise UncertainSubprocessError(
+            "deployment subprocess exited with descendants; runtime outcome is uncertain"
+        )
+    if process.returncode:
+        raise subprocess.CalledProcessError(
+            process.returncode, command, output=stdout, stderr=stderr
+        )
+    return stdout
+
+
+def _process_group_exists(process_group: int) -> bool:
+    """Report whether the subprocess process group still has live members."""
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+class UncertainSubprocessError(subprocess.SubprocessError):
+    """A child process could not be confirmed stopped after cancellation."""
 
 
 def _subprocess_failure(exc: subprocess.CalledProcessError) -> str:
@@ -671,6 +736,7 @@ def _ensure_service_image(
     action: str,
     stt_validated: dict | None,
     source_revision: str,
+    before_mutation=None,
     run=_run,
 ) -> str:
     try:
@@ -680,6 +746,8 @@ def _ensure_service_image(
             raise ValueError(
                 f"{service} immutable image is missing locally; install will stage it"
             )
+        if before_mutation is not None:
+            before_mutation()
         run(
             [
                 "docker",
@@ -713,6 +781,7 @@ def _ensure_selected_models(
     validated: dict,
     *,
     action: str,
+    before_mutation=None,
 ) -> list[str]:
     models = [
         model
@@ -757,6 +826,9 @@ def _ensure_selected_models(
         }
         if existing:
             check_models(existing_release, store, REPOSITORY_ROOT)
+
+        if before_mutation is not None:
+            before_mutation()
 
         missing_release = {
             **selected_release,
@@ -1178,6 +1250,7 @@ def run_deployment(
     worker_config: str,
     release_path: str,
     env_file: str,
+    lock_root: str | Path | None = None,
     run=_run,
     gpu_probe=None,
     service_probe=_service_probe,
@@ -1313,106 +1386,281 @@ def run_deployment(
             blockers.append(_deployment_error(error))
             actions[name] = "BLOCKED"
 
+    preflight_actions = dict(actions)
+
     if action == "install" and blockers:
         raise ValueError("deployment prerequisites blocked: " + "; ".join(blockers))
 
-    image_status = {}
-    for name in selected:
-        try:
-            image_status[name] = _ensure_service_image(
-                name,
-                release["services"][name],
-                action=action,
+    lock_context = (
+        ProjectLock(project, root=lock_root, wait_seconds=0)
+        if action == "install"
+        else contextlib.nullcontext(None)
+    )
+    with lock_context as deployment_lock:
+        if deployment_lock is not None:
+            base_run = run
+
+            def run(command, **kwargs):
+                deployment_lock.assert_current()
+                if base_run is _run:
+                    kwargs["lock_fd"] = deployment_lock.fd
+                try:
+                    return base_run(command, **kwargs)
+                finally:
+                    deployment_lock.assert_current()
+
+            # Planning above is deliberately read-only. Re-render and repeat the
+            # exact project/GPU admission checks under the shared lock before any
+            # pull, model staging, or lifecycle operation can begin.
+            locked_release = load_release(release_path, REPOSITORY_ROOT)
+            if locked_release != release:
+                raise ValueError("release inputs changed after install preflight")
+            (
+                service_profile,
+                gateway_config,
+                tts_config,
+                gateway_path,
+                tts_path,
+            ) = _load_selected_configs(
+                selected,
+                service_profile_path=services_profile_path,
+                gateway_config_path=gateway_config_path,
+                tts_config_path=tts_config_path,
+            )
+            if service_profile["project_name"] != project:
+                raise ValueError("Compose project identity changed after preflight")
+            if "stt" in selected:
+                for label, path in (
+                    ("profile.yaml", profile_path),
+                    ("stt-application.yaml", application_config),
+                    ("stt-deployment.yaml", deployment_config),
+                    ("stt.yaml", worker_config),
+                ):
+                    if not Path(path).is_file():
+                        raise ValueError(
+                            f"required private configuration {label} changed after preflight"
+                        )
+                require_private_config_paths([profile_path])
+                stt_validated = load_and_validate(
+                    profile_path,
+                    application_config,
+                    deployment_config,
+                    worker_config,
+                    verify_files=False,
+                )
+                require_private_config_paths(
+                    [application_config, deployment_config, worker_config],
+                    group_read_gid=stt_validated["artifact_access"][
+                        "supplementary_read_gid"
+                    ],
+                )
+                require_container_config_access(
+                    [application_config, deployment_config, worker_config],
+                    supplementary_gids=(
+                        stt_validated["artifact_access"]["supplementary_read_gid"],
+                    ),
+                )
+                _require_release_match(stt_validated, release_path)
+            compose_values = _compose_environment(
+                selected,
+                locked_release,
+                service_profile,
+                gateway_config,
+                tts_config,
+                gateway_path,
+                tts_path,
                 stt_validated=stt_validated,
-                source_revision=release["git_source_revision"],
+                application_config=application_config,
+                deployment_config=deployment_config,
+                worker_config=worker_config,
+            )
+            environment = os.environ.copy()
+            environment.update(compose_values)
+            selected_release = _selected_release(locked_release, selected)
+            rendered = _render_selected(
+                project, selected, compose_values, gateway_config, stt_validated, run
+            )
+            if "stt" in selected:
+                gpu_status = gpu_probe(stt_validated)
+                if not gpu_status.get("identity_matches") or gpu_status.get(
+                    "free_bytes", 0
+                ) < gpu_status.get("threshold_bytes", 1):
+                    raise ValueError("GPU admission changed before install staging")
+            existing = _project_services(
+                project,
+                gateway_host_port=service_profile["gateway"]["host_port"],
+                gateway_listen_port=gateway_config["listen_port"],
                 run=run,
             )
-        except (OSError, ValueError, subprocess.SubprocessError) as error:
-            blockers.append(_deployment_error(error))
-            image_status[name] = "BLOCKED"
-
-    staged_models = []
-    if stt_validated is not None and not (action == "install" and blockers):
-        try:
-            if action == "install":
-                # Validate profile, model configuration, and all config identities
-                # before artifact staging or any container operation.
-                staged_models = _ensure_selected_models(
-                    selected_release, stt_validated, action=action
+            locked_actions = {
+                name: _service_action(
+                    name,
+                    existing.get(name),
+                    rendered,
+                    project,
+                    profile=service_profile,
+                    gateway_config=gateway_config,
+                    tts_config=tts_config,
+                    run=run,
+                    probe=service_probe,
                 )
-                stt_validated = load_and_validate(
-                    profile_path, application_config, deployment_config, worker_config
-                )
-            else:
-                _ensure_selected_models(selected_release, stt_validated, action=action)
-        except (
-            ModelProvisionError,
-            OSError,
-            ValueError,
-            subprocess.SubprocessError,
-        ) as error:
-            blockers.append(_deployment_error(error))
+                for name in selected
+            }
+            if locked_actions != preflight_actions:
+                raise ValueError("deployment actions changed after install preflight")
+            actions = locked_actions
 
-    if action == "plan":
-        print(
-            f"PLAN: compose_project={project} gateway=127.0.0.1:{service_profile['gateway']['host_port']}->{gateway_config['listen_port']}"
+        # A verified no-op stays read-only even if a local artifact disappears
+        # between preflight and this point. In that case the plan-mode validators
+        # fail closed instead of pulling an image or downloading a model.
+        validation_action = (
+            "plan"
+            if action == "install"
+            and actions
+            and all(current == "unchanged" for current in actions.values())
+            else action
         )
+        image_status = {}
         for name in selected:
-            print(
-                f"PLAN: service={name} image={release['services'][name]['image']} "
-                f"artifact={image_status.get(name, 'BLOCKED')} action={actions[name]}"
-            )
-        if staged_models:
-            print(f"PLAN: staged_models={','.join(staged_models)}")
-        if gpu_status is not None:
-            print(
-                f"PLAN: gpu_free_mib={gpu_status.get('free_mib')} "
-                f"admission_threshold_bytes={gpu_status.get('threshold_bytes')}"
-            )
-        print(f"PLAN: admission={'READY' if not blockers else 'BLOCKED'}")
-        for reason in blockers:
-            print(f"BLOCKER: {reason}")
-        return 0 if not blockers else 2
+            try:
+                image_status[name] = _ensure_service_image(
+                    name,
+                    release["services"][name],
+                    action=validation_action,
+                    stt_validated=stt_validated,
+                    source_revision=release["git_source_revision"],
+                    before_mutation=(
+                        deployment_lock.mark_mutation_started
+                        if deployment_lock is not None
+                        else None
+                    ),
+                    run=run,
+                )
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                blockers.append(_deployment_error(error))
+                image_status[name] = "BLOCKED"
 
-    if blockers:
-        raise ValueError("deployment prerequisites blocked: " + "; ".join(blockers))
-    for name in selected:
-        if actions[name] == "unchanged":
-            print(f"INSTALL: {name} unchanged and healthy")
-            continue
-        if name == "stt":
-            latest = gpu_probe(stt_validated)
-            if (
-                not latest.get("identity_matches")
-                or latest.get("free_bytes") is None
-                or latest["free_bytes"] < latest["threshold_bytes"]
-            ):
-                raise ValueError("GPU admission blocked immediately before STT startup")
-        command = _install_service_command(
-            project,
-            name,
-            replace=actions[name] == "replace",
-            include_stt="stt" in selected,
-        )
-        run(command, environment=environment)
-        _wait_service_readiness(
-            name,
-            project,
-            release["services"][name]["image"],
-            rendered,
-            service_profile,
-            gateway_config,
-            tts_config,
-            timeout_seconds=(
-                _readiness_timeout(stt_validated)
-                if name == "stt"
-                else service_profile["readiness"]["timeout_seconds"]
-            ),
-            run=run,
-            probe=service_probe,
-        )
-        print(f"INSTALL: {name} healthy and ready")
-    return 0
+        staged_models = []
+        if stt_validated is not None and not (action == "install" and blockers):
+            try:
+                if action == "install":
+                    # Validate profile, model configuration, and all config identities
+                    # before artifact staging or any container operation.
+                    staged_models = _ensure_selected_models(
+                        selected_release,
+                        stt_validated,
+                        action=validation_action,
+                        before_mutation=(
+                            deployment_lock.mark_mutation_started
+                            if deployment_lock is not None
+                            else None
+                        ),
+                    )
+                    stt_validated = load_and_validate(
+                        profile_path,
+                        application_config,
+                        deployment_config,
+                        worker_config,
+                    )
+                else:
+                    _ensure_selected_models(
+                        selected_release, stt_validated, action=action
+                    )
+            except (
+                ModelProvisionError,
+                OSError,
+                ValueError,
+                subprocess.SubprocessError,
+            ) as error:
+                blockers.append(_deployment_error(error))
+
+        if action == "plan":
+            print(
+                f"PLAN: compose_project={project} gateway=127.0.0.1:{service_profile['gateway']['host_port']}->{gateway_config['listen_port']}"
+            )
+            for name in selected:
+                print(
+                    f"PLAN: service={name} image={release['services'][name]['image']} "
+                    f"artifact={image_status.get(name, 'BLOCKED')} action={actions[name]}"
+                )
+            if staged_models:
+                print(f"PLAN: staged_models={','.join(staged_models)}")
+            if gpu_status is not None:
+                print(
+                    f"PLAN: gpu_free_mib={gpu_status.get('free_mib')} "
+                    f"admission_threshold_bytes={gpu_status.get('threshold_bytes')}"
+                )
+            print(f"PLAN: admission={'READY' if not blockers else 'BLOCKED'}")
+            for reason in blockers:
+                print(f"BLOCKER: {reason}")
+            return 0 if not blockers else 2
+
+        if blockers:
+            raise ValueError("deployment prerequisites blocked: " + "; ".join(blockers))
+        for name in selected:
+            if actions[name] == "unchanged":
+                print(f"INSTALL: {name} unchanged and healthy")
+                continue
+            current = _project_services(
+                project,
+                gateway_host_port=service_profile["gateway"]["host_port"],
+                gateway_listen_port=gateway_config["listen_port"],
+                run=run,
+            ).get(name)
+            current_action = _service_action(
+                name,
+                current,
+                rendered,
+                project,
+                profile=service_profile,
+                gateway_config=gateway_config,
+                tts_config=tts_config,
+                run=run,
+                probe=service_probe,
+            )
+            if current_action != actions[name]:
+                raise ValueError(
+                    f"{name} deployment changed after install freshness check"
+                )
+            if name == "stt":
+                latest = gpu_probe(stt_validated)
+                if (
+                    not latest.get("identity_matches")
+                    or latest.get("free_bytes") is None
+                    or latest["free_bytes"] < latest["threshold_bytes"]
+                ):
+                    raise ValueError(
+                        "GPU admission blocked immediately before STT startup"
+                    )
+            command = _install_service_command(
+                project,
+                name,
+                replace=actions[name] == "replace",
+                include_stt="stt" in selected,
+            )
+            if deployment_lock is not None:
+                deployment_lock.mark_mutation_started()
+            run(command, environment=environment)
+            _wait_service_readiness(
+                name,
+                project,
+                release["services"][name]["image"],
+                rendered,
+                service_profile,
+                gateway_config,
+                tts_config,
+                timeout_seconds=(
+                    _readiness_timeout(stt_validated)
+                    if name == "stt"
+                    else service_profile["readiness"]["timeout_seconds"]
+                ),
+                run=run,
+                probe=service_probe,
+            )
+            print(f"INSTALL: {name} healthy and ready")
+        if deployment_lock is not None:
+            deployment_lock.mark_complete()
+        return 0
 
 
 def main() -> int:
@@ -1465,6 +1713,19 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    except UncertainSubprocessError as error:
+        print(
+            f"FAIL: deployment {args.action} outcome is uncertain: {error}",
+            file=sys.stderr,
+        )
+        return 2
+    except KeyboardInterrupt:
+        print(
+            f"FAIL: deployment {args.action} was interrupted; if install mutation "
+            "started, operator review is required before another install",
+            file=sys.stderr,
+        )
+        return 130
     except (
         OSError,
         subprocess.SubprocessError,

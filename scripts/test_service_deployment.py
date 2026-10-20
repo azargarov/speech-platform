@@ -4,6 +4,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -203,7 +204,19 @@ class ServiceScopedDeploymentTests(unittest.TestCase):
             }
         }
 
-    def _run_install(self, service, enabled, existing=None):
+    def _run_install(
+        self,
+        service,
+        enabled,
+        existing=None,
+        lock_root=None,
+        preflight_error=None,
+        readiness_error=None,
+        run_error=None,
+        service_action_results=None,
+        image_actions=None,
+        model_actions=None,
+    ):
         commands = []
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -238,7 +251,19 @@ class ServiceScopedDeploymentTests(unittest.TestCase):
 
             def run(command, **kwargs):
                 commands.append((command, kwargs))
+                if run_error is not None and "up" in command:
+                    raise run_error
                 return ""
+
+            def ensure_image(*_args, **kwargs):
+                if image_actions is not None:
+                    image_actions.append(kwargs["action"])
+                return "verified"
+
+            def ensure_models(*_args, **kwargs):
+                if model_actions is not None:
+                    model_actions.append(kwargs["action"])
+                return []
 
             stack = [
                 patch("scripts.stt_deployment.load_release", return_value=self.release),
@@ -256,19 +281,31 @@ class ServiceScopedDeploymentTests(unittest.TestCase):
                 patch(
                     "scripts.stt_deployment._render_selected",
                     return_value=self._rendered(),
+                    side_effect=preflight_error,
                 ),
                 patch(
                     "scripts.stt_deployment._ensure_service_image",
-                    return_value="verified",
+                    side_effect=ensure_image,
                 ),
                 patch(
-                    "scripts.stt_deployment._ensure_selected_models", return_value=[]
+                    "scripts.stt_deployment._ensure_selected_models",
+                    return_value=[] if model_actions is None else None,
+                    side_effect=ensure_models if model_actions is not None else None,
                 ),
                 patch(
                     "scripts.stt_deployment._project_services",
                     return_value=existing or {},
                 ),
-                patch("scripts.stt_deployment._wait_service_readiness"),
+                patch(
+                    "scripts.stt_deployment._service_action",
+                    side_effect=service_action_results,
+                )
+                if service_action_results is not None
+                else nullcontext(),
+                patch(
+                    "scripts.stt_deployment._wait_service_readiness",
+                    side_effect=readiness_error,
+                ),
             ]
             with ExitStackForTest(stack):
                 result = run_deployment(
@@ -284,6 +321,7 @@ class ServiceScopedDeploymentTests(unittest.TestCase):
                     worker_config=stt_configs[3],
                     release_path="release.yaml",
                     env_file="unused.env",
+                    lock_root=lock_root or root / "deployment-locks",
                     run=run,
                     gpu_probe=lambda *_: {
                         "identity_matches": True,
@@ -379,6 +417,154 @@ class ServiceScopedDeploymentTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertFalse(any("up" in command for command in commands))
 
+    def test_noop_install_uses_read_only_image_and_model_validation(self):
+        image_actions = []
+        model_actions = []
+        self._run_install(
+            None,
+            ["gateway", "stt", "tts"],
+            {name: self._container(name) for name in ("gateway", "stt", "tts")},
+            image_actions=image_actions,
+            model_actions=model_actions,
+        )
+        self.assertEqual(image_actions, ["plan", "plan", "plan"])
+        self.assertEqual(model_actions, ["plan"])
+
+    def test_locked_action_change_aborts_before_artifact_staging(self):
+        image_actions = []
+        model_actions = []
+        with tempfile.TemporaryDirectory() as temp:
+            lock_root = Path(temp) / "locks"
+            lock_root.mkdir(mode=0o700)
+            with self.assertRaisesRegex(
+                ValueError, "deployment actions changed after install preflight"
+            ):
+                self._run_install(
+                    None,
+                    ["gateway", "stt", "tts"],
+                    {name: self._container(name) for name in ("gateway", "stt", "tts")},
+                    lock_root=lock_root,
+                    service_action_results=[
+                        "unchanged",
+                        "unchanged",
+                        "unchanged",
+                        "replace",
+                        "unchanged",
+                        "unchanged",
+                    ],
+                    image_actions=image_actions,
+                    model_actions=model_actions,
+                )
+        self.assertEqual(image_actions, [])
+        self.assertEqual(model_actions, [])
+
+    def test_verified_noop_does_not_leave_uncertainty_marker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            lock_root = Path(temp) / "locks"
+            lock_root.mkdir(mode=0o700)
+            self._run_install(
+                None,
+                ["gateway", "stt", "tts"],
+                {name: self._container(name) for name in ("gateway", "stt", "tts")},
+                lock_root=lock_root,
+            )
+            self.assertFalse((lock_root / f"{self.project}.uncertain").exists())
+
+    def test_preflight_failure_does_not_create_uncertainty_marker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            lock_root = Path(temp) / "locks"
+            lock_root.mkdir(mode=0o700)
+            with self.assertRaisesRegex(ValueError, "preflight failed"):
+                self._run_install(
+                    "gateway",
+                    ["gateway"],
+                    lock_root=lock_root,
+                    preflight_error=ValueError("preflight failed"),
+                )
+            self.assertFalse((lock_root / f"{self.project}.uncertain").exists())
+
+    def test_readiness_failure_retains_uncertainty_marker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            lock_root = Path(temp) / "locks"
+            lock_root.mkdir(mode=0o700)
+            with self.assertRaisesRegex(ValueError, "readiness failed"):
+                self._run_install(
+                    "gateway",
+                    ["gateway"],
+                    lock_root=lock_root,
+                    readiness_error=ValueError("readiness failed"),
+                )
+            self.assertTrue((lock_root / f"{self.project}.uncertain").is_file())
+
+    def test_runtime_mutation_failure_retains_uncertainty_marker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            lock_root = Path(temp) / "locks"
+            lock_root.mkdir(mode=0o700)
+            failure = subprocess.CalledProcessError(1, ["docker", "compose", "up"])
+            with self.assertRaises(subprocess.CalledProcessError):
+                self._run_install(
+                    "gateway",
+                    ["gateway"],
+                    lock_root=lock_root,
+                    run_error=failure,
+                )
+            self.assertTrue((lock_root / f"{self.project}.uncertain").is_file())
+
+    def test_confirmed_install_clears_marker_after_readiness(self):
+        with tempfile.TemporaryDirectory() as temp:
+            lock_root = Path(temp) / "locks"
+            lock_root.mkdir(mode=0o700)
+            self._run_install("gateway", ["gateway"], lock_root=lock_root)
+            self.assertFalse((lock_root / f"{self.project}.uncertain").exists())
+
+    def test_contention_fails_before_image_or_model_staging(self):
+        import tempfile
+
+        from scripts.project_lock import LockError, ProjectLock
+
+        with tempfile.TemporaryDirectory() as temp:
+            lock_root = Path(temp) / "locks"
+            lock_root.mkdir(mode=0o700)
+            with ProjectLock(self.project, lock_root):
+                with (
+                    patch(
+                        "scripts.stt_deployment._ensure_service_image"
+                    ) as stage_image,
+                    patch(
+                        "scripts.stt_deployment._ensure_selected_models"
+                    ) as stage_model,
+                ):
+                    with self.assertRaisesRegex(LockError, "already active"):
+                        self._run_install("gateway", ["gateway"], lock_root=lock_root)
+                    stage_image.assert_not_called()
+                    stage_model.assert_not_called()
+
+    def test_project_lock_is_held_during_image_and_model_staging(self):
+        import tempfile
+
+        from scripts.project_lock import LockError, ProjectLock
+
+        with tempfile.TemporaryDirectory() as temp:
+            lock_root = Path(temp) / "locks"
+            lock_root.mkdir(mode=0o700)
+
+            def assert_locked(*_args, **_kwargs):
+                with self.assertRaisesRegex(LockError, "already active"):
+                    ProjectLock(self.project, lock_root).acquire()
+                return []
+
+            with (
+                patch(
+                    "scripts.stt_deployment._ensure_service_image",
+                    side_effect=assert_locked,
+                ),
+                patch(
+                    "scripts.stt_deployment._ensure_selected_models",
+                    side_effect=assert_locked,
+                ),
+            ):
+                self._run_install("gateway", ["gateway"], lock_root=lock_root)
+
     def test_existing_gateway_with_old_private_only_network_is_replaced(self):
         gateway = self._container("gateway")
         gateway["NetworkSettings"]["Networks"] = {f"{self.project}_stt_private": {}}
@@ -451,6 +637,7 @@ class ServiceScopedDeploymentTests(unittest.TestCase):
             },
         }
         commands = []
+        mutations = []
         attempts = iter((False, True))
 
         def run(command, **_kwargs):
@@ -468,6 +655,7 @@ class ServiceScopedDeploymentTests(unittest.TestCase):
                 action="install",
                 stt_validated=None,
                 source_revision=source,
+                before_mutation=lambda: mutations.append("pull"),
                 run=run,
             ),
             "verified",
@@ -476,6 +664,7 @@ class ServiceScopedDeploymentTests(unittest.TestCase):
             commands[1],
             ["docker", "image", "pull", "--platform", "linux/amd64", image],
         )
+        self.assertEqual(mutations, ["pull"])
 
     def test_image_provenance_mismatch_blocks_install(self):
         image = self.release["services"]["gateway"]["image"]
@@ -506,6 +695,7 @@ class ServiceScopedDeploymentTests(unittest.TestCase):
                 "supplementary_read_gid": 988,
             },
         }
+        mutations = []
         with (
             patch(
                 "scripts.stt_deployment.model_directory", return_value=Path("/missing")
@@ -518,11 +708,54 @@ class ServiceScopedDeploymentTests(unittest.TestCase):
             ) as provision,
             patch("scripts.stt_deployment.check_models", return_value=[object()]),
         ):
-            staged = _ensure_selected_models(release, validated, action="install")
+            staged = _ensure_selected_models(
+                release,
+                validated,
+                action="install",
+                before_mutation=lambda: mutations.append("provision"),
+            )
         self.assertEqual(staged, [model["id"]])
         self.assertEqual(provision.call_args.kwargs["directory_mode"], 0o2750)
         self.assertEqual(provision.call_args.kwargs["file_mode"], 0o640)
         self.assertEqual(provision.call_args.kwargs["expected_group_gid"], 988)
+        self.assertEqual(mutations, ["provision"])
+
+    def test_model_preparation_failure_leaves_uncertainty_gate(self):
+        from scripts.project_lock import LockError, ProjectLock
+
+        model_release = {"services": {"stt": self.release["services"]["stt"]}}
+        validated = {
+            "release_root": Path("/private/models") / ("f" * 64),
+            "artifact_access": {
+                "artifact_owner_uid": 0,
+                "supplementary_read_gid": 988,
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "locks"
+            root.mkdir(mode=0o700)
+            with ProjectLock(self.project, root) as lock:
+                with (
+                    patch(
+                        "scripts.stt_deployment.model_directory",
+                        return_value=Path(temp) / "missing",
+                    ),
+                    patch(
+                        "scripts.stt_deployment.provision_models",
+                        side_effect=ModelProvisionError("artifact write failed"),
+                    ),
+                    self.assertRaisesRegex(
+                        ModelProvisionError, "artifact write failed"
+                    ),
+                ):
+                    _ensure_selected_models(
+                        model_release,
+                        validated,
+                        action="install",
+                        before_mutation=lock.mark_mutation_started,
+                    )
+            with self.assertRaisesRegex(LockError, "operator review"):
+                ProjectLock(self.project, root).acquire()
 
     def test_existing_corrupt_model_is_not_replaced(self):
         release = {"services": {"stt": self.release["services"]["stt"]}}
