@@ -7,10 +7,11 @@ import json
 import os
 import re
 import stat
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+
+from scripts.durable_files import mkdir_private, publish_immutable_file
 
 from scripts.service_deployment_profile import PROJECT_PATTERN
 
@@ -389,14 +390,7 @@ def _filesystem_type(path: Path) -> str:
 
 def _mkdir_private(path: Path, fsync: Callable[[int], None]) -> None:
     try:
-        path.mkdir(mode=0o700)
-        os.chmod(path, 0o700)
-        for directory in (path, path.parent):
-            fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-            try:
-                fsync(fd)
-            finally:
-                os.close(fd)
+        mkdir_private(path, fsync)
     except OSError as error:
         raise StateError(
             f"cannot durably create private state directory: {path}"
@@ -486,62 +480,26 @@ class StateStore:
         if filesystem not in SUPPORTED_FILESYSTEMS:
             raise StateError(f"unsupported state filesystem: {filesystem}")
         try:
-            directory_fd = os.open(
-                path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            publish_immutable_file(
+                path.parent,
+                path.name,
+                data,
+                fsync=self._fsync,
+                before_publish=(
+                    None
+                    if self._before_publish is None
+                    else lambda temporary, _target: self._before_publish(
+                        temporary, path
+                    )
+                ),
+                replace=replace,
             )
-        except OSError as error:
-            raise StateError(
-                f"cannot open state directory for publication: {path.parent}"
-            ) from error
-        tmp_name = f".pending-{uuid.uuid4().hex}"
-        try:
-            fd = os.open(
-                tmp_name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                0o600,
-                dir_fd=directory_fd,
-            )
-        except OSError as error:
-            os.close(directory_fd)
-            raise StateError(
-                f"cannot create temporary state record for {path.name}"
-            ) from error
-        tmp = path.parent / tmp_name
-        try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(data)
-                stream.flush()
-                self._fsync(stream.fileno())
-            if self._before_publish:
-                self._before_publish(tmp, path)
-            if replace:
-                os.replace(
-                    tmp_name,
-                    path.name,
-                    src_dir_fd=directory_fd,
-                    dst_dir_fd=directory_fd,
-                )
-            else:
-                os.link(
-                    tmp_name,
-                    path.name,
-                    src_dir_fd=directory_fd,
-                    dst_dir_fd=directory_fd,
-                    follow_symlinks=False,
-                )
-                os.unlink(tmp_name, dir_fd=directory_fd)
-            self._fsync(directory_fd)
         except FileExistsError as error:
             raise StateError(f"immutable record already exists: {path.name}") from error
+        except StateError:
+            raise
         except OSError as error:
             raise StateError(f"durable publication failed for {path.name}") from error
-        finally:
-            try:
-                os.unlink(tmp_name, dir_fd=directory_fd)
-            except FileNotFoundError:
-                pass
-            os.close(directory_fd)
 
     def _read(self, path: Path) -> dict:
         _reject_symlink_components(path)

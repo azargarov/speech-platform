@@ -659,19 +659,30 @@ def _render_selected(
     gateway_config: dict,
     stt_validated: dict | None,
     run=_run,
+    *,
+    compose_paths: dict[str, str | Path] | None = None,
 ) -> dict:
     command = [
         "docker",
         "compose",
+        "--project-directory",
+        str(Path(COMPOSE_BASE).parent.resolve()),
         "--project-name",
         project_name,
         "--env-file",
         "/dev/null",
         "-f",
-        COMPOSE_BASE,
+        str((compose_paths or {}).get("compose.yaml", COMPOSE_BASE)),
     ]
     if "stt" in selected:
-        command.extend(["-f", COMPOSE_CUDA, "--profile", "cuda"])
+        command.extend(
+            [
+                "-f",
+                str((compose_paths or {}).get("compose.stt-cuda.yaml", COMPOSE_CUDA)),
+                "--profile",
+                "cuda",
+            ]
+        )
     command.extend(["config", "--format", "json"])
     rendered = json.loads(run(command, environment=environment))
     from scripts.check_compose import validate as validate_compose

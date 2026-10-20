@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.deployment_state import StateError, StateStore, record_digest
 
@@ -336,6 +337,73 @@ class DeploymentStateTests(unittest.TestCase):
         self.store.put_generation(child)
         with self.assertRaisesRegex(StateError, "parent does not match"):
             self.store.set_installed_generation("g1")
+
+    def _prepare_promotable_generation(self):
+        self.store.put_operation_revision(revision())
+        for number, state in ((2, "READY"), (3, "APPLYING"), (4, "VERIFYING")):
+            entry = revision(number)
+            entry["state"] = state
+            self.store.put_operation_revision(entry)
+        self.store.put_generation(generation())
+
+    def test_pointer_replace_failure_before_replace_preserves_old_pointer(self):
+        self._prepare_promotable_generation()
+        self.store.set_installed_generation("g0")
+        before = (self.store.project / "installed.json").read_bytes()
+
+        def fail_before_replace(_temporary, _target):
+            raise OSError("injected pre-replace failure")
+
+        failing = StateStore(
+            self.root,
+            "voice-test",
+            before_publish=fail_before_replace,
+            filesystem_type=lambda _path: "ext4",
+        )
+        with self.assertRaises(StateError):
+            failing.set_installed_generation("g0")
+        self.assertEqual((self.store.project / "installed.json").read_bytes(), before)
+        self.assertEqual(list(self.store.project.glob(".pending-*")), [])
+
+    def test_pointer_replace_failure_at_atomic_replace_preserves_old_pointer(self):
+        self._prepare_promotable_generation()
+        self.store.set_installed_generation("g0")
+        before = (self.store.project / "installed.json").read_bytes()
+
+        def fail_replace(_source, _target, **_kwargs):
+            raise OSError("injected atomic replacement failure")
+
+        with patch("scripts.durable_files.os.replace", fail_replace):
+            with self.assertRaises(StateError):
+                self.store.set_installed_generation("g0")
+        self.assertEqual((self.store.project / "installed.json").read_bytes(), before)
+        self.assertEqual(list(self.store.project.glob(".pending-*")), [])
+
+    def test_pointer_directory_fsync_failure_reports_published_uncertain_pointer(self):
+        self._prepare_promotable_generation()
+        self.store.set_installed_generation("g0")
+        calls = 0
+
+        def fail_after_replace(fd):
+            nonlocal calls
+            calls += 1
+            # File fsync is first; the next fsync is the parent directory after replace.
+            if calls == 2:
+                raise OSError("injected post-replace directory fsync failure")
+            os.fsync(fd)
+
+        failing = StateStore(
+            self.root,
+            "voice-test",
+            fsync=fail_after_replace,
+            filesystem_type=lambda _path: "ext4",
+        )
+        with self.assertRaises(StateError):
+            failing.set_installed_generation("g0")
+        pointer = self.store.project / "installed.json"
+        self.assertTrue(pointer.exists())
+        self.assertEqual(json.loads(pointer.read_text())["generation_id"], "g0")
+        self.assertEqual(list(self.store.project.glob(".pending-*")), [])
 
     def test_malformed_operation_directory_and_revision_filename_are_reported(self):
         bad_dir = self.store.operations / "bad id"
