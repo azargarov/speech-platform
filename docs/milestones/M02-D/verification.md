@@ -19,6 +19,10 @@ acceptance.
 - `make governance-check PYTHON=.venv/bin/python` — passed.
 - `docker compose --env-file .env.example -f compose.yaml config --quiet` —
   passed.
+- A detached clean worktree at commit `94d40a4` passed
+  `make verify PYTHON=/home/master/speech-platform/.venv/bin/python`, including
+  all 426 script tests and 64 STT tests. The worktree had no `.env`; canonical
+  Compose static rendering also passed. No containers were started.
 - `git diff --check` — passed before commit.
 - Operator-reported model verification for release `v0.1.2`, model
   `large-v3-turbo`, manifest
