@@ -464,19 +464,27 @@ class DeploymentOrchestrationTests(unittest.TestCase):
         self.assertNotIn("scripts.stt_deployment", result.stdout)
 
     def test_missing_private_configuration_diagnostic_names_the_requirement(self):
-        with self.assertRaisesRegex(
-            ValueError,
-            "deployment configuration must be an explicit private file",
-        ):
-            run_deployment(
-                "plan",
-                profile_path="private/deployment/stt-cuda/missing-profile.yaml",
-                application_config="unused",
-                deployment_config="unused",
-                worker_config="unused",
-                release_path="releases/voiceservice-v0.1.2.yaml",
-                env_file="unused",
-            )
+        private_root = Path("private")
+        created_private_root = not private_root.exists()
+        if created_private_root:
+            private_root.mkdir(mode=0o700)
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "deployment configuration must be an explicit private file",
+            ):
+                run_deployment(
+                    "plan",
+                    profile_path="private/deployment/stt-cuda/missing-profile.yaml",
+                    application_config="unused",
+                    deployment_config="unused",
+                    worker_config="unused",
+                    release_path="releases/voiceservice-v0.1.2.yaml",
+                    env_file="unused",
+                )
+        finally:
+            if created_private_root:
+                private_root.rmdir()
 
     def test_schema_diagnostic_names_missing_requirements_not_values(self):
         with self.assertRaisesRegex(
