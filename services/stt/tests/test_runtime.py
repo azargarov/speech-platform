@@ -3,6 +3,9 @@ import tempfile
 import time
 import unittest
 import http.client
+import io
+import json
+from contextlib import redirect_stdout
 from unittest.mock import patch
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -310,16 +313,22 @@ class SupervisorTests(unittest.TestCase):
         runner.shutdown(1)
 
     def test_cooperative_cancellation_keeps_child_healthy(self):
-        runner = supervisor("success", duration=1, grace=0.2)
+        runner = supervisor("unresponsive", duration=0.25, grace=0.01)
         runner.start()
+        started = time.monotonic()
         with self.assertRaises(SpeechFailure) as caught:
             runner.transcribe(
-                TranscriptionRequest(b"x", "audio/wav"),
-                OperationContext(time.monotonic() + 0.06),
+                TranscriptionRequest(b"cancelled", "audio/wav"),
+                OperationContext(time.monotonic() + 0.04),
             )
         self.assertEqual(caught.exception.code, FailureCode.DEADLINE_EXCEEDED)
+        self.assertGreaterEqual(time.monotonic() - started, 0.2)
         self.assertFalse(runner.faulted)
         self.assertTrue(runner.child_alive)
+        result = runner.transcribe(
+            TranscriptionRequest(b"next", "audio/wav"), OperationContext()
+        )
+        self.assertEqual(result.text, "fake transcription (4 bytes)")
         runner.shutdown(1)
 
     def test_explicit_client_cancellation_is_cooperative(self):
@@ -344,6 +353,20 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(runner.child_alive)
         self.assertFalse(runner.faulted)
         runner.shutdown(1)
+
+    def test_explicit_shutdown_cleanup_is_bounded_when_exit_is_unconfirmed(self):
+        process_control = ControlledProcess()
+        runner = supervisor(process_control=process_control, exit_timeout=0.03)
+        runner.start()
+        process_control.hold_exit_confirmation = True
+        started = time.monotonic()
+        runner.shutdown(0.03)
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertTrue(runner.cleanup_unconfirmed)
+        self.assertFalse(runner.cleanup_event.is_set())
+        process_control.hold_exit_confirmation = False
+        self.assertTrue(runner.cleanup_event.wait(2))
+        runner.shutdown(0.1)
 
     def test_ipc_message_size_is_enforced_before_send(self):
         runner = supervisor()
@@ -386,83 +409,6 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse(runner.child_alive)
         runner.shutdown(0.1)
 
-    def test_cleanup_unconfirmed_is_bounded_and_blocks_replacement(self):
-        process_control = ControlledProcess()
-        process_control.hold_exit_confirmation = True
-        runner = supervisor(
-            "unresponsive",
-            duration=10,
-            grace=0.02,
-            process_control=process_control,
-            exit_timeout=0.03,
-        )
-        runner.start()
-        context = OperationContext(time.monotonic() + 0.06)
-        started = time.monotonic()
-        with self.assertRaises(SpeechFailure) as caught:
-            runner.transcribe(TranscriptionRequest(b"x", "audio/wav"), context)
-        self.assertEqual(caught.exception.code, FailureCode.DEADLINE_EXCEEDED)
-        self.assertTrue(caught.exception.retain_resources)
-        self.assertLess(time.monotonic() - started, 1)
-        self.assertTrue(runner.cleanup_unconfirmed)
-        self.assertFalse(runner.cleanup_event.is_set())
-        with self.assertRaises(RuntimeError):
-            runner.start()
-        process_control.hold_exit_confirmation = False
-        self.assertTrue(runner.cleanup_event.wait(2))
-        self.assertFalse(runner.cleanup_unconfirmed)
-        runner.shutdown(0.1)
-        runner.shutdown(0.1)
-        self.assertFalse(runner.child_alive)
-
-    def test_unconfirmed_cleanup_keeps_admission_bytes_and_readiness_latched(self):
-        process_control = ControlledProcess()
-        process_control.hold_exit_confirmation = True
-        original = InferenceSupervisor
-
-        def controlled_supervisor(*args, **kwargs):
-            return original(*args, process_control=process_control, **kwargs)
-
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            patch(
-                "services.stt.application.InferenceSupervisor", controlled_supervisor
-            ),
-        ):
-            app = make_application(
-                directory,
-                behavior="unresponsive",
-                duration=10,
-                cancel_grace=0.02,
-                exit_timeout=0.03,
-            )
-            with self.assertRaises(SpeechFailure) as caught:
-                app.transcribe(
-                    TranscriptionRequest(b"retained", "audio/wav"),
-                    OperationContext(time.monotonic() + 0.06),
-                )
-            self.assertEqual(caught.exception.code, FailureCode.DEADLINE_EXCEEDED)
-            self.assertTrue(app.runner.cleanup_unconfirmed)
-            self.assertEqual(
-                app.lifecycle.snapshot()[1], ModelState.CLEANUP_UNCONFIRMED
-            )
-            self.assertFalse(app.lifecycle.ready())
-            snapshot = app._admission.snapshot()
-            self.assertTrue(snapshot["active"])
-            self.assertEqual(snapshot["retained_bytes"], len(b"retained"))
-            self.assertGreaterEqual(snapshot["retained_bytes"], 0)
-            process_control.hold_exit_confirmation = False
-            self.assertTrue(app.runner.cleanup_event.wait(2))
-            deadline = time.monotonic() + 1
-            while (
-                app._admission.snapshot()["retained_bytes"] != 0
-                and time.monotonic() < deadline
-            ):
-                time.sleep(0.005)
-            self.assertEqual(app._admission.snapshot()["retained_bytes"], 0)
-            self.assertFalse(app._admission.snapshot()["active"])
-            app.close()
-
     def test_child_crash_during_cancellation_faults_and_reaps(self):
         runner = supervisor("crash", exit_timeout=0.2)
         runner.start()
@@ -500,30 +446,48 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(runner.child_alive)
         runner.shutdown(0.5)
 
-    def test_unresponsive_child_is_terminated_reaped_and_fault_latched(self):
-        runner = supervisor("unresponsive", duration=10, grace=0.03)
+    def test_fatal_response_is_latched_when_request_is_cancelled(self):
+        class FatalResponseReader:
+            def __init__(self):
+                self.calls = 0
+
+            def __call__(self, pipe, maximum):
+                self.calls += 1
+                payload = pipe.recv_bytes(maximum)
+                if self.calls == 2:
+                    return b'{"type":"failure","code":"backend_failed","fatal":true}'
+                return payload
+
+        runner = supervisor(response_reader=FatalResponseReader())
         runner.start()
-        with self.assertRaises(SpeechFailure):
-            runner.transcribe(
-                TranscriptionRequest(b"x", "audio/wav"),
-                OperationContext(time.monotonic() + 0.08),
-            )
-        self.assertTrue(runner.faulted)
-        self.assertFalse(runner.child_alive)
+        context = OperationContext()
+        context.cancel()
         with self.assertRaises(SpeechFailure) as caught:
             runner.transcribe(
-                TranscriptionRequest(b"x", "audio/wav"), OperationContext()
+                TranscriptionRequest(b"x", "audio/wav"),
+                context,
             )
-        self.assertEqual(caught.exception.code, FailureCode.NOT_READY)
+        self.assertEqual(caught.exception.code, FailureCode.CANCELLED)
+        self.assertTrue(runner.faulted)
+        self.assertFalse(runner.child_alive)
         runner.shutdown(0.1)
 
     def test_child_crash_and_load_failure_are_latched(self):
         crashed = supervisor("crash")
         crashed.start()
-        with self.assertRaises(SpeechFailure):
+        events = io.StringIO()
+        with redirect_stdout(events), self.assertRaises(SpeechFailure):
             crashed.transcribe(
                 TranscriptionRequest(b"x", "audio/wav"), OperationContext()
             )
+        parsed = [json.loads(line) for line in events.getvalue().splitlines()]
+        self.assertTrue(
+            any(
+                event.get("event") == "inference_worker_exited"
+                and event.get("exitcode") not in (None, 0)
+                for event in parsed
+            )
+        )
         self.assertTrue(crashed.faulted)
         self.assertFalse(crashed.child_alive)
         crashed.shutdown(0.1)

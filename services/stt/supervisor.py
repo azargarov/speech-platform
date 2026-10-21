@@ -70,7 +70,9 @@ class InferenceSupervisor:
         self._artifact = artifact
         self._device = device
         self._capabilities = capabilities
-        self._grace = cooperative_grace_seconds
+        # Retained in the constructor/config contract for compatibility. Active
+        # inference is never terminated by this setting; its response must be
+        # consumed before the serialized IPC channel can serve another request.
         self._exit_timeout = process_exit_timeout_seconds
         self._max_message_bytes = max_message_bytes
         self._load_timeout = model_load_timeout_seconds
@@ -80,6 +82,7 @@ class InferenceSupervisor:
         self._lock = threading.RLock()
         self._ctx = multiprocessing.get_context("spawn")
         self._process = None
+        self._exit_logged = False
         self._request_pipe = None
         self._response_pipe = None
         self._cancel_event = None
@@ -225,7 +228,6 @@ class InferenceSupervisor:
                     retain_resources=not confirmed,
                 ) from exc
 
-            cancel_started = None
             while True:
                 try:
                     response_available = self._poll_response(0.02)
@@ -248,27 +250,26 @@ class InferenceSupervisor:
                         FailureCode.NOT_READY, "inference worker failed"
                     )
                 if context.cancelled():
-                    if cancel_started is None:
-                        self._cancel_event.set()
-                        cancel_started = time.monotonic()
-                    elif time.monotonic() - cancel_started >= self._grace:
-                        confirmed = self._force_reap()
-                        self._faulted = True
-                        raise self._cancel_failure(
-                            context, retain_resources=not confirmed
-                        )
+                    # Signal cooperative checkpoints, but keep the healthy child
+                    # alive until its response is consumed. Native inference may
+                    # not observe this event until the native call has returned.
+                    self._cancel_event.set()
 
             if response["type"] == "failure":
-                if context.cancelled():
-                    raise self._cancel_failure(context)
                 code = FailureCode(response["code"])
                 if response.get("fatal", False):
                     confirmed = self._fatal_child_fault("fatal backend failure")
+                    if context.cancelled():
+                        raise self._cancel_failure(
+                            context, retain_resources=not confirmed
+                        )
                     raise SpeechFailure(
                         code,
                         response.get("diagnostic"),
                         retain_resources=not confirmed,
                     )
+                if context.cancelled():
+                    raise self._cancel_failure(context)
                 raise SpeechFailure(code, response.get("diagnostic"))
             if context.cancelled():
                 raise self._cancel_failure(context)
@@ -515,6 +516,10 @@ class InferenceSupervisor:
         process = self._process
         if process is not None:
             self._join_bounded(process, 0)
+            if process.exitcode is not None:
+                if not self._exit_logged:
+                    _emit_child_exit(process)
+                    self._exit_logged = True
         self._cleanup_unconfirmed = False
         self._close_pipes()
         self.cleanup_event.set()
@@ -642,6 +647,11 @@ def _child_main(
                     else None,
                 }
             except SpeechFailure as exc:
+                _emit_event(
+                    "inference_failure",
+                    code=exc.code.value,
+                    fatal=isinstance(exc, FatalBackendFailure),
+                )
                 response = {
                     "type": "failure",
                     "code": exc.code.value,
@@ -649,13 +659,23 @@ def _child_main(
                     "fatal": isinstance(exc, FatalBackendFailure),
                 }
             except Exception as exc:
+                _emit_event(
+                    "inference_failure",
+                    code="backend_failed",
+                    fatal=False,
+                    exception_type=type(exc).__name__,
+                )
                 response = {
                     "type": "failure",
                     "code": "backend_failed",
                     "diagnostic": str(exc),
                 }
             send.send_bytes(_encode(response, max_bytes))
-    except Exception:
+    except Exception as exc:
+        _emit_event(
+            "inference_worker_startup_failure",
+            exception_type=type(exc).__name__,
+        )
         try:
             send.send_bytes(
                 _encode(
@@ -672,3 +692,13 @@ def _child_main(
     finally:
         receive.close()
         send.close()
+
+
+def _emit_child_exit(process):
+    _emit_event("inference_worker_exited", exitcode=process.exitcode)
+
+
+def _emit_event(event, **fields):
+    # Diagnostics are fixed classifications and metadata; never emit exception text,
+    # audio, transcripts, paths or credentials.
+    print(json.dumps({"event": event, **fields}, separators=(",", ":")), flush=True)

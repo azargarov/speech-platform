@@ -1,6 +1,6 @@
 # STT worker, model and inference execution lifecycle
 
-Status: accepted for M02 design; implementation authorization remains separate.
+Status: accepted for M02 design; active-request cancellation behavior amended by [ADR 0019](0019-stt-active-cancellation.md). Implementation authorization remains separate.
 
 ## Context
 
@@ -8,7 +8,7 @@ Native inference may outlive an HTTP task or fail while using GPU memory. Worker
 
 ## Decision
 
-Keep worker-control and model lifecycle state machines separate. M02 limits each worker instance to one resident model and one active job, with configured bounded FIFO admission. A persistent supervised child owns decoder/model/native inference state. Disconnect/deadline removes queued work immediately and signals active cancellation. The child checks cancellation between supported checkpoints; after a configured grace the parent terminates it. Capacity remains owned until child completion or exit is confirmed. Forced termination, OOM or uncertain cleanup fault-latches the model and requires manual recovery. No same-request retry, precision downgrade, model eviction, or automatic restart loop.
+Keep worker-control and model lifecycle state machines separate. M02 limits each worker instance to one resident model and one active job, with configured bounded FIFO admission. A persistent supervised child owns decoder/model/native inference state. Disconnect/deadline removes queued work immediately and signals active cancellation. See ADR 0019 for active-request behavior. Forced termination, OOM or uncertain cleanup fault-latches the model and requires manual recovery. No same-request retry, precision downgrade, model eviction, or automatic restart loop.
 
 The one-model/one-job limit is an M02 implementation constraint, not a permanent architecture invariant. Orderly shutdown disables admission, drops queued jobs, drains the active job to deadline, then follows cancel/terminate/reap. Liveness describes the control process; readiness describes a loaded usable model with admission enabled. Queue saturation returns 429 and does not make readiness flap.
 

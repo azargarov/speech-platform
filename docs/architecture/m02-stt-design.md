@@ -372,9 +372,8 @@ stateDiagram-v2
     Running --> Released: success or recoverable request error
     Running --> Cancelling: disconnect or deadline
     Cancelling --> Released: child returns cancelled/result and acknowledges
-    Cancelling --> Terminating: cooperative grace expires
-    Terminating --> Released: child exit confirmed
-    Terminating --> FaultLatched: process exit uncertain
+    Cancelling --> Released: matching in-flight response consumed
+    Cancelling --> FaultLatched: child crash or IPC failure
     FaultLatched --> Released: confirmed exit and operator recovery
 ```
 
@@ -382,9 +381,9 @@ The HTTP adapter limits upload bytes while streaming and does not trust multipar
 
 On client disconnect or deadline, immediately remove a queued item and release its audio and queue accounting. For active work, signal cancellation to the inference child. The adapter checks cancellation between decoder/inference checkpoints. faster-whisper's segment iterator must be consumed inside the inference operation because iteration performs work; a return from `transcribe()` alone is not completion. [faster-whisper iterator behavior](https://github.com/SYSTRAN/faster-whisper/blob/master/README.md).
 
-Keep active-job slot, process ownership and audio accounting until the child returns a terminal response or its exit is confirmed. After cooperative grace, terminate then kill only after the configured process-exit interval. Do not start a replacement while the old PID may still own GPU allocations. If exit is uncertain, latch a worker fault, reject queued work with 503 and require manual operator recovery. The client may already have received no response after disconnect; for a live connection, return 504 only after bounded cleanup is initiated. A deadline does not promise immediate native-kernel or driver cleanup.
+Keep active-job slot, process ownership and audio accounting until the child returns its terminal response. The parent consumes the response even when the caller has cancelled, then discards the result. The single request/response channel is serialized, so it cannot send a subsequent request while a prior response remains unread. This can delay release while native inference runs; `cooperative_cancel_grace_seconds` remains in validated configuration for compatibility but no longer controls active-request termination. Child crash, malformed/broken IPC and fatal backend failure latch a fault and use bounded terminate/kill/reap. Explicit shutdown also has a bounded drain and cleanup path. If exit is uncertain, latch a worker fault and require manual operator recovery. A deadline does not promise immediate native-kernel or driver cleanup.
 
-Shutdown disables new admission, removes queued jobs and releases their buffers, then drains the active job until the configured deadline. After that it uses the same cancel/terminate/reap sequence. Compose must not restart repeatedly after an OOM/uncertain cleanup; recovery is manual. Liveness remains separate from model readiness so the health system does not create a restart loop.
+Shutdown disables new admission, removes queued jobs and releases their buffers, then drains the active job until the configured deadline. It then follows its bounded child shutdown/terminate/reap sequence. Compose must not restart repeatedly after an OOM/uncertain cleanup; recovery is manual. Liveness remains separate from model readiness so the health system does not create a restart loop.
 
 On OOM or unexpected child exit, fail the active request safely, release queued jobs, mark model faulted and stop admission. Do not retry that request, reload at a smaller precision, evict the model, flush another process's GPU state, or call Ollama/Dify. A clean, ordinary request-level decode error need not fault the loaded model. Distinguish such errors through adapter exception types, not string matching. Error responses contain stable code/message only; logs omit raw exception text when it may reveal paths or payloads.
 
