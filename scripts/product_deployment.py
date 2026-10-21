@@ -124,6 +124,31 @@ def verify_project_ownership(values):
     return owned
 
 
+def parse_compose_readiness(output: str) -> list[dict]:
+    expected = {"gateway", "stt", "tts"}
+    try:
+        services = json.loads(output or "[]")
+    except json.JSONDecodeError:
+        try:
+            services = [
+                json.loads(line) for line in output.splitlines() if line.strip()
+            ]
+        except json.JSONDecodeError as exc:
+            raise OperatorError(
+                "Compose readiness response was not valid JSON"
+            ) from exc
+    if not isinstance(services, list) or any(
+        not isinstance(item, dict) for item in services
+    ):
+        raise OperatorError("Compose readiness response was not valid JSON")
+    names = [item.get("Service") for item in services]
+    if any(not isinstance(name, str) for name in names):
+        raise OperatorError("Compose readiness response had an unexpected service set")
+    if len(names) != len(set(names)) or set(names) != expected:
+        raise OperatorError("Compose readiness response had an unexpected service set")
+    return services
+
+
 def checks(
     *,
     model=True,
@@ -389,12 +414,7 @@ def wait_ready(port: int, bind_address: str, timeout=240):
             ],
             capture=True,
         )
-        try:
-            services = json.loads(project.stdout or "[]")
-        except json.JSONDecodeError as exc:
-            raise OperatorError(
-                "Compose readiness response was not valid JSON"
-            ) from exc
+        services = parse_compose_readiness(project.stdout)
         healthy = {
             item.get("Service")
             for item in services

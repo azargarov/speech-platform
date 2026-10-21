@@ -9,6 +9,37 @@ from scripts import product_deployment
 
 
 class ProductDeploymentTests(unittest.TestCase):
+    def test_compose_readiness_accepts_json_array(self):
+        services = [
+            {"Service": name, "State": "running", "Health": "healthy"}
+            for name in ("gateway", "stt", "tts")
+        ]
+        self.assertEqual(
+            product_deployment.parse_compose_readiness(json.dumps(services)), services
+        )
+
+    def test_compose_readiness_accepts_newline_delimited_json_objects(self):
+        services = [
+            {"Service": name, "State": "running", "Health": "healthy"}
+            for name in ("gateway", "stt", "tts")
+        ]
+        output = "\n".join(json.dumps(service) for service in services) + "\n"
+        self.assertEqual(product_deployment.parse_compose_readiness(output), services)
+
+    def test_compose_readiness_rejects_malformed_output_and_wrong_services(self):
+        for output in (
+            '{"Service":"gateway"}\nnot-json',
+            json.dumps([{"Service": "gateway"}]),
+            "\n".join(
+                json.dumps({"Service": name}) for name in ("gateway", "gateway", "tts")
+            ),
+        ):
+            with (
+                self.subTest(output=output),
+                self.assertRaises(product_deployment.OperatorError),
+            ):
+                product_deployment.parse_compose_readiness(output)
+
     def test_env_reader_rejects_unknown_and_duplicate_settings(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
