@@ -124,6 +124,66 @@ def verify_project_ownership(values):
     return owned
 
 
+def check_gateway_port(ip: str, port: int, values, owns_project: bool) -> None:
+    """Reserve a free port, or accept its existing canonical Gateway owner."""
+    port_probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        port_probe.bind((ip, port))
+        return
+    except OSError as exc:
+        if exc.errno not in {98, 10048}:
+            raise OperatorError(f"Gateway port {ip}:{port} cannot be reserved") from exc
+    finally:
+        port_probe.close()
+
+    if owns_project:
+        project = values.get("COMPOSE_PROJECT_NAME", "speech-platform")
+        canonical = str((ROOT / "compose.yaml").resolve())
+        containers = run(
+            ["docker", "ps", "--filter", f"publish={port}", "--format", "{{.ID}}"],
+            capture=True,
+        ).stdout.splitlines()
+        if len(containers) == 1:
+            inspected = run(["docker", "inspect", containers[0]], capture=True)
+            try:
+                data = json.loads(inspected.stdout)
+            except json.JSONDecodeError as exc:
+                raise OperatorError(
+                    "Docker container inspection was not valid JSON"
+                ) from exc
+            if len(data) == 1:
+                container = data[0]
+                labels = (container.get("Config") or {}).get("Labels") or {}
+                config_files = {
+                    str(Path(path).resolve())
+                    for path in labels.get(
+                        "com.docker.compose.project.config_files", ""
+                    ).split(",")
+                    if path
+                }
+                bindings = (
+                    (container.get("NetworkSettings") or {}).get("Ports") or {}
+                ).get("8080/tcp") or []
+                matching_bindings = [
+                    binding
+                    for binding in bindings
+                    if binding.get("HostIp") == ip
+                    and binding.get("HostPort") == str(port)
+                ]
+                if (
+                    container.get("State", {}).get("Running") is True
+                    and labels.get("com.docker.compose.project") == project
+                    and labels.get("com.docker.compose.service") == "gateway"
+                    and str(ROOT.resolve())
+                    == labels.get("com.docker.compose.project.working_dir")
+                    and canonical in config_files
+                    and len(matching_bindings) == 1
+                    and len(bindings) == 1
+                ):
+                    return
+    raise OperatorError(f"Gateway port {ip}:{port} is already in use")
+
+
 def parse_compose_readiness(output: str) -> list[dict]:
     expected = {"gateway", "stt", "tts"}
     try:
@@ -188,18 +248,6 @@ def checks(
         raise OperatorError("SPEECH_PORT or STT_GPU_DEVICE is outside its valid range")
     if not socket.inet_aton(ip):
         raise OperatorError("SPEECH_BIND_IP must resolve to an IPv4 address")
-    if check_port:
-        port_probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            port_probe.bind((ip, port))
-        except OSError as exc:
-            if exc.errno in {98, 10048}:
-                raise OperatorError(
-                    f"Gateway port {ip}:{port} is already in use"
-                ) from exc
-            raise OperatorError(f"Gateway port {ip}:{port} cannot be reserved") from exc
-        finally:
-            port_probe.close()
     if not ipaddress.ip_address(ip).is_loopback:
         if len(values.get("SPEECH_API_TOKEN", "")) < 32:
             raise OperatorError(
@@ -240,6 +288,8 @@ def checks(
     run(["docker", "info"], capture=True)
     compose_version = run(["docker", "compose", "version"], capture=True).stdout.strip()
     owns_project = verify_project_ownership(values)
+    if check_port:
+        check_gateway_port(ip, port, values, owns_project)
     rows = []
     active_gpu_processes = 0
     if hardware:

@@ -1,4 +1,5 @@
 import json
+import errno
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,113 @@ from scripts import product_deployment
 
 
 class ProductDeploymentTests(unittest.TestCase):
+    def test_gateway_port_preflight_accepts_a_free_port(self):
+        probe = SimpleNamespace(bind=lambda _address: None, close=lambda: None)
+        with (
+            patch.object(product_deployment.socket, "socket", return_value=probe),
+            patch.object(product_deployment, "run") as run,
+        ):
+            product_deployment.check_gateway_port(
+                "127.0.0.1", 8080, {}, owns_project=False
+            )
+        run.assert_not_called()
+
+    def test_gateway_port_preflight_accepts_canonical_project_gateway(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            compose = root / "compose.yaml"
+            compose.touch()
+            container = {
+                "State": {"Running": True},
+                "Config": {
+                    "Labels": {
+                        "com.docker.compose.project": "speech-platform",
+                        "com.docker.compose.service": "gateway",
+                        "com.docker.compose.project.working_dir": str(root),
+                        "com.docker.compose.project.config_files": str(compose),
+                    }
+                },
+                "NetworkSettings": {
+                    "Ports": {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}]}
+                },
+            }
+            probe = SimpleNamespace(
+                bind=lambda _address: (_ for _ in ()).throw(
+                    OSError(errno.EADDRINUSE, "busy")
+                ),
+                close=lambda: None,
+            )
+
+            def docker_run(args, **_kwargs):
+                if args[1] == "ps":
+                    return SimpleNamespace(stdout="gateway-id\n")
+                return SimpleNamespace(stdout=json.dumps([container]))
+
+            with (
+                patch.object(product_deployment, "ROOT", root),
+                patch.object(product_deployment.socket, "socket", return_value=probe),
+                patch.object(product_deployment, "run", side_effect=docker_run),
+            ):
+                product_deployment.check_gateway_port(
+                    "127.0.0.1", 8080, {}, owns_project=True
+                )
+
+    def test_gateway_port_preflight_rejects_foreign_port_owner(self):
+        probe = SimpleNamespace(
+            bind=lambda _address: (_ for _ in ()).throw(
+                OSError(errno.EADDRINUSE, "busy")
+            ),
+            close=lambda: None,
+        )
+        with (
+            patch.object(product_deployment.socket, "socket", return_value=probe),
+            patch.object(
+                product_deployment,
+                "run",
+                return_value=SimpleNamespace(stdout=""),
+            ),
+            self.assertRaisesRegex(product_deployment.OperatorError, "already in use"),
+        ):
+            product_deployment.check_gateway_port(
+                "127.0.0.1", 8080, {}, owns_project=False
+            )
+
+    def test_gateway_port_preflight_rejects_foreign_compose_project(self):
+        probe = SimpleNamespace(
+            bind=lambda _address: (_ for _ in ()).throw(
+                OSError(errno.EADDRINUSE, "busy")
+            ),
+            close=lambda: None,
+        )
+        foreign = {
+            "State": {"Running": True},
+            "Config": {
+                "Labels": {
+                    "com.docker.compose.project": "other-project",
+                    "com.docker.compose.service": "gateway",
+                    "com.docker.compose.project.working_dir": "/other",
+                    "com.docker.compose.project.config_files": "/other/compose.yaml",
+                }
+            },
+            "NetworkSettings": {
+                "Ports": {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}]}
+            },
+        }
+
+        def docker_run(args, **_kwargs):
+            if args[1] == "ps":
+                return SimpleNamespace(stdout="foreign-id\n")
+            return SimpleNamespace(stdout=json.dumps([foreign]))
+
+        with (
+            patch.object(product_deployment.socket, "socket", return_value=probe),
+            patch.object(product_deployment, "run", side_effect=docker_run),
+            self.assertRaisesRegex(product_deployment.OperatorError, "already in use"),
+        ):
+            product_deployment.check_gateway_port(
+                "127.0.0.1", 8080, {}, owns_project=True
+            )
+
     def test_compose_readiness_accepts_json_array(self):
         services = [
             {"Service": name, "State": "running", "Health": "healthy"}
