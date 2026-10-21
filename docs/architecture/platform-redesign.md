@@ -1,6 +1,6 @@
 # VoiceService platform architecture and migration plan
 
-Status: historical deployment roadmap, superseded for normal operation by [ADR 0018](../adr/0018-git-compose-product-operations.md). M01C–M01E and M01F-A/B1/B2 retain their recorded outcomes. M01F-B3.1 implementation and evidence remain preserved as optional lifecycle tooling; G0 adoption and snapshot capture are not installation prerequisites. The active product priority is M02-D, STT v1 completion. The repository remains `speech-platform`; Speech Platform is the product name.
+Status: historical deployment roadmap, superseded for normal operation by [ADR 0018](../adr/0018-git-compose-product-operations.md). M01C–M01E and M01F-A/B1/B2 retain their recorded outcomes. M01F-B3.1 implementation and evidence remain preserved as optional lifecycle tooling; G0 adoption and snapshot capture are not installation prerequisites. M02-D STT v1 is PASS/complete; M03 TTS is in planning for operator review and is not implementation-authorized. The repository remains `speech-platform`; Speech Platform is the product name.
 
 ## Current operating decision
 
@@ -8,7 +8,7 @@ One tracked production configuration in a supported Git release and Docker Compo
 
 The accepted M01E deployment path and legacy deployment tools remain available for their recorded scopes. They are not the new product installation interface. Do not infer that prior M01E private-config deployment is equivalent to the clean-checkout product path.
 
-The M01C–M01G plan below is retained as historical planning and acceptance evidence. Its sequencing and requirements for private host configuration, generations, snapshots, mandatory rollback and M04-gated public routing are superseded for normal operation by ADR 0018. Do not use those old milestones as STT v1 installation prerequisites. The current product slice is M02-D; optional STT lifecycle work, TTS and future text transformation are tracked in [PLANS.md](../../PLANS.md).
+The M01C–M01G plan below is retained as historical planning and acceptance evidence. Its sequencing and requirements for private host configuration, generations, snapshots, mandatory rollback and M04-gated public routing are superseded for normal operation by ADR 0018. Do not use those old milestones as STT v1 installation prerequisites. The accepted product path includes M02-D; M03 TTS planning is tracked in [PLANS.md](../../PLANS.md) and [the M03 plan](../milestones/M03/plan.md). Optional STT lifecycle work and future text transformation remain separate.
 
 ## Executive recommendation
 
