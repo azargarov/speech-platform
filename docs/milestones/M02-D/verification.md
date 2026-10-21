@@ -1,8 +1,8 @@
 # M02-D verification evidence
 
-Status: **implementation checks PASS; runtime acceptance NOT ESTABLISHED**.
-This is evidence for implementation review, not milestone closeout or operator
-acceptance.
+Status: **PASS; COMPLETE (2026-10-21).** Implementation checks and operator-
+reported runtime acceptance are recorded below. Operator runtime evidence is
+attributed and is not represented as a local execution by this closeout.
 
 ## OBSERVED
 
@@ -36,7 +36,7 @@ acceptance.
   issued by this work.
 - `.env` was mode 0600 and ignored by Git.
 
-## NOT ESTABLISHED
+## Historical implementation checkpoint limitations (superseded where noted below)
 
 - A fresh `make plan` stopped at the read-only model integrity check because
   this process has no cached sudo authorization for the root-owned model
@@ -45,11 +45,14 @@ acceptance.
 - Product `make install`, Compose startup/redeployment and Gateway-to-worker
   runtime calls were not run. Three existing GPU compute processes make an
   install/inference rehearsal unsafe for the protected deployments.
-- Real Russian, English and Swedish audio inference, automatic detection,
-  forced source-language output and translation pairs were not run against
-  this product deployment. No Swedish fixture was available in the repository.
+- At the implementation checkpoint, real Russian, English and Swedish audio
+  inference had not been run against this product deployment. The operator
+  later reported successful real Russian/English transcription; Swedish
+  runtime behavior remains NOT ESTABLISHED.
 - Restart recovery and clean-checkout runtime installation were not exercised.
-- STT v1 operator acceptance and release-tag readiness are not established.
+- At the implementation checkpoint, STT v1 operator acceptance was pending;
+  operator acceptance is recorded below. Release-tag readiness is not
+  established by this milestone closeout.
 
 ## Pre-correction translation behavior (superseded; not runtime-verified)
 
@@ -61,10 +64,11 @@ acceptance.
 - Detected languages outside `ru`, `en` and `sv` return
   `unsupported_detected_language`.
 
-These combinations have deterministic unit coverage; their real-audio quality
-and runtime behavior remain NOT ESTABLISHED.
+These combinations have deterministic unit coverage. The later operator
+runtime rejection evidence is recorded below; translation quality is not
+established because unsupported pairs are rejected rather than translated.
 
-## Safe next operator actions
+## Historical safe next operator actions
 
 1. In a planned GPU maintenance window, ensure the selected GPU has no
    protected inference workload running.
@@ -77,6 +81,49 @@ and runtime behavior remain NOT ESTABLISHED.
    repeat with forced source and advertised output selections.
 6. Record results and obtain operator validation before closing M02-D or
    declaring STT v1 accepted.
+
+These actions were the pending procedure at the implementation checkpoint and
+are superseded by the operator acceptance recorded below.
+
+## Operator runtime acceptance (2026-10-21)
+
+Evidence provenance: the following target-runtime observations were supplied
+by the operator for this closeout. They were not executed or independently
+reproduced by the local documentation verification commands.
+
+- **OBSERVED (operator-reported):** canonical deployment revision was
+  `3aa5f68c1d9a058ed2714b7b257c5b258a23c00a`.
+- **OBSERVED (operator-reported):** active CUDA inference was confirmed before
+  client cancellation. Cancellation returned nonfatal outcome `cancelled`.
+- **OBSERVED (operator-reported):** inference child PID `2639811` survived the
+  client disconnect, and GPU activity completed afterward.
+- **OBSERVED (operator-reported):** a distinct follow-up Russian transcription
+  succeeded after cancellation.
+- **OBSERVED (operator-reported):** Gateway and STT remained healthy and ready.
+  No unexpected child exit or fatal backend event was observed.
+- **OBSERVED (operator-reported):** real Russian and English transcriptions
+  succeeded. Unsupported language pairs were explicitly rejected with
+  `unsupported_translation`.
+- **INTERPRETATION:** the observations accept the bounded M02-D CUDA
+  cancellation behavior and multilingual product path for the canonical
+  deployment revision. They do not establish Swedish runtime behavior,
+  translation quality, sustained load, capacity, or release-tag readiness.
+- **NOT ESTABLISHED:** independent local reproduction of the target runtime
+  event; behavior outside the supplied deployment and request conditions.
+
+Local closeout verification commands and their actual outcomes are recorded
+after documentation edits in the final closeout entry below.
+
+## Documentation closeout verification (2026-10-21)
+
+- **OBSERVED:** `make governance-check PYTHON=.venv/bin/python` exited 0;
+  structural governance validation passed and both governance tests passed.
+- **OBSERVED:** `git diff --check` exited 0.
+- **OBSERVED:** a local Python Markdown-link check over `PLANS.md` and all five
+  M02-D records found no missing relative targets (6 files checked).
+- **INTERPRETATION:** these checks establish repository governance structure,
+  changed-text whitespace integrity and local documentation link targets. They
+  do not independently establish the operator-reported runtime observations.
 
 # Cancellation regression verification (2026-10-21)
 

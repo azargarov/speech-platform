@@ -1,6 +1,7 @@
 # M02-D — STT v1 product path
 
-Status: **IMPLEMENTATION AUTHORIZED; VALIDATION IN PROGRESS.**
+Status: **PASS; COMPLETE (2026-10-21).** See [verification](verification.md),
+[user validation](user-validation.md), and [result](result.md).
 
 ## Objective
 
@@ -94,6 +95,6 @@ model store. Keep historic deployment-state/snapshot work optional.
 - Isolated runtime installation and real multilingual audio only after model,
   GPU and port preflight; project identity must be unique and cleanup scoped.
 
-Current observed results and runtime limitations are recorded in
-[verification.md](verification.md). These checks do not close the milestone;
-operator validation remains required.
+Implementation checks and operator-reported runtime acceptance are recorded
+in [verification.md](verification.md). The operator accepted M02-D as PASS on
+2026-10-21; see [user-validation.md](user-validation.md) and [result.md](result.md).
