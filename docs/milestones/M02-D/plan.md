@@ -16,8 +16,9 @@ model store. Keep historic deployment-state/snapshot work optional.
   (`auto|ru|en|sv`); retain the existing internal `language` source alias.
 - Automatic detection, detection probability when supplied by the backend,
   unsupported detected-language refusal, raw transcription preservation and
-  explicit translation availability. Use faster-whisper's English
-  translation task; reject cross-language targets without a backend.
+  explicit per-model translation capability. Preserve large-v3-turbo as the
+  primary model and configure translation unavailable for it; reject
+  unsupported cross-language requests with `unsupported_translation`.
 - One Git-hosted production configuration, configurable host/model/GPU values,
   pinned build base/dependency inputs, validation, idempotent install, status
   and STT smoke commands without a `private/deployment/` dependency.
@@ -33,14 +34,14 @@ model store. Keep historic deployment-state/snapshot work optional.
 - No TTS inference, transcript refinement, cloud translation, external
   backup/NAS, generation adoption, snapshot capture, automatic rollback,
   image publication, tag creation or push.
-- No public claim of unsupported ru/sv cross-language translation.
+- No new translation service and no model change.
 
 ## Design boundaries
 
 - Gateway owns the public endpoint, request cap, authentication check, worker
   forwarding and readiness probe. It does not decode audio or choose a model.
-- STT owns detection, supported-language policy, transcription and the
-  faster-whisper English translation call. It does not call Gateway or TTS.
+- STT owns detection, supported-language policy, transcription and enforcing
+  configured per-model translation capability. It does not call Gateway or TTS.
 - Compose owns service identity, networks, restart policy, host exposure,
   resources, GPU selection and read-only model bind.
 - The Make/CLI layer validates inputs and invokes exact project-scoped Compose
@@ -59,9 +60,10 @@ model store. Keep historic deployment-state/snapshot work optional.
 4. Automatic and forced `ru`, `en`, and `sv` source selection are covered by
    deterministic tests. Unsupported detection, invalid codes, legacy alias
    conflicts and unsupported translation pairs fail explicitly.
-5. Same-language output returns raw transcription. English translation
-   output returns both original transcription and translated text. Confidence
-   is emitted only when genuinely supplied by automatic detection.
+5. Same-language and automatic output return raw transcription. Translation
+   requests are gated by the selected model's configured capability, and
+   `translated=true` is never returned for a model without that capability.
+   Confidence is emitted only when genuinely supplied by automatic detection.
 6. Configuration is strict; model and image inputs are immutable/pinned;
    `.env` and credentials remain private; loopback is the default exposure.
 7. `make verify`, governance validation, `git diff --check`, clean-checkout
@@ -71,9 +73,9 @@ model store. Keep historic deployment-state/snapshot work optional.
 
 ## Risks and limits
 
-- Whisper's built-in translation target is English. ru/sv cross-target
-  translation needs a separately provisioned and evaluated local model. The
-  API will surface this limitation explicitly.
+- The deployed large-v3-turbo model supports multilingual transcription but
+  does not reliably support speech-to-English translation. Its configuration
+  disables translation; translation-capable models can opt in independently.
 - The GPU is shared with three active STT containers. An isolated test must
   pass a conservative free-memory/process preflight and one-request bound;
   otherwise GPU execution remains NOT ESTABLISHED pending a safe window.

@@ -11,6 +11,8 @@ backend:
     beam_size: 1
 models:
   - alias: smoke-small
+    # Set according to the deployed model's verified capability.
+    translation_supported: true
     family: whisper
     immutable_revision: REPLACE_WITH_40_OR_64_HEX_SOURCE_REVISION
     artifacts:

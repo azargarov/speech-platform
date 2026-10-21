@@ -19,7 +19,7 @@ paths:
   /v1/stt/transcriptions:
     post:
       operationId: transcribe
-      summary: Transcribe audio and optionally translate to English
+      summary: Transcribe audio and optionally translate when supported by the selected model
       x-maxRequestSizeBytes: 26214400
       requestBody:
         required: true
@@ -52,7 +52,7 @@ paths:
                   type: string
                   enum: [auto, ru, en, sv]
                   default: auto
-                  description: auto or same-language output returns transcription. Cross-language output is currently available only to English using Whisper translation; other pairs return unsupported_translation.
+                  description: auto or same-language output returns transcription. Cross-language output depends on the selected model's configured translation capability; unsupported requests return HTTP 400 with code unsupported_translation.
                 model:
                   type: string
                   minLength: 1
@@ -292,6 +292,7 @@ components:
           description: Present only for automatic detection when provided by the model.
         translated:
           type: boolean
+          description: True only when a translation-capable selected model performed cross-language translation.
         segments:
           type: array
           description: Present only when supported and requested. Seconds relative

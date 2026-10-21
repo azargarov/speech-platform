@@ -155,6 +155,7 @@ def load_app_config(
     load_timeout=2,
     cancel_grace=0.1,
     exit_timeout=0.5,
+    translation_supported=True,
 ):
     data = application_data()
     data["backend"]["id"] = backend
@@ -163,6 +164,7 @@ def load_app_config(
     data["lifecycle"]["model_load_timeout_seconds"] = load_timeout
     data["lifecycle"]["cooperative_cancel_grace_seconds"] = cancel_grace
     data["lifecycle"]["process_exit_timeout_seconds"] = exit_timeout
+    data["models"][0]["translation_supported"] = translation_supported
     path = Path(directory) / "app.yaml"
     import yaml
 
@@ -182,6 +184,7 @@ def make_application(
     cancel_grace=0.1,
     exit_timeout=0.5,
     process_control=None,
+    translation_supported=True,
 ):
     config = load_app_config(
         directory,
@@ -190,6 +193,7 @@ def make_application(
         load_timeout=load_timeout,
         cancel_grace=cancel_grace,
         exit_timeout=exit_timeout,
+        translation_supported=translation_supported,
     )
     factory = FakeBackendFactory(behavior, duration, auto, timestamps)
     deployment = DeploymentConfig(
@@ -509,6 +513,57 @@ class SupervisorTests(unittest.TestCase):
 
 
 class ApplicationTests(unittest.TestCase):
+    def test_translation_capability_is_model_configured(self):
+        for detected_language in ("ru", "sv"):
+            with (
+                self.subTest(language=detected_language),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                app = make_application(directory, translation_supported=False)
+                requests = []
+
+                def transcribe(request, _context):
+                    requests.append(request)
+                    return TranscriptionResult("raw transcript", detected_language)
+
+                app.runner.transcribe = transcribe
+                with self.assertRaises(SpeechFailure) as caught:
+                    app.transcribe(
+                        TranscriptionRequest(
+                            b"audio", "audio/wav", output_language="en"
+                        )
+                    )
+                self.assertEqual(
+                    caught.exception.code, FailureCode.UNSUPPORTED_TRANSLATION
+                )
+                self.assertEqual(requests[0].output_language, "auto")
+                app.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory, translation_supported=False)
+            app.runner.transcribe = lambda _request, _context: TranscriptionResult(
+                "raw transcript", "ru"
+            )
+            same_language = app.transcribe(
+                TranscriptionRequest(b"audio", "audio/wav", output_language="ru")
+            )
+            automatic = app.transcribe(TranscriptionRequest(b"audio", "audio/wav"))
+            self.assertEqual(same_language.text, "raw transcript")
+            self.assertFalse(same_language.translated)
+            self.assertEqual(automatic.text, "raw transcript")
+            self.assertFalse(automatic.translated)
+            app.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory, translation_supported=False)
+            app.runner.transcribe = lambda _request, _context: TranscriptionResult(
+                "unexpected translated text", "ru", translated=True
+            )
+            with self.assertRaises(SpeechFailure) as caught:
+                app.transcribe(TranscriptionRequest(b"audio", "audio/wav"))
+            self.assertEqual(caught.exception.code, FailureCode.BACKEND_FAILED)
+            app.close()
+
     def test_v1_language_validation_and_unsupported_detection(self):
         with tempfile.TemporaryDirectory() as directory:
             app = make_application(directory)

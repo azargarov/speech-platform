@@ -44,6 +44,7 @@ class ModelConfig:
     artifact_ref: str
     manifest_sha256: str
     artifact_format: str
+    translation_supported: bool = True
 
 
 @dataclass(frozen=True)
@@ -230,11 +231,17 @@ def load_application_config(path: str | Path) -> ApplicationConfig:
     models = []
     aliases = set()
     for entry in raw_models:
+        model_fields = {"alias", "family", "immutable_revision", "artifacts"}
+        if isinstance(entry, dict) and "translation_supported" in entry:
+            model_fields.add("translation_supported")
         _fields(
             entry,
-            {"alias", "family", "immutable_revision", "artifacts"},
+            model_fields,
             "model",
         )
+        translation_supported = entry.get("translation_supported", True)
+        if type(translation_supported) is not bool:
+            raise ValueError("model.translation_supported must be a boolean")
         alias = _text(entry["alias"], "model.alias", 128)
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", alias) or alias in aliases:
             raise ValueError("model aliases must be unique stable identifiers")
@@ -264,6 +271,7 @@ def load_application_config(path: str | Path) -> ApplicationConfig:
                 _text(artifact["ref"], "model artifact reference", 128),
                 digest,
                 _text(artifact["format"], "model artifact format", 128),
+                translation_supported,
             )
         )
     default_model = _text(data["default_model"], "default_model", 128)

@@ -97,6 +97,10 @@ class ConfigValidation(unittest.TestCase):
         self.assertEqual(config.device_preference, ("cpu",))
         self.assertEqual(config.admission.max_queued, 2)
         self.assertEqual(config.admission.max_retained_audio_bytes, 30)
+        self.assertTrue(config.models[0].translation_supported)
+        disabled = application_data()
+        disabled["models"][0]["translation_supported"] = False
+        self.assertFalse(self.load_data(disabled).models[0].translation_supported)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "deployment.yaml"
             model_root = Path(directory) / "model-data"
@@ -151,6 +155,10 @@ class ConfigValidation(unittest.TestCase):
                 "too small",
             ),
             (lambda d: d["models"][0].update(immutable_revision="main"), "immutable"),
+            (
+                lambda d: d["models"][0].update(translation_supported="false"),
+                "translation_supported",
+            ),
         ):
             invalid = application_data()
             mutate(invalid)

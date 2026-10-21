@@ -49,7 +49,7 @@ paths:
                   type: string
                   enum: [auto, ru, en, sv]
                   default: auto
-                  description: Cross-language output is supported only to English; unsupported targets return an explicit error.
+                  description: Same-language and automatic transcription are supported. Cross-language output is available only when the selected model configuration declares translation support; unsupported requests return HTTP 400 with code unsupported_translation.
                 model:
                   type: string
                   minLength: 1
@@ -193,6 +193,7 @@ components:
           maximum: 1
         translated:
           type: boolean
+          description: True only when a translation-capable selected model performed cross-language translation.
         segments:
           type: array
           description: Present only when supported and requested. Seconds relative

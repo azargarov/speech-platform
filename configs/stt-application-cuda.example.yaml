@@ -11,6 +11,7 @@ backend:
     beam_size: 1
 models:
   - alias: large-v3-turbo
+    translation_supported: false
     family: whisper
     immutable_revision: 0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf
     artifacts:

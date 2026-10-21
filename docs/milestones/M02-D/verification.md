@@ -51,7 +51,7 @@ acceptance.
 - Restart recovery and clean-checkout runtime installation were not exercised.
 - STT v1 operator acceptance and release-tag readiness are not established.
 
-## Translation behavior implemented, not runtime-verified
+## Pre-correction translation behavior (superseded; not runtime-verified)
 
 - `auto` or matching source/target returns the original-language transcript.
 - Russian to English and Swedish to English call faster-whisper's built-in
@@ -94,11 +94,12 @@ and runtime behavior remain NOT ESTABLISHED.
 ## Minimal runtime acceptance procedure (operator action pending)
 
 Prerequisites: the isolated M02-D product deployment is already running and
-ready; use private local Russian audio files under `private/`, with one short
-clip for successful calls and one long clip known to run longer than the
-cancellation delay. Do not use this procedure against protected deployments.
-Set `AUDIO_RU` and `AUDIO_RU_LONG` to those paths in the shell. The command
-prints transcript text to the terminal; do not redirect it to a tracked file.
+ready; use private local Russian and Swedish audio files under `private/`, with
+one short clip for successful calls and one long Russian clip known to run
+longer than the cancellation delay. Do not use this procedure against
+protected deployments. Set `AUDIO_RU`, `AUDIO_SV` and `AUDIO_RU_LONG` to those
+paths in the shell. The command prints transcript text to the terminal; do not
+redirect it to a tracked file.
 
 1. Confirm readiness without changing lifecycle state:
 
@@ -113,15 +114,24 @@ prints transcript text to the terminal; do not redirect it to a tracked file.
    make test-stt PYTHON=.venv/bin/python AUDIO="$AUDIO_RU" SOURCE_LANGUAGE=ru OUTPUT_LANGUAGE=ru
    ```
 
-3. Validate Russian-to-English translation; check `output_language` is `en`,
-   `translated` is true, `transcription` contains Russian, and printed output
-   text is English:
+3. Confirm Russian-to-English is rejected because the deployed model has
+   translation disabled:
 
    ```sh
    make test-stt PYTHON=.venv/bin/python AUDIO="$AUDIO_RU" SOURCE_LANGUAGE=ru OUTPUT_LANGUAGE=en
    ```
 
-4. Start a long request through Gateway, then abort the client while the request
+   Expect HTTP 400 with code `unsupported_translation`.
+
+4. Confirm Swedish-to-English receives the same explicit refusal:
+
+   ```sh
+   make test-stt PYTHON=.venv/bin/python AUDIO="$AUDIO_SV" SOURCE_LANGUAGE=sv OUTPUT_LANGUAGE=en
+   ```
+
+   Expect HTTP 400 with code `unsupported_translation`.
+
+5. Start a long request through Gateway, then abort the client while the request
    is active. For a local loopback API with no bearer token:
 
    ```sh
@@ -138,7 +148,7 @@ prints transcript text to the terminal; do not redirect it to a tracked file.
    and delay. The client result is discarded, while the supervisor consumes
    the original child response before another request can use its IPC channel.
 
-5. After the cancelled request has completed worker cleanup, submit a fresh
+6. After the cancelled request has completed worker cleanup, submit a fresh
    short request and confirm HTTP success plus a Russian result:
 
    ```sh
@@ -149,3 +159,29 @@ Record the deployment identity, sanitized request outcomes, timing and
 readiness before/after. Do not record audio or transcript text in Git. This
 procedure is an acceptance plan, not an observed runtime result; deployment,
 CUDA cancellation behavior and operator acceptance remain NOT ESTABLISHED.
+
+## M02-D translation capability correction (2026-10-21)
+
+- **OBSERVED:** `make verify PYTHON=.venv/bin/python` passed after the
+  capability correction. It included Go vet/race tests/build, Ruff checks,
+  Gateway/STT/TTS config validation, Compose rendering, release validation,
+  433 script tests, 64 STT tests, governance validation and STT lock checks.
+- **OBSERVED:** `.venv/bin/python -m unittest
+  services.stt.tests.test_runtime.ApplicationTests
+  services.stt.tests.test_config_artifacts -v` passed (21 tests); the final
+  full STT test suite also passed with the additional guard assertion.
+- **OBSERVED:** `make governance-check PYTHON=.venv/bin/python` and
+  `git diff --check` passed after the final edits.
+- **OBSERVED:** product config retains `large-v3-turbo` as `default_model` and
+  declares `translation_supported: false`. Deterministic application tests
+  verify Russian-to-English and Swedish-to-English return
+  `unsupported_translation`, same-language and automatic transcription return
+  raw text with `translated: false`, and an impossible backend claim of
+  `translated: true` is rejected.
+- **INTERPRETATION:** capability is a validated per-model configuration value.
+  Existing configurations that omit it retain the previous translation
+  behavior for compatibility; the product and CUDA large-v3-turbo configs set
+  it explicitly to false. Other model configurations can explicitly opt in.
+- **NOT ESTABLISHED:** real-audio translation quality, CUDA inference,
+  deployment/redeployment and operator acceptance were not exercised. No
+  model was changed and no service was deployed.

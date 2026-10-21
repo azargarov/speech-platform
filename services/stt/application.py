@@ -174,13 +174,17 @@ class STTApplication:
             raise SpeechFailure(
                 FailureCode.UNSUPPORTED_OPTION, "segment timestamps are unavailable"
             )
+        requested_output_language = output_language
+        backend_output_language = (
+            "auto" if not model.translation_supported else output_language
+        )
         normalized = TranscriptionRequest(
             request.audio,
             media_type,
             model.alias,
             language,
             request.timestamps,
-            output_language,
+            backend_output_language,
         )
         try:
             result = self._admission.submit(normalized, context, _upload_lease)
@@ -191,6 +195,17 @@ class STTApplication:
         self._validate_result(result)
         if result.language.lower() not in STT_V1_LANGUAGES:
             raise SpeechFailure(FailureCode.UNSUPPORTED_DETECTED_LANGUAGE)
+        if not model.translation_supported:
+            if result.translated:
+                raise SpeechFailure(
+                    FailureCode.BACKEND_FAILED,
+                    "model returned translated output without translation capability",
+                )
+            if (
+                requested_output_language != "auto"
+                and requested_output_language != result.language.lower()
+            ):
+                raise SpeechFailure(FailureCode.UNSUPPORTED_TRANSLATION)
         result_size = len(
             json.dumps(
                 {

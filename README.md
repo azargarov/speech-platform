@@ -47,7 +47,7 @@ The install builds from the checked-out Git source. Docker base images, CUDA Pyt
 
 ## STT API
 
-`POST /v1/stt/transcriptions` accepts multipart audio with optional `source_language`, `output_language`, `model` and `timestamps` fields. Audio formats are WAV, FLAC, MP3, Ogg/Opus and MP4/M4A. Maximum request size is 25 MiB and the default inference deadline is 180 seconds to allow raw transcription plus a translation pass.
+`POST /v1/stt/transcriptions` accepts multipart audio with optional `source_language`, `output_language`, `model` and `timestamps` fields. Audio formats are WAV, FLAC, MP3, Ogg/Opus and MP4/M4A. Maximum request size is 25 MiB and the default inference deadline is 180 seconds.
 
 ```sh
 curl --fail-with-body \
@@ -74,21 +74,21 @@ The response retains `text` and `language` for compatibility and adds explicit f
 {
   "detected_language": "ru",
   "source_language": "ru",
-  "output_language": "en",
+  "output_language": "ru",
   "transcription": "Доброе утро.",
-  "text": "Good morning.",
-  "translated": true,
+  "text": "Доброе утро.",
+  "translated": false,
   "language_probability": 0.98
 }
 ```
 
-`transcription` is always the original-language transcript. `text` is the requested output. When source and output match, `text` equals `transcription` and `translated` is false. With `output_language=auto`, output remains in the detected source language. Faster-whisper translation is supported only to English; Russian or Swedish speech can request English output. Cross-language output to Russian or Swedish returns `unsupported_translation`. No other language pair is advertised as working. `language_probability` appears only when automatic detection supplies it; forced source selection does not invent confidence.
+`transcription` is always the original-language transcript. `text` is the requested output. When source and output match, `text` equals `transcription` and `translated` is false. With `output_language=auto`, output remains in the detected source language. Translation is model-configured. The deployed `large-v3-turbo` configuration disables translation because it does not reliably support the English translation task; Russian-to-English and Swedish-to-English requests return `unsupported_translation`. Same-language and automatic transcription remain available. Other STT models may enable translation only when their configuration declares and their deployment supports that capability. `language_probability` appears only when automatic detection supplies it; forced source selection does not invent confidence.
 
 | Spoken language | `auto` | `ru` | `en` | `sv` |
 | --- | --- | --- | --- | --- |
-| Russian | Russian transcript | Russian transcript | English translation | Explicitly unsupported |
+| Russian | Russian transcript | Russian transcript | `unsupported_translation` on large-v3-turbo | `unsupported_translation` |
 | English | English transcript | Explicitly unsupported | English transcript | Explicitly unsupported |
-| Swedish | Swedish transcript | Explicitly unsupported | English translation | Swedish transcript |
+| Swedish | Swedish transcript | Explicitly unsupported | `unsupported_translation` on large-v3-turbo | Swedish transcript |
 
 Automatic detection of a language outside Russian, English and Swedish returns `unsupported_detected_language` (422).
 
@@ -127,7 +127,7 @@ make verify PYTHON=.venv/bin/python
 
 ## Roadmap
 
-- **STT v1:** Russian, English and Swedish transcription with automatic and forced source selection. English translation is available through Whisper's built-in translation task; cross-language Russian/Swedish targets need a separately qualified local backend.
+- **STT v1:** Russian, English and Swedish transcription with automatic and forced source selection. Translation is advertised only for models whose configuration enables a verified translation capability; the deployed large-v3-turbo model has translation disabled.
 - **TTS:** future inference milestone. Current TTS process is health-only.
 - **Voice dictation and text transformation:** future separate optional service after STT v1. It will preserve raw transcription and offer per-request `raw`, `clean`, `business`, `friendly`, `casual` and `formal_to_casual` modes through a configurable local LLM. It will not put an LLM in the STT worker and should continue to allow ordinary STT when the transformation service is unavailable. Desktop shortcuts and insertion must account for Linux Wayland restrictions; mobile mode selection can follow.
 - **Transcript Refinement:** optional future text-processing capability; it will remain separate from raw STT.
