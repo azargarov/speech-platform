@@ -55,11 +55,55 @@ permissions on the model store.
 ## API and modes
 
 `POST /v1/tts/speech` accepts JSON `{ "text": "...", "language": "auto" }`
-and returns complete `audio/wav` PCM16. Text is limited to
+and returns complete `audio/wav` PCM16. Plain text is limited to
 10,000 Unicode characters and the JSON body to 64 KiB. `language` is `auto`,
 `en`, `ru` or `sv`; auto passes multilingual text without language metadata.
 Explicit codes add a model instruction hint. The service does not return a
 detected language code. Optional compatibility `voice` accepts only `default`.
+
+### Minimal SSML input
+
+Set `input_format` to `ssml` explicitly; omitted or `text` input is never
+interpreted as XML. SSML input uses the W3C namespace
+`http://www.w3.org/2001/10/synthesis`, requires a `<speak version="1.1"
+xml:lang="...">` root, and supports only nested `<lang xml:lang="...">` and
+`<break time="..."/>`. For example:
+
+```xml
+<speak xmlns="http://www.w3.org/2001/10/synthesis" version="1.1" xml:lang="en-US">
+  Hello, <break time="250ms"/><lang xml:lang="sv-SE">hej</lang>.
+</speak>
+```
+
+`xml:lang` accepts `en`, `ru`, `sv` and their two-letter regional tags (for
+example `en-US`, `ru-RU`, `sv-SE`). Language values inherit through nesting;
+an inner `lang` overrides its parent. Regional subtags map to the existing
+base language hint. They do not select a guaranteed accent and do not report
+detected language. With SSML, request `language` must be omitted or `auto`.
+
+Break times accept integer `ms` or decimal `s` with at most three fractional
+digits. They are converted to exact 48 kHz frame counts. Adjacent breaks remain
+separate in document order. Whitespace-only XML formatting nodes are ignored;
+non-whitespace text, including spaces adjacent to inline elements, is retained.
+Any other element or attribute, malformed XML, DTD or entity declaration is
+rejected with a structured error. External resource resolution is not used.
+
+The worker configuration bounds an SSML document to 49,152 UTF-8 bytes, speech
+to 10,000 characters and 64 segments, nesting depth to 16, and markup elements
+to 256. A break is at most 10 seconds and requested total silence is at most
+30 seconds by default. Before inference, an estimate based on text characters,
+segment count and silence must fit the configured 64 MiB output budget; the
+composed audio is also checked against that hard byte limit. The estimate is a
+protective heuristic, not a duration guarantee. Limits are validated by the
+worker configuration loader.
+
+Each speech segment uses the existing serialized model lifecycle and selected
+TTS mode. The worker holds segments in memory and returns one mono PCM16 48 kHz
+WAV only after every segment succeeds. A failed segment returns an error and
+does not expose earlier audio as a successful partial result. Native inference
+is not interrupted mid-call on client disconnect; existing lifecycle draining
+semantics remain in effect. This is a limited, provider-backed subset, not
+full SSML 1.1 support.
 
 `quality` uses 10 diffusion steps and is the default. `auto` selects the same
 configuration. `fast` uses eight steps and `high_quality` uses 16 steps.

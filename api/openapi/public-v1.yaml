@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Speech Platform public API
   version: 1.0.0
-  description: STT transcription and complete WAV TTS routes are implemented. Optional bearer authentication is enforced when configured; non-loopback host exposure requires a secret token. STT request limit is 25 MiB; TTS JSON request limit is 64 KiB and text ceiling 10000 characters. Default STT deadline is 180 seconds and TTS deadline is 600 seconds; upload read deadline is 30 seconds. Client disconnect cancels the Gateway request and stops response delivery; active native TTS inference may finish asynchronously, and no result is returned to a disconnected client. Deadline exhaustion returns 504 where the connection remains writable.
+  description: STT transcription and complete WAV TTS routes are implemented. Optional bearer authentication is enforced when configured; non-loopback host exposure requires a secret token. STT request limit is 25 MiB; TTS JSON request limit is 64 KiB. Plain-text input is limited to 10000 characters; SSML has a 49152-byte document limit and a configured speech-character limit. Default STT deadline is 180 seconds and TTS deadline is 600 seconds; upload read deadline is 30 seconds. Client disconnect cancels the Gateway request and stops response delivery; active native TTS inference may finish asynchronously, and no result is returned to a disconnected client. Deadline exhaustion returns 504 where the connection remains writable.
     Streaming is reserved, not implemented; capability flags remain false until supported.
     Timestamps are optional; unsupported requests return 400. Errors never contain
     audio or transcript payloads.
@@ -154,7 +154,8 @@ paths:
                 text:
                   type: string
                   minLength: 1
-                  maxLength: 10000
+                  maxLength: 49152
+                  description: Plain text is limited to 10000 characters. SSML input is limited by the configured document byte and speech-character bounds.
                 voice:
                   type: string
                   enum: [default]
@@ -164,12 +165,17 @@ paths:
                   type: string
                   default: auto
                   enum: [auto, en, ru, sv]
-                  description: auto sends text without language metadata. Explicit codes are model instruction hints and do not report a detected language.
+                  description: For text input, auto sends text without language metadata and explicit codes are model hints. For SSML, use xml:lang attributes and set this field to auto. No detected language code is returned.
                 mode:
                   type: string
                   enum: [quality, fast, auto, high_quality]
                   default: quality
                   description: quality uses 10 diffusion steps; fast uses 8 diffusion steps; high_quality uses 16 diffusion steps; auto selects quality.
+                input_format:
+                  type: string
+                  enum: [text, ssml]
+                  default: text
+                  description: Explicitly selects plain text or the documented bounded SSML 1.1 subset. XML is never inferred from text content.
       responses:
         '200':
           description: Complete WAV PCM16 audio. Sample rate is encoded in the WAV header.

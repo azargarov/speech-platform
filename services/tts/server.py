@@ -140,6 +140,7 @@ def handler(config: dict, lifecycle: ModelLifecycle):
                 "voice",
                 "language",
                 "mode",
+                "input_format",
             }:
                 self.reply(
                     400,
@@ -153,10 +154,25 @@ def handler(config: dict, lifecycle: ModelLifecycle):
             voice = body.get("voice", "default")
             language = body.get("language", "auto")
             mode = body.get("mode", "quality")
+            input_format = body.get("input_format", "text")
+            if not isinstance(input_format, str) or input_format not in {
+                "text",
+                "ssml",
+            }:
+                self.reply(
+                    400,
+                    {
+                        "code": "invalid_input_format",
+                        "message": "input_format must be text or ssml",
+                    },
+                )
+                return
             if (
                 not isinstance(text, str)
                 or not text.strip()
-                or len(text) > config["max_text_characters"]
+                or (
+                    input_format == "text" and len(text) > config["max_text_characters"]
+                )
             ):
                 self.reply(
                     400,
@@ -183,6 +199,15 @@ def handler(config: dict, lifecycle: ModelLifecycle):
                     },
                 )
                 return
+            if input_format == "ssml" and language != "auto":
+                self.reply(
+                    400,
+                    {
+                        "code": "invalid_language",
+                        "message": "SSML language is specified by speak and lang xml:lang attributes",
+                    },
+                )
+                return
             if not isinstance(mode, str) or mode not in {
                 "quality",
                 "fast",
@@ -204,7 +229,9 @@ def handler(config: dict, lifecycle: ModelLifecycle):
                 )
                 return
             try:
-                audio, content_type = lifecycle.synthesize(text, language, mode)
+                audio, content_type = lifecycle.synthesize(
+                    text, language, mode, input_format
+                )
             except TTSFailure as error:
                 self.reply(error.status, {"code": error.code, "message": error.message})
                 return

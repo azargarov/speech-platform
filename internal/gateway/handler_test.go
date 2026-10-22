@@ -112,8 +112,17 @@ func TestTTSProxyValidationForwardingAndAudioResponse(t *testing.T) {
 		if body["language"] != "auto" || body["voice"] != "default" {
 			t.Errorf("unexpected defaults: %#v", body)
 		}
+		if body["input_format"] == nil {
+			t.Errorf("input_format default was not forwarded: %#v", body)
+		}
 		if body["text"] == "hello" && body["mode"] != "quality" {
 			t.Errorf("mode default=%v, want quality", body["mode"])
+		}
+		if body["text"] == "hello" && body["input_format"] != "text" {
+			t.Errorf("input_format default=%v, want text", body["input_format"])
+		}
+		if body["text"] == "hello ssml" && body["input_format"] != "ssml" {
+			t.Errorf("input_format=%v, want ssml", body["input_format"])
 		}
 		if body["text"] == "hello fast" && body["mode"] != "fast" {
 			t.Errorf("forwarded mode=%v, want fast", body["mode"])
@@ -134,10 +143,14 @@ func TestTTSProxyValidationForwardingAndAudioResponse(t *testing.T) {
 		code       string
 	}{
 		{"valid", `{"text":"hello"}`, 200, ""},
+		{"explicit_ssml", `{"text":"hello ssml","input_format":"ssml"}`, 200, ""},
 		{"fast_mode", `{"text":"hello fast","mode":"fast"}`, 200, ""},
 		{"high_quality_mode", `{"text":"hello high quality","mode":"high_quality"}`, 200, ""},
 		{"invalid_language", `{"text":"hello","language":"zh"}`, 400, "invalid_language"},
 		{"invalid_mode", `{"text":"hello","mode":"turbo"}`, 400, "invalid_mode"},
+		{"invalid_input_format", `{"text":"hello","input_format":"guess"}`, 400, "invalid_input_format"},
+		{"null_input_format", `{"text":"hello","input_format":null}`, 400, "invalid_input_format"},
+		{"ssml_language_field", `{"text":"hello","input_format":"ssml","language":"en"}`, 400, "invalid_language"},
 		{"unknown_field", `{"text":"hello","extra":true}`, 400, "invalid_request"},
 		{"empty_text", `{"text":"   "}`, 400, "invalid_text"},
 	} {

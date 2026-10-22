@@ -9,6 +9,15 @@ model_manifest_sha256: 04d6e05b69b22568030ac21f494e406ffdf2d06efeeab43cfdb4c21ba
 idle_unload_seconds: 60
 max_text_characters: 10000
 max_request_bytes: 65536
+max_ssml_bytes: 49152
+max_ssml_segments: 64
+max_ssml_elements: 256
+max_ssml_nesting_depth: 16
+max_ssml_break_ms: 10000
+max_ssml_total_silence_ms: 30000
+ssml_estimated_characters_per_second: 12
+ssml_segment_overhead_seconds: 1
+max_output_audio_bytes: 67108864
 min_free_vram_mib: 8000
 cuda_memory_fraction: 0.55
 shutdown_timeout_seconds: 240

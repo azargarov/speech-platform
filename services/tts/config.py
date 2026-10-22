@@ -24,6 +24,15 @@ def load_config(path: str | Path) -> dict:
         "idle_unload_seconds",
         "max_text_characters",
         "max_request_bytes",
+        "max_ssml_bytes",
+        "max_ssml_segments",
+        "max_ssml_elements",
+        "max_ssml_nesting_depth",
+        "max_ssml_break_ms",
+        "max_ssml_total_silence_ms",
+        "ssml_estimated_characters_per_second",
+        "ssml_segment_overhead_seconds",
+        "max_output_audio_bytes",
         "min_free_vram_mib",
         "shutdown_timeout_seconds",
         "cuda_memory_fraction",
@@ -41,6 +50,13 @@ def load_config(path: str | Path) -> dict:
         ("socket_timeout_seconds", 1, 86400),
         ("max_text_characters", 1, 10000),
         ("max_request_bytes", 1, 26214400),
+        ("max_ssml_bytes", 1, 49152),
+        ("max_ssml_segments", 1, 256),
+        ("max_ssml_elements", 1, 1024),
+        ("max_ssml_nesting_depth", 1, 32),
+        ("max_ssml_break_ms", 1, 60000),
+        ("max_ssml_total_silence_ms", 1, 600000),
+        ("max_output_audio_bytes", 1024, 67108864),
         ("min_free_vram_mib", 0, 15360),
         ("shutdown_timeout_seconds", 1, 600),
     ):
@@ -61,6 +77,19 @@ def load_config(path: str | Path) -> dict:
         or not 0 <= idle <= 86400
     ):
         raise ValueError("idle_unload_seconds must be in 0..86400")
+    for name in (
+        "ssml_estimated_characters_per_second",
+        "ssml_segment_overhead_seconds",
+    ):
+        value = data[name]
+        high = 30 if name == "ssml_estimated_characters_per_second" else 10
+        low = 5 if name == "ssml_estimated_characters_per_second" else 0.1
+        if (
+            type(value) not in (int, float)
+            or not math.isfinite(value)
+            or not low <= value <= high
+        ):
+            raise ValueError(f"{name} is outside its allowed range")
     if (
         not isinstance(data["model_path"], str)
         or not Path(data["model_path"]).is_absolute()

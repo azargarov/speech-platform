@@ -126,7 +126,19 @@ class Acceptance(unittest.TestCase):
             tts["requestBody"]["content"]["application/json"]["schema"]["properties"][
                 "text"
             ]["maxLength"],
-            10000,
+            49152,
+        )
+        self.assertEqual(
+            tts["requestBody"]["content"]["application/json"]["schema"]["properties"][
+                "input_format"
+            ]["enum"],
+            ["text", "ssml"],
+        )
+        self.assertEqual(
+            tts["requestBody"]["content"]["application/json"]["schema"]["properties"][
+                "input_format"
+            ]["default"],
+            "text",
         )
         for name in ("internal-stt-v1.yaml", "internal-tts-v1.yaml"):
             internal = yaml.safe_load((ROOT / "api/openapi" / name).read_text())
@@ -186,6 +198,13 @@ class Acceptance(unittest.TestCase):
                 if path.suffix not in {".py", ".go"} or "test" in path.name:
                     continue
                 text = path.read_text()
+                # Fixed XML/SSML vocabulary namespaces are protocol identifiers,
+                # not deployment endpoints or service addresses.
+                for namespace in (
+                    "http://www.w3.org/2001/10/synthesis",
+                    "http://www.w3.org/XML/1998/namespace",
+                ):
+                    text = text.replace(namespace, "")
                 for forbidden in (
                     "http://",
                     "https://",

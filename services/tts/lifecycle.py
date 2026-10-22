@@ -10,6 +10,13 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from services.tts.audio import InvalidAudio, compose_wav, pcm16_frames
+from services.tts.ssml import (
+    SSMLValidationError,
+    SilenceSegment,
+    parse_ssml,
+)
+
 
 class TTSFailure(Exception):
     def __init__(self, code: str, message: str, status: int = 503):
@@ -46,7 +53,9 @@ class ModelLifecycle:
     def warmup(self) -> None:
         self._with_model(lambda model: None)
 
-    def synthesize(self, text: str, language: str, mode: str) -> tuple[bytes, str]:
+    def synthesize(
+        self, text: str, language: str, mode: str, input_format: str = "text"
+    ) -> tuple[bytes, str]:
         if mode not in {"quality", "fast", "auto", "high_quality"}:
             raise TTSFailure(
                 "invalid_mode",
@@ -54,9 +63,75 @@ class ModelLifecycle:
                 400,
             )
         steps = mode_timesteps(mode)
+        if input_format == "text":
+            return self._with_model(
+                lambda model: self._generate(model, text, language, steps)
+            )
+        if input_format != "ssml":
+            raise TTSFailure(
+                "invalid_input_format", "input_format must be text or ssml", 400
+            )
+        try:
+            segments = parse_ssml(text, self.config)
+        except SSMLValidationError as error:
+            raise TTSFailure("invalid_ssml", str(error), 400) from error
         return self._with_model(
-            lambda model: self._generate(model, text, language, steps)
+            lambda model: self._generate_ssml(model, segments, steps)
         )
+
+    def _generate_ssml(self, model, segments, steps: int) -> tuple[bytes, str]:
+        pieces = []
+        composed_frame_bytes = 0
+        for segment in segments:
+            if isinstance(segment, SilenceSegment):
+                silence_bytes = segment.duration_ms * 48 * 2
+                if (
+                    composed_frame_bytes + silence_bytes + 44
+                    > self.config["max_output_audio_bytes"]
+                ):
+                    raise TTSFailure(
+                        "output_too_large",
+                        "composed audio exceeds the configured size limit",
+                        500,
+                    )
+                pieces.append(b"\x00" * silence_bytes)
+                composed_frame_bytes += silence_bytes
+                continue
+            audio, content_type = self._generate(
+                model, segment.text, segment.language, steps
+            )
+            if (
+                content_type != "audio/wav"
+                or len(audio) > self.config["max_output_audio_bytes"]
+            ):
+                raise TTSFailure("inference_failed", "generated audio is invalid", 500)
+            if (
+                composed_frame_bytes + len(audio)
+                > self.config["max_output_audio_bytes"]
+            ):
+                raise TTSFailure(
+                    "output_too_large",
+                    "composed audio exceeds the configured size limit",
+                    500,
+                )
+            try:
+                frames = pcm16_frames(audio)
+                pieces.append(frames)
+                composed_frame_bytes += len(frames)
+                if composed_frame_bytes + 44 > self.config["max_output_audio_bytes"]:
+                    raise InvalidAudio("composed audio exceeds configured size")
+            except InvalidAudio as error:
+                raise TTSFailure(
+                    "inference_failed", "generated audio is invalid", 500
+                ) from error
+        try:
+            return compose_wav(
+                pieces, self.config["max_output_audio_bytes"]
+            ), "audio/wav"
+        except InvalidAudio as error:
+            raise TTSFailure(
+                "inference_failed", "generated audio is invalid", 500
+            ) from error
 
     def _generate(
         self, model, text: str, language: str, steps: int
@@ -88,7 +163,16 @@ class ModelLifecycle:
                 format="WAV",
                 subtype="PCM_16",
             )
-            return output.getvalue(), "audio/wav"
+            generated = output.getvalue()
+            if len(generated) > self.config["max_output_audio_bytes"]:
+                raise TTSFailure(
+                    "output_too_large",
+                    "generated audio exceeds the configured size limit",
+                    500,
+                )
+            return generated, "audio/wav"
+        except TTSFailure:
+            raise
         except Exception as error:
             if _is_oom(error):
                 raise TTSFailure(

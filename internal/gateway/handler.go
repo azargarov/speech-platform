@@ -15,6 +15,18 @@ import (
 	"speech-platform/internal/transport"
 )
 
+const (
+	maxTTSRequestBytes   int64 = 64 * 1024
+	maxSSMLDocumentBytes       = 48 * 1024
+)
+
+func requestBodyLimit(path string, configured int64) int64 {
+	if path == "/v1/tts/speech" && configured > maxTTSRequestBytes {
+		return maxTTSRequestBytes
+	}
+	return configured
+}
+
 type Readiness interface{ Ready() bool }
 type Foundation struct{}
 
@@ -138,7 +150,7 @@ func HandlerWithWorkers(state Readiness, maxBytes int64, stt *STTProxy, tts *TTS
 			transport.JSON(w, 429, transport.Error{Code: "overloaded", Message: "Gateway request capacity is full"})
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		r.Body = http.MaxBytesReader(w, r.Body, requestBodyLimit(r.URL.Path, maxBytes))
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			var tooLarge *http.MaxBytesError
@@ -196,7 +208,7 @@ func HandlerWithWorkers(state Readiness, maxBytes int64, stt *STTProxy, tts *TTS
 			transport.JSON(w, 429, transport.Error{Code: "overloaded", Message: "Gateway request capacity is full"})
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		r.Body = http.MaxBytesReader(w, r.Body, requestBodyLimit(r.URL.Path, maxBytes))
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			var tooLarge *http.MaxBytesError
@@ -208,15 +220,16 @@ func HandlerWithWorkers(state Readiness, maxBytes int64, stt *STTProxy, tts *TTS
 			return
 		}
 		var request struct {
-			Text     string `json:"text"`
-			Voice    string `json:"voice,omitempty"`
-			Language string `json:"language"`
-			Mode     string `json:"mode"`
+			Text        string          `json:"text"`
+			Voice       string          `json:"voice,omitempty"`
+			Language    string          `json:"language"`
+			Mode        string          `json:"mode"`
+			InputFormat json.RawMessage `json:"input_format"`
 		}
 		decoder := json.NewDecoder(bytes.NewReader(body))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&request); err != nil {
-			transport.JSON(w, 400, transport.Error{Code: "invalid_request", Message: "request must contain only text, language, and mode"})
+			transport.JSON(w, 400, transport.Error{Code: "invalid_request", Message: "request contains invalid or unsupported fields"})
 			return
 		}
 		var extra any
@@ -224,7 +237,23 @@ func HandlerWithWorkers(state Readiness, maxBytes int64, stt *STTProxy, tts *TTS
 			transport.JSON(w, 400, transport.Error{Code: "invalid_request", Message: "exactly one JSON object is required"})
 			return
 		}
-		if strings.TrimSpace(request.Text) == "" || utf8.RuneCountInString(request.Text) > 10000 {
+		inputFormat := "text"
+		if request.InputFormat != nil {
+			rawInputFormat := bytes.TrimSpace(request.InputFormat)
+			if bytes.Equal(rawInputFormat, []byte("null")) || json.Unmarshal(rawInputFormat, &inputFormat) != nil {
+				transport.JSON(w, 400, transport.Error{Code: "invalid_input_format", Message: "input_format must be text or ssml"})
+				return
+			}
+		}
+		if inputFormat != "text" && inputFormat != "ssml" {
+			transport.JSON(w, 400, transport.Error{Code: "invalid_input_format", Message: "input_format must be text or ssml"})
+			return
+		}
+		if inputFormat == "ssml" && len([]byte(request.Text)) > maxSSMLDocumentBytes {
+			transport.JSON(w, 413, transport.Error{Code: "request_too_large", Message: "SSML document size limit exceeded"})
+			return
+		}
+		if strings.TrimSpace(request.Text) == "" || (inputFormat == "text" && utf8.RuneCountInString(request.Text) > 10000) {
 			transport.JSON(w, 400, transport.Error{Code: "invalid_text", Message: "text must contain 1..10000 characters"})
 			return
 		}
@@ -242,6 +271,10 @@ func HandlerWithWorkers(state Readiness, maxBytes int64, stt *STTProxy, tts *TTS
 			transport.JSON(w, 400, transport.Error{Code: "invalid_language", Message: "language must be auto, en, ru, or sv"})
 			return
 		}
+		if inputFormat == "ssml" && request.Language != "auto" {
+			transport.JSON(w, 400, transport.Error{Code: "invalid_language", Message: "SSML language is specified by speak and lang xml:lang attributes"})
+			return
+		}
 		if request.Mode == "" {
 			request.Mode = "quality"
 		}
@@ -253,7 +286,13 @@ func HandlerWithWorkers(state Readiness, maxBytes int64, stt *STTProxy, tts *TTS
 			transport.JSON(w, 503, transport.Error{Code: "not_ready", Message: "TTS worker is unavailable"})
 			return
 		}
-		encoded, err := json.Marshal(request)
+		encoded, err := json.Marshal(struct {
+			Text        string `json:"text"`
+			Voice       string `json:"voice,omitempty"`
+			Language    string `json:"language"`
+			Mode        string `json:"mode"`
+			InputFormat string `json:"input_format"`
+		}{request.Text, request.Voice, request.Language, request.Mode, inputFormat})
 		if err != nil {
 			transport.JSON(w, 400, transport.Error{Code: "invalid_request", Message: "request could not be forwarded"})
 			return
@@ -319,7 +358,7 @@ func HandlerWithWorkers(state Readiness, maxBytes int64, stt *STTProxy, tts *TTS
 		transport.JSON(w, 404, transport.Error{Code: "not_found", Message: "endpoint unavailable"})
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if (r.URL.Path == "/v1/stt/transcriptions" || r.URL.Path == "/v1/tts/speech") && r.ContentLength > maxBytes {
+		if (r.URL.Path == "/v1/stt/transcriptions" || r.URL.Path == "/v1/tts/speech") && r.ContentLength > requestBodyLimit(r.URL.Path, maxBytes) {
 			transport.JSON(w, 413, transport.Error{Code: "request_too_large", Message: "request size limit exceeded"})
 			return
 		}

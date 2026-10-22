@@ -26,7 +26,8 @@ paths:
                 text:
                   type: string
                   minLength: 1
-                  maxLength: 10000
+                  maxLength: 49152
+                  description: Plain text is limited to 10000 characters. SSML is limited by worker configuration.
                 voice:
                   type: string
                   enum: [default]
@@ -35,12 +36,17 @@ paths:
                   type: string
                   default: auto
                   enum: [auto, en, ru, sv]
-                  description: Auto has no language metadata; explicit values are hints, not detected codes.
+                  description: For text input, auto has no metadata and explicit values are hints. For SSML, use xml:lang attributes and set this field to auto.
                 mode:
                   type: string
                   enum: [quality, fast, auto, high_quality]
                   default: quality
                   description: quality uses 10 diffusion steps; fast uses 8 diffusion steps; high_quality uses 16 diffusion steps; auto selects quality.
+                input_format:
+                  type: string
+                  enum: [text, ssml]
+                  default: text
+                  description: Explicit input parser selection; default text preserves existing behavior.
       responses:
         '200':
           description: Complete WAV PCM16 audio.
