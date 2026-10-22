@@ -47,11 +47,11 @@ class ModelLifecycle:
         self._with_model(lambda model: None)
 
     def synthesize(self, text: str, language: str, mode: str) -> tuple[bytes, str]:
-        if mode not in {"quality", "fast", "auto"}:
-            raise TTSFailure("invalid_mode", "mode must be quality, fast, or auto", 400)
-        if mode == "fast" and not self.config["fast_mode_enabled"]:
+        if mode not in {"quality", "fast", "auto", "high_quality"}:
             raise TTSFailure(
-                "mode_unavailable", "fast mode has not passed quality acceptance", 422
+                "invalid_mode",
+                "mode must be quality, fast, auto, or high_quality",
+                400,
             )
         steps = mode_timesteps(mode)
         return self._with_model(
@@ -203,9 +203,13 @@ def _is_oom(error: Exception) -> bool:
 def mode_timesteps(mode: str) -> int:
     if mode == "fast":
         return 8
+    if mode == "high_quality":
+        return 16
     if mode in {"quality", "auto"}:
         return 10
-    raise TTSFailure("invalid_mode", "mode must be quality, fast, or auto", 400)
+    raise TTSFailure(
+        "invalid_mode", "mode must be quality, fast, auto, or high_quality", 400
+    )
 
 
 def language_instruction(text: str, language: str, instructions: dict[str, str]) -> str:

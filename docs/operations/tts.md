@@ -54,16 +54,23 @@ permissions on the model store.
 
 ## API and modes
 
-`POST /v1/tts/speech` accepts JSON `{ "text": "...", "language": "auto",
-"mode": "auto" }` and returns complete `audio/wav` PCM16. Text is limited to
+`POST /v1/tts/speech` accepts JSON `{ "text": "...", "language": "auto" }`
+and returns complete `audio/wav` PCM16. Text is limited to
 10,000 Unicode characters and the JSON body to 64 KiB. `language` is `auto`,
 `en`, `ru` or `sv`; auto passes multilingual text without language metadata.
 Explicit codes add a model instruction hint. The service does not return a
 detected language code. Optional compatibility `voice` accepts only `default`.
 
-`quality` uses the measured 10-step baseline. `auto` mode currently uses that
-same configuration. `fast` maps to eight steps but is disabled in the shipped
-config until the operator accepts its quality. Generation is not real-time and
+`quality` uses 10 diffusion steps and is the default. `auto` selects the same
+configuration. `fast` uses eight steps and `high_quality` uses 16 steps.
+The operator accepted the tested eight-step samples and selected 16 steps as
+an additional quality option after listening to the 10-, 12- and 16-step
+comparison. In the single seeded experiment, mean generation latency and
+weighted RTF were 10.35 s / 2.249 at 10 steps, 10.26 s / 2.352 at 12 steps,
+and 14.40 s / 2.976 at 16 steps; peak CUDA allocation/reservation was 5,458.5 /
+5,690 MiB for each setting. These are experimental measurements from four
+inputs on the RTX 5000, not latency guarantees. Full provenance is recorded in
+[M03 verification](../milestones/M03/verification.md). Generation is not real-time and
 may take longer than the audio duration. The default Gateway deadline is ten
 minutes; timeout/disconnect drops the response but does not kill active native
 inference. The model unloads after 60 idle seconds to return GPU memory to STT.
@@ -93,5 +100,6 @@ worker network by an operator; it does not change the public contract.
 
 Text and generated audio are not logged or retained. Audio is encoded in
 memory. The worker uses a bounded temporary cache under a container tmpfs.
-Production quality and licensing acceptance remain pending; this guide records
-the implemented M03B candidate behavior, not production readiness.
+Production licensing review remains open, and sustained-load capacity is not
+established. This guide records the implemented M03B behavior, not unrestricted
+production readiness.

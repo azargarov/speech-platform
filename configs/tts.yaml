@@ -12,4 +12,3 @@ max_request_bytes: 65536
 min_free_vram_mib: 8000
 cuda_memory_fraction: 0.55
 shutdown_timeout_seconds: 240
-fast_mode_enabled: false

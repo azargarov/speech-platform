@@ -167,9 +167,9 @@ paths:
                   description: auto sends text without language metadata. Explicit codes are model instruction hints and do not report a detected language.
                 mode:
                   type: string
-                  enum: [quality, fast, auto]
-                  default: auto
-                  description: quality uses the validated 10-step baseline; auto currently selects quality. fast is unavailable pending quality acceptance.
+                  enum: [quality, fast, auto, high_quality]
+                  default: quality
+                  description: quality uses 10 diffusion steps; fast uses 8 diffusion steps; high_quality uses 16 diffusion steps; auto selects quality.
       responses:
         '200':
           description: Complete WAV PCM16 audio. Sample rate is encoded in the WAV header.

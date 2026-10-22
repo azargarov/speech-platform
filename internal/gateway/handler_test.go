@@ -109,8 +109,17 @@ func TestTTSProxyValidationForwardingAndAudioResponse(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
-		if body["language"] != "auto" || body["mode"] != "auto" || body["voice"] != "default" {
+		if body["language"] != "auto" || body["voice"] != "default" {
 			t.Errorf("unexpected defaults: %#v", body)
+		}
+		if body["text"] == "hello" && body["mode"] != "quality" {
+			t.Errorf("mode default=%v, want quality", body["mode"])
+		}
+		if body["text"] == "hello fast" && body["mode"] != "fast" {
+			t.Errorf("forwarded mode=%v, want fast", body["mode"])
+		}
+		if body["text"] == "hello high quality" && body["mode"] != "high_quality" {
+			t.Errorf("forwarded mode=%v, want high_quality", body["mode"])
 		}
 		w.Header().Set("Content-Type", "audio/wav")
 		_, _ = w.Write([]byte("RIFF-test"))
@@ -125,6 +134,8 @@ func TestTTSProxyValidationForwardingAndAudioResponse(t *testing.T) {
 		code       string
 	}{
 		{"valid", `{"text":"hello"}`, 200, ""},
+		{"fast_mode", `{"text":"hello fast","mode":"fast"}`, 200, ""},
+		{"high_quality_mode", `{"text":"hello high quality","mode":"high_quality"}`, 200, ""},
 		{"invalid_language", `{"text":"hello","language":"zh"}`, 400, "invalid_language"},
 		{"invalid_mode", `{"text":"hello","mode":"turbo"}`, 400, "invalid_mode"},
 		{"unknown_field", `{"text":"hello","extra":true}`, 400, "invalid_request"},

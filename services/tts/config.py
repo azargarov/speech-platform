@@ -27,7 +27,6 @@ def load_config(path: str | Path) -> dict:
         "min_free_vram_mib",
         "shutdown_timeout_seconds",
         "cuda_memory_fraction",
-        "fast_mode_enabled",
     }
     if not isinstance(data, dict) or set(data) != fields:
         raise ValueError("configuration fields must match required TTS schema")
@@ -76,8 +75,6 @@ def load_config(path: str | Path) -> dict:
         or any(c not in "0123456789abcdef" for c in digest)
     ):
         raise ValueError("model_manifest_sha256 must be lowercase SHA-256")
-    if type(data["fast_mode_enabled"]) is not bool:
-        raise ValueError("fast_mode_enabled must be boolean")
     fraction = data["cuda_memory_fraction"]
     if (
         type(fraction) not in (int, float)

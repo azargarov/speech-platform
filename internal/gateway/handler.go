@@ -243,10 +243,10 @@ func HandlerWithWorkers(state Readiness, maxBytes int64, stt *STTProxy, tts *TTS
 			return
 		}
 		if request.Mode == "" {
-			request.Mode = "auto"
+			request.Mode = "quality"
 		}
-		if request.Mode != "quality" && request.Mode != "fast" && request.Mode != "auto" {
-			transport.JSON(w, 400, transport.Error{Code: "invalid_mode", Message: "mode must be quality, fast, or auto"})
+		if request.Mode != "quality" && request.Mode != "fast" && request.Mode != "auto" && request.Mode != "high_quality" {
+			transport.JSON(w, 400, transport.Error{Code: "invalid_mode", Message: "mode must be quality, fast, auto, or high_quality"})
 			return
 		}
 		if tts == nil {

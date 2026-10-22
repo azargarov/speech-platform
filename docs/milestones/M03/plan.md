@@ -1,6 +1,6 @@
 # M03 — self-hosted Text-to-Speech
 
-Status: **M03A PASS. M03B PASS and COMPLETE (2026-10-22) for the agreed implementation, live technical validation, and operator acceptance of the tested quality-mode baseline. Fast mode, production licensing, sustained concurrent load, and significant cold-model loading latency retain the limitations recorded below and in the result.**
+Status: **M03A PASS. M03B PASS and COMPLETE (2026-10-22) for the agreed implementation and technical-validation scope after operator acceptance of all four supported mode configurations: `fast` (8 steps), `quality` (10 steps, default), `high_quality` (16 steps), and `auto` (maps to quality). Production licensing, sustained concurrent load, and significant cold-model loading latency remain open limitations; see the result.**
 
 ## Current operator direction — 2026-10-21
 
@@ -305,9 +305,8 @@ live RTX 5000 validation and will validate M03B before completion.
    enum validation. Default `language=auto`, `mode=quality`; return complete
    WAV PCM16. Explicit language values are instruction hints, never detected
    codes. `auto` passes multilingual text through without language metadata.
-3. Keep `quality` at the measured 10-step baseline. Keep `fast` unavailable
-   until the 8-step configuration passes operator quality acceptance. `auto`
-   selects quality unless a measured, reviewed selection rule is later added.
+3. Keep `quality` as the 10-step default. Enable `fast` at 8 steps after
+   operator acceptance. `auto` continues to select quality.
 4. Add a small worker-owned lazy model lifecycle: explicit warm-up; loaded state;
    one serialized GPU inference; configurable idle unload; active inference
    prevents unload. A disconnected client does not kill native inference.

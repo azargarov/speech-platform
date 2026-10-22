@@ -31,9 +31,6 @@ class ConfigTests(unittest.TestCase):
         for name, content in {
             "valid": source,
             "unknown": source + "unexpected: true\n",
-            "fast_enabled_wrong_type": source.replace(
-                "fast_mode_enabled: false", "fast_mode_enabled: 0"
-            ),
             "bad_digest": source.replace(
                 "04d6e05b69b22568030ac21f494e406ffdf2d06efeeab43cfdb4c21ba8c9bd41",
                 "x" * 64,
@@ -60,6 +57,7 @@ class ModeAndLanguageTests(unittest.TestCase):
         self.assertEqual(mode_timesteps("quality"), 10)
         self.assertEqual(mode_timesteps("auto"), 10)
         self.assertEqual(mode_timesteps("fast"), 8)
+        self.assertEqual(mode_timesteps("high_quality"), 16)
         with self.assertRaises(TTSFailure):
             mode_timesteps("turbo")
 
@@ -77,10 +75,24 @@ class ModeAndLanguageTests(unittest.TestCase):
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_synthesis_selects_steps_for_each_mode(self):
+        lifecycle = ModelLifecycle({"idle_unload_seconds": 0}, object)
+        observed = []
+        lifecycle._generate = lambda _model, _text, _language, steps: (
+            observed.append(steps) or b"wav",
+            "audio/wav",
+        )
+        try:
+            for mode in ("quality", "fast", "auto", "high_quality"):
+                lifecycle.synthesize("hello", "auto", mode)
+            self.assertEqual(observed, [10, 8, 10, 16])
+        finally:
+            lifecycle.stop(1)
+
     def test_warmup_loads_and_idle_unload_reloads(self):
         calls = []
         lifecycle = ModelLifecycle(
-            {"idle_unload_seconds": 0.2, "fast_mode_enabled": False},
+            {"idle_unload_seconds": 0.2},
             lambda: calls.append(object()) or calls[-1],
         )
         try:
@@ -102,9 +114,7 @@ class LifecycleTests(unittest.TestCase):
     def test_active_inference_prevents_unload(self):
         entered = threading.Event()
         release = threading.Event()
-        lifecycle = ModelLifecycle(
-            {"idle_unload_seconds": 0.1, "fast_mode_enabled": False}, object
-        )
+        lifecycle = ModelLifecycle({"idle_unload_seconds": 0.1}, object)
         worker = threading.Thread(
             target=lambda: lifecycle._with_model(
                 lambda _model: (entered.set(), release.wait(2))
@@ -131,9 +141,7 @@ class LifecycleTests(unittest.TestCase):
                 raise RuntimeError("temporary load failure")
             return object()
 
-        lifecycle = ModelLifecycle(
-            {"idle_unload_seconds": 0, "fast_mode_enabled": False}, factory
-        )
+        lifecycle = ModelLifecycle({"idle_unload_seconds": 0}, factory)
         try:
             with self.assertRaises(TTSFailure) as caught:
                 lifecycle.warmup()
@@ -146,9 +154,7 @@ class LifecycleTests(unittest.TestCase):
             lifecycle.stop(1)
 
     def test_inference_failure_does_not_latch_worker(self):
-        lifecycle = ModelLifecycle(
-            {"idle_unload_seconds": 0, "fast_mode_enabled": False}, object
-        )
+        lifecycle = ModelLifecycle({"idle_unload_seconds": 0}, object)
         attempts = []
         original = lifecycle._generate
 
@@ -195,7 +201,16 @@ class WorkerHTTPTests(unittest.TestCase):
                 self.started.set()
                 self.release.wait(2)
                 self.finished.set()
-                return b"wav-data", "audio/wav"
+                import io
+                import wave
+
+                output = io.BytesIO()
+                with wave.open(output, "wb") as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(24000)
+                    wav.writeframes(b"\x00\x00" * 8)
+                return output.getvalue(), "audio/wav"
 
         self.lifecycle = FakeLifecycle()
         self.config = test_config()
@@ -228,22 +243,46 @@ class WorkerHTTPTests(unittest.TestCase):
         except urllib.error.HTTPError as error:
             return error
 
+    def assert_valid_wav(self, audio):
+        import io
+        import wave
+
+        with wave.open(io.BytesIO(audio), "rb") as wav:
+            self.assertEqual(wav.getnchannels(), 1)
+            self.assertEqual(wav.getsampwidth(), 2)
+            self.assertEqual(wav.getframerate(), 24000)
+            self.assertEqual(wav.getnframes(), 8)
+
     def test_request_defaults_and_validation(self):
         self.lifecycle.release.set()
         response = self._request(b'{"text":"hello"}')
         self.assertEqual(response.status, 200)
         self.assertEqual(response.headers["Content-Type"], "audio/wav")
-        self.assertEqual(response.read(), b"wav-data")
-        self.assertEqual(self.lifecycle.requests[-1], ("hello", "auto", "auto"))
+        audio = response.read()
+        self.assert_valid_wav(audio)
+        self.assertEqual(self.lifecycle.requests[-1], ("hello", "auto", "quality"))
         for payload, status, code in (
             (b'{"text":"hi","language":"zh"}', 400, "invalid_language"),
             (b'{"text":"hi","extra":1}', 400, "invalid_request"),
-            (b'{"text":"hi","mode":"fast"}', 422, "mode_unavailable"),
+            (b'{"text":"hi","mode":"turbo"}', 400, "invalid_mode"),
             (b'{"text":3}', 400, "invalid_text"),
         ):
             response = self._request(payload)
             self.assertEqual(response.code, status)
             self.assertEqual(json.loads(response.read())["code"], code)
+
+    def test_supported_modes_return_wav_with_audio_metadata(self):
+        self.lifecycle.release.set()
+        for mode in ("quality", "fast", "auto", "high_quality"):
+            with self.subTest(mode=mode):
+                response = self._request(
+                    json.dumps({"text": "hello", "mode": mode}).encode()
+                )
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.headers["Content-Type"], "audio/wav")
+                audio = response.read()
+                self.assert_valid_wav(audio)
+                self.assertEqual(self.lifecycle.requests[-1][2], mode)
 
     def test_worker_admission_is_single_slot(self):
         payload = b'{"text":"first"}'
@@ -275,7 +314,7 @@ class WorkerHTTPTests(unittest.TestCase):
         client.close()
         self.lifecycle.release.set()
         self.assertTrue(self.lifecycle.finished.wait(1))
-        self.assertEqual(self.lifecycle.requests[-1], ("hello", "sv", "auto"))
+        self.assertEqual(self.lifecycle.requests[-1], ("hello", "sv", "quality"))
 
 
 if __name__ == "__main__":

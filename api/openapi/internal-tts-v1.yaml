@@ -38,8 +38,9 @@ paths:
                   description: Auto has no language metadata; explicit values are hints, not detected codes.
                 mode:
                   type: string
-                  enum: [quality, fast, auto]
-                  default: auto
+                  enum: [quality, fast, auto, high_quality]
+                  default: quality
+                  description: quality uses 10 diffusion steps; fast uses 8 diffusion steps; high_quality uses 16 diffusion steps; auto selects quality.
       responses:
         '200':
           description: Complete WAV PCM16 audio.

@@ -152,7 +152,7 @@ def handler(config: dict, lifecycle: ModelLifecycle):
             text = body.get("text")
             voice = body.get("voice", "default")
             language = body.get("language", "auto")
-            mode = body.get("mode", "auto")
+            mode = body.get("mode", "quality")
             if (
                 not isinstance(text, str)
                 or not text.strip()
@@ -183,21 +183,17 @@ def handler(config: dict, lifecycle: ModelLifecycle):
                     },
                 )
                 return
-            if not isinstance(mode, str) or mode not in {"quality", "fast", "auto"}:
+            if not isinstance(mode, str) or mode not in {
+                "quality",
+                "fast",
+                "auto",
+                "high_quality",
+            }:
                 self.reply(
                     400,
                     {
                         "code": "invalid_mode",
-                        "message": "mode must be quality, fast, or auto",
-                    },
-                )
-                return
-            if mode == "fast" and not config["fast_mode_enabled"]:
-                self.reply(
-                    422,
-                    {
-                        "code": "mode_unavailable",
-                        "message": "fast mode has not passed quality acceptance",
+                        "message": "mode must be quality, fast, auto, or high_quality",
                     },
                 )
                 return

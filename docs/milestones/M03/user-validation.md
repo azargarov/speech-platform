@@ -73,8 +73,8 @@ assigned.
   [verification.md](verification.md), including one short simultaneous STT/TTS
   request pair. That observation does not establish sustained concurrent-load
   behavior.
-- Fast mode remains unavailable; the 8-step setting has not been quality
-  accepted.
+- At this stage, fast mode remained unavailable; the 8-step setting had not
+  yet been quality accepted. The later fast-mode acceptance is recorded below.
 - Production licensing is not fully cleared. This milestone closeout does not
   claim unrestricted production readiness.
 - Cold-model loading latency remains significant; measured cold and reload
@@ -83,3 +83,44 @@ assigned.
 The operator supplied this assessment and requested M03B closeout in the
 current user message on 2026-10-22. No independent subjective judgment is
 inferred from the WAV files.
+
+## M03B fast-mode listening acceptance — 2026-10-22
+
+**OBSERVED (operator-reported):** The operator listened to the four tested
+VoxCPM2 samples generated with eight diffusion steps and confirmed that their
+audio quality is acceptable. This accepts fast mode for the tested English,
+Russian, Swedish and mixed-language samples. Quality remains the 10-step
+default, and auto continues to select quality. This feedback was supplied in
+the current user request; no independent listening judgment is inferred.
+
+## M03B high-quality mode selection — 2026-10-22
+
+**OBSERVED (operator-reported):** After listening to the blinded VoxCPM2
+10-, 12- and 16-step comparison samples, the operator selected 16 diffusion
+steps as an additional quality option. The selection applies to the tested
+comparison set and is implemented as `mode=high_quality`; `quality` remains
+the 10-step default and `auto` continues to select `quality`. The private
+comparison and performance provenance is recorded in [verification.md](verification.md).
+
+## Final M03B mode acceptance and closeout — 2026-10-22
+
+**OBSERVED (operator-reported):** The operator listened to the final live
+`high_quality` recording at
+`private/m03b/high-quality-live-20261022/high_quality.wav` and reported:
+**“Audio sounds good. Accepted.”** The operator explicitly accepted M03B
+closeout for its agreed implementation and technical-validation scope.
+
+The final accepted configuration set is:
+
+- `fast`: 8 diffusion steps.
+- `quality`: 10 diffusion steps; default mode.
+- `high_quality`: 16 diffusion steps.
+- `auto`: maps to `quality` (10 steps).
+
+Acceptance applies to the agreed implementation and bounded technical
+validation, including the operator's reviewed final live recording. It does
+not establish unrestricted production readiness, production licensing,
+sustained-load capacity, or improved cold-start latency. Those limitations
+remain explicit in the result and verification records. The operator supplied
+this assessment and closeout approval in the current user request on
+2026-10-22; no independent subjective judgment is inferred from the WAV.

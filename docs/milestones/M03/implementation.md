@@ -1,6 +1,6 @@
 # M03 implementation and evaluation record
 
-Status: **M03A closed for bounded evaluation and selection. M03B implementation is complete for its agreed scope, with live RTX 5000 technical validation and operator acceptance of the tested quality-mode baseline recorded on 2026-10-22. Production licensing remains incompletely cleared; see [result.md](result.md) for scope and limitations.**
+Status: **M03A closed for bounded evaluation and selection. M03B PASS and COMPLETE for its agreed implementation and technical-validation scope on 2026-10-22. Operator acceptance covers fast (8 steps), quality (10 steps, default), high_quality (16 steps), and auto (quality mapping). Production licensing, cold-start latency, and sustained-load limitations remain; see [result.md](result.md).**
 
 ## Work recorded
 
@@ -64,15 +64,56 @@ manifest, content-addressed model provisioning, dedicated CUDA image, canonical
 Compose wiring, Make targets, operational notes, and automated regression
 coverage are implemented. `make verify PYTHON=.venv/bin/python` passed.
 
-The initially stalled image export was resolved through a cached OCI export
-and local image load; the supplied TTS image identity was then validated on
-the actual RTX 5000 on 2026-10-22. The running Gateway image lacked the TTS
-route, so only Gateway was built from the current source and updated. TTS was
-deployed with no dependencies; STT was not restarted or retuned. The private
-listening pack and a private rollback Compose/config snapshot are prepared.
-Detailed live behavior and evidence are in [verification.md](verification.md).
-M03B is complete for the agreed implementation and technical validation
-scope. The operator's listening PASS for the four tested quality-mode samples
-is recorded in [user-validation.md](user-validation.md). Production licensing
-is not fully cleared; this closeout does not imply unrestricted production
-readiness.
+The pre-fast Gateway and TTS images lacked the approved mode implementation.
+For final validation, Gateway was rebuilt from current source and TTS was
+created as a thin source overlay on the existing pinned CUDA image, reusing its
+locked PyTorch/CUDA/VoxCPM runtime and model. Only Gateway and TTS were updated
+with Compose `--no-deps`; the running STT container and unrelated projects were
+preserved. The new live request samples and a rollback image/config overlay are
+under ignored `private/m03b/live-final-20261022/`. Detailed commands and
+observations are in [verification.md](verification.md).
+
+M03B implementation and technical live validation pass. The operator's final
+live high_quality listening acceptance and explicit closeout approval are
+recorded in [user-validation.md](user-validation.md). Production licensing is
+not fully cleared; this bounded validation does not imply unrestricted
+production readiness.
+
+## M03B fast-mode enablement — 2026-10-22
+
+- Enabled the accepted eight-step `fast` path and removed the obsolete
+  `mode_unavailable` gate and `fast_mode_enabled` configuration field.
+- Kept `quality` as the public and worker default at 10 steps; `auto` remains
+  mapped to 10 steps. Updated public/internal API specifications and TTS
+  operations documentation without changing response formats.
+- Added worker coverage for timestep selection, supported-mode WAV responses,
+  response content type, invalid-mode errors, and Gateway default/fast-mode
+  forwarding.
+- No STT, model provisioning, images, deployments, or unrelated services were
+  changed. At the time of this implementation entry, verification and closeout
+  review were pending; subsequent completion is recorded below.
+
+## M03B high_quality live validation — 2026-10-22
+
+- Rebuilt Gateway and a TTS source overlay on the existing pinned CUDA/runtime
+  image, then deployed only Gateway and TTS with Compose `--no-deps`.
+- Kept the exact prior Gateway/TTS image references and a copy of the prior
+  TTS config in an ignored private rollback set. STT and unrelated projects
+  were not recreated or modified.
+- Sent one real `mode=high_quality` request through the canonical Gateway;
+  the worker mapping selected 16 inference steps and produced a valid 48 kHz
+  PCM16 WAV. Full response, health, GPU and rollback evidence is in
+  [verification.md](verification.md).
+- No SSML was implemented.
+
+## M03B final acceptance and closeout — 2026-10-22
+
+- Recorded the operator's acceptance of the final live `high_quality` sample:
+  “Audio sounds good. Accepted.”
+- Recorded explicit approval to close M03B for the agreed implementation and
+  technical-validation scope. All supported configurations are accepted:
+  fast=8 steps, quality=10 steps (default), high_quality=16 steps, and
+  auto=quality.
+- No implementation scope was extended. Production licensing remains
+  unresolved; cold-start latency remains significant; sustained-load behavior
+  remains unestablished. No SSML implementation was started.
