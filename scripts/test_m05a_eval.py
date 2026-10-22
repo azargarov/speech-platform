@@ -6,6 +6,13 @@ from scripts import m05a_eval
 
 
 class M05AEvalTests(unittest.TestCase):
+    def test_context_comparison_options_are_explicit_and_preserve_4k_default(self):
+        self.assertEqual(m05a_eval.generation_options()["num_ctx"], 4096)
+        self.assertEqual(m05a_eval.generation_options(4096)["num_ctx"], 4096)
+        self.assertEqual(m05a_eval.generation_options(8192)["num_ctx"], 8192)
+        with self.assertRaises(ValueError):
+            m05a_eval.generation_options(6144)
+
     def test_repository_corpus_is_valid_and_covers_requested_cases(self):
         cases = m05a_eval.read_cases()
         self.assertEqual(m05a_eval.validate_cases(cases), [])

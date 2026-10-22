@@ -13,19 +13,20 @@ import (
 )
 
 type Config struct {
-	ListenHost      string `yaml:"listen_host"`
-	ListenPort      int    `yaml:"listen_port"`
-	MaxHeaderBytes  int    `yaml:"max_header_bytes"`
-	MaxRequestBytes int64  `yaml:"max_request_bytes"`
-	ReadTimeout     string `yaml:"read_timeout"`
-	WriteTimeout    string `yaml:"write_timeout"`
-	IdleTimeout     string `yaml:"idle_timeout"`
-	ShutdownTimeout string `yaml:"shutdown_timeout"`
-	STTURL          string `yaml:"stt_url"`
-	APIToken        string `yaml:"api_token"`
-	STTTimeout      string `yaml:"stt_timeout"`
-	TTSURL          string `yaml:"tts_url"`
-	TTSTimeout      string `yaml:"tts_timeout"`
+	ListenHost      string         `yaml:"listen_host"`
+	ListenPort      int            `yaml:"listen_port"`
+	MaxHeaderBytes  int            `yaml:"max_header_bytes"`
+	MaxRequestBytes int64          `yaml:"max_request_bytes"`
+	ReadTimeout     string         `yaml:"read_timeout"`
+	WriteTimeout    string         `yaml:"write_timeout"`
+	IdleTimeout     string         `yaml:"idle_timeout"`
+	ShutdownTimeout string         `yaml:"shutdown_timeout"`
+	STTURL          string         `yaml:"stt_url"`
+	APIToken        string         `yaml:"api_token"`
+	STTTimeout      string         `yaml:"stt_timeout"`
+	TTSURL          string         `yaml:"tts_url"`
+	TTSTimeout      string         `yaml:"tts_timeout"`
+	TextTransform   *TextTransform `yaml:"text_transform"`
 }
 
 const PublicMaxRequestBytes int64 = 25 * 1024 * 1024
@@ -84,6 +85,9 @@ func (c Config) Validate() error {
 	ttsTimeout, err := time.ParseDuration(c.TTSTimeout)
 	if err != nil || ttsTimeout <= 0 || ttsTimeout > 10*time.Minute {
 		return fmt.Errorf("tts_timeout must be a positive duration no greater than 10m")
+	}
+	if err := c.validateText(); err != nil {
+		return err
 	}
 	return nil
 }

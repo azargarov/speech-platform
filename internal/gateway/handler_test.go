@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -8,7 +9,36 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"speech-platform/internal/config"
+	"speech-platform/internal/texttransform"
 )
+
+func TestTextTransformationRouteUsesSharedGatewayAndBearerBoundary(t *testing.T) {
+	disabled := false
+	cfg := &config.TextTransform{Enabled: &disabled}
+	service, err := texttransform.New(context.Background(), cfg, "01234567890123456789012345678901", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	h := HandlerWithWorkersAndText(Foundation{}, config.PublicMaxRequestBytes, nil, nil, service)
+	for _, tc := range []struct {
+		method, auth string
+		want         int
+	}{{http.MethodPost, "", 401}, {http.MethodPost, "Bearer 01234567890123456789012345678901", 503}, {http.MethodGet, "Bearer 01234567890123456789012345678901", 405}} {
+		r := httptest.NewRequest(tc.method, "/v1/text/transformations", strings.NewReader(`{"text":"hello"}`))
+		r.Header.Set("Content-Type", "application/json")
+		if tc.auth != "" {
+			r.Header.Set("Authorization", tc.auth)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != tc.want {
+			t.Errorf("%s auth=%t status=%d want %d body=%s", tc.method, tc.auth != "", w.Code, tc.want, w.Body.String())
+		}
+	}
+}
 
 func TestFoundation(t *testing.T) {
 	h := Handler(Foundation{}, 1024)

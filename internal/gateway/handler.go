@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"bytes"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,11 +16,15 @@ import (
 
 const (
 	maxTTSRequestBytes   int64 = 64 * 1024
+	maxTextRequestBytes  int64 = 64 * 1024
 	maxSSMLDocumentBytes       = 48 * 1024
 )
 
 func requestBodyLimit(path string, configured int64) int64 {
-	if path == "/v1/tts/speech" && configured > maxTTSRequestBytes {
+	if (path == "/v1/tts/speech" && configured > maxTTSRequestBytes) || (path == "/v1/text/transformations" && configured > maxTextRequestBytes) {
+		if path == "/v1/text/transformations" {
+			return maxTextRequestBytes
+		}
 		return maxTTSRequestBytes
 	}
 	return configured
@@ -109,6 +112,10 @@ func NewWorkersReadiness(stt *STTProxy, tts *TTSProxy) WorkersReadiness {
 }
 
 func HandlerWithWorkers(state Readiness, maxBytes int64, stt *STTProxy, tts *TTSProxy) http.Handler {
+	return HandlerWithWorkersAndText(state, maxBytes, stt, tts, nil)
+}
+
+func HandlerWithWorkersAndText(state Readiness, maxBytes int64, stt *STTProxy, tts *TTSProxy, text http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	requestSlots := make(chan struct{}, 4)
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
@@ -118,6 +125,9 @@ func HandlerWithWorkers(state Readiness, maxBytes int64, stt *STTProxy, tts *TTS
 			ready = 1
 		}
 		_, _ = fmt.Fprintf(w, "# HELP speech_ready Whether this component can serve inference.\n# TYPE speech_ready gauge\nspeech_ready %d\n", ready)
+		if observable, ok := text.(interface{ Metrics() string }); ok {
+			_, _ = io.WriteString(w, observable.Metrics())
+		}
 	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		transport.JSON(w, 200, map[string]string{"status": "alive"})
@@ -129,6 +139,17 @@ func HandlerWithWorkers(state Readiness, maxBytes int64, stt *STTProxy, tts *TTS
 		}
 		transport.JSON(w, 200, map[string]string{"status": "ready"})
 	})
+	if text == nil {
+		mux.HandleFunc("/v1/text/transformations", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				transport.JSON(w, 405, transport.Error{Code: "method_not_allowed", Message: "POST is required"})
+				return
+			}
+			transport.JSON(w, 503, transport.Error{Code: "text_transform_unavailable", Message: "text transformation is unavailable"})
+		})
+	} else {
+		mux.Handle("/v1/text/transformations", text)
+	}
 	mux.HandleFunc("/v1/stt/transcriptions", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			transport.JSON(w, 405, transport.Error{Code: "method_not_allowed", Message: "POST is required"})
@@ -358,7 +379,7 @@ func HandlerWithWorkers(state Readiness, maxBytes int64, stt *STTProxy, tts *TTS
 		transport.JSON(w, 404, transport.Error{Code: "not_found", Message: "endpoint unavailable"})
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if (r.URL.Path == "/v1/stt/transcriptions" || r.URL.Path == "/v1/tts/speech") && r.ContentLength > requestBodyLimit(r.URL.Path, maxBytes) {
+		if (r.URL.Path == "/v1/stt/transcriptions" || r.URL.Path == "/v1/tts/speech" || r.URL.Path == "/v1/text/transformations") && r.ContentLength > requestBodyLimit(r.URL.Path, maxBytes) {
 			transport.JSON(w, 413, transport.Error{Code: "request_too_large", Message: "request size limit exceeded"})
 			return
 		}
@@ -367,12 +388,5 @@ func HandlerWithWorkers(state Readiness, maxBytes int64, stt *STTProxy, tts *TTS
 }
 
 func validBearer(header, token string) bool {
-	if len(header) < 8 || !strings.EqualFold(header[:7], "Bearer ") {
-		return false
-	}
-	got := strings.TrimSpace(header[7:])
-	if len(got) != len(token) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
+	return transport.ValidBearer(header, token)
 }

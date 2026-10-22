@@ -133,6 +133,12 @@ def system_prompt(path: Path = PROMPT) -> str:
     return prompt
 
 
+def generation_options(num_ctx: int = 4096) -> dict:
+    if num_ctx not in (4096, 8192):
+        raise ValueError("num_ctx must be 4096 or 8192")
+    return {**SETTINGS, "num_ctx": num_ctx}
+
+
 def invariant_flags(output: str, invariants: list[str]) -> list[str]:
     normalized = " ".join(output.casefold().split())
     flags = []
@@ -176,7 +182,7 @@ def model_identity(base_url: str, model: str) -> dict:
 
 
 def generate_one(
-    base_url: str, model: str, prompt: str, case: dict
+    base_url: str, model: str, prompt: str, case: dict, num_ctx: int = 4096
 ) -> tuple[dict, float]:
     user_content = json.dumps(
         {
@@ -195,7 +201,7 @@ def generate_one(
         "stream": True,
         "think": False,
         "keep_alive": "10m",
-        "options": SETTINGS,
+        "options": generation_options(num_ctx),
     }
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/api/generate",
@@ -243,7 +249,11 @@ def generate_one(
         "input_length_chars": len(case["text"]),
         "length_class": input_length_class(case["text"]),
         "prompt_version": "v1",
-        "generation_settings": {"think": False, "keep_alive": "10m", **SETTINGS},
+        "generation_settings": {
+            "think": False,
+            "keep_alive": "10m",
+            **generation_options(num_ctx),
+        },
         "response": output,
         "thinking_output": "".join(thinking),
         "lexical_flags": invariant_flags(output, case["invariants"]),
@@ -296,6 +306,7 @@ def summarize(
     started_at: str,
     loaded_models: list[dict],
     placement_error: str | None,
+    num_ctx: int = 4096,
 ) -> dict:
     successful = [row for row in rows if row.get("error") is None]
     cold = [
@@ -346,7 +357,11 @@ def summarize(
         "gpu_samples": gpu_summary(path / "gpu-samples.csv"),
         "ollama_container_samples": docker_stats_summary(path / "docker-samples.csv"),
         "host_memory_samples": host_memory_summary(path / "host-memory-samples.csv"),
-        "settings": {"think": False, "timeout_seconds": TIMEOUT_SECONDS, **SETTINGS},
+        "settings": {
+            "think": False,
+            "timeout_seconds": TIMEOUT_SECONDS,
+            **generation_options(num_ctx),
+        },
         "results_file": str(path / "results.jsonl"),
     }
     (path / "summary.json").write_text(
@@ -538,6 +553,7 @@ def run(
     prompt_path: Path = PROMPT,
     prompt_version: str = "v1",
     case_file: Path = CORPUS,
+    num_ctx: int = 4096,
 ) -> int:
     private_root = (ROOT / "private/m05a").resolve()
     run_dir = run_dir.resolve()
@@ -560,6 +576,7 @@ def run(
                 "model": identity,
                 "prompt_version": prompt_version,
                 "case_file": str(case_file),
+                "num_ctx": num_ctx,
             },
             ensure_ascii=False,
             indent=2,
@@ -605,7 +622,7 @@ def run(
         with results_path.open("x", encoding="utf-8") as output_file:
             for case in cases:
                 try:
-                    result, _ = generate_one(base_url, model, prompt, case)
+                    result, _ = generate_one(base_url, model, prompt, case, num_ctx)
                 except (
                     urllib.error.URLError,
                     TimeoutError,
@@ -657,7 +674,7 @@ def run(
         except (urllib.error.URLError, TimeoutError, RuntimeError, ValueError) as exc:
             unload_error = f"{type(exc).__name__}: {exc}"
     summary = summarize(
-        run_dir, identity, rows, started_at, loaded_models, placement_error
+        run_dir, identity, rows, started_at, loaded_models, placement_error, num_ctx
     )
     summary["prompt_version"] = prompt_version
     summary["unload_error"] = unload_error
@@ -689,6 +706,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--case-file", type=Path, default=CORPUS)
     parser.add_argument("--prompt", type=Path, default=PROMPT)
     parser.add_argument("--prompt-version", default="v1")
+    parser.add_argument(
+        "--num-ctx",
+        type=int,
+        choices=(4096, 8192),
+        default=4096,
+        help="Ollama context for controlled M05A comparisons",
+    )
     parser.add_argument("--base-url", default="http://127.0.0.1:11434")
     parser.add_argument(
         "--run-dir", type=Path, help="new output directory under private/m05a"
@@ -726,6 +750,7 @@ def main(argv: list[str] | None = None) -> int:
             args.prompt,
             args.prompt_version,
             args.case_file,
+            args.num_ctx,
         )
     except (OSError, ValueError, urllib.error.URLError) as exc:
         print(f"error: {exc}", file=sys.stderr)

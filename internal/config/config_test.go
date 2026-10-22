@@ -73,3 +73,49 @@ func TestValidHost(t *testing.T) {
 		}
 	}
 }
+
+func TestTextTransformExampleAndStrictNestedConfig(t *testing.T) {
+	t.Setenv("SPEECH_LISTEN_PORT", "")
+	t.Setenv("GROQ_API_KEY", "")
+	raw, err := os.ReadFile("../../configs/gateway-text.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := string(raw)
+	for name, body := range map[string]string{
+		"valid":                   valid,
+		"unknown nested field":    strings.Replace(valid, "      enabled: true", "      enabled: true\n      surprise: true", 1),
+		"duplicate nested key":    strings.Replace(valid, "  enabled: true", "  enabled: true\n  enabled: true", 1),
+		"required enabled":        strings.Replace(valid, "  enabled: true\n", "", 1),
+		"cloud requires https":    strings.Replace(valid, "https://api.groq.com", "http://api.groq.com", 1),
+		"invalid output budget":   strings.Replace(valid, "num_predict: 1024", "num_predict: 8192", 1),
+		"unknown parameter block": strings.Replace(valid, "        ollama:", "        unknown:", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := t.TempDir() + "/config.yaml"
+			if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path)
+			if (err == nil) != (name == "valid") {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestCloudCredentialsAreResolvedOnlyForPermittedEnabledModels(t *testing.T) {
+	t.Setenv("GROQ_API_KEY", "secret-test-value")
+	c, err := Load("../../configs/gateway-text.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.TextTransform.ResolveTextCredentials(); len(got) != 0 {
+		t.Fatalf("cloud forbidden but credentials resolved: %#v", got)
+	}
+	c.TextTransform.Selection.AllowCloud = true
+	got := c.TextTransform.ResolveTextCredentials()
+	if got["groq"] != "secret-test-value" {
+		t.Fatalf("credential not resolved for permitted model: %#v", got)
+	}
+}

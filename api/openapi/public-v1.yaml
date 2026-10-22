@@ -5,7 +5,9 @@ info:
   description: STT transcription and complete WAV TTS routes are implemented. Optional bearer authentication is enforced when configured; non-loopback host exposure requires a secret token. STT request limit is 25 MiB; TTS JSON request limit is 64 KiB. Plain-text input is limited to 10000 characters; SSML has a 49152-byte document limit and a configured speech-character limit. Default STT deadline is 180 seconds and TTS deadline is 600 seconds; upload read deadline is 30 seconds. Client disconnect cancels the Gateway request and stops response delivery; active native TTS inference may finish asynchronously, and no result is returned to a disconnected client. Deadline exhaustion returns 504 where the connection remains writable.
     Streaming is reserved, not implemented; capability flags remain false until supported.
     Timestamps are optional; unsupported requests return 400. Errors never contain
-    audio or transcript payloads.
+    audio or transcript payloads. Text transformation is available only when an
+    optional Gateway text_transform configuration is enabled; generated output
+    is unverified and requires user review.
 security:
 - bearerAuth: []
 - {}
@@ -227,12 +229,117 @@ paths:
         '403': *id003
         '500': *id009
         '503': *id010
+  /v1/text/transformations:
+    post:
+      operationId: transformText
+      summary: Optionally transform or translate text through a configured provider
+      x-maxRequestSizeBytes: 65536
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TextTransformRequest'
+      responses:
+        '200':
+          description: Exact raw passthrough or generated text with provenance metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TextTransformResponse'
+        '400': *id001
+        '401': *id002
+        '403': *id003
+        '413': *id005
+        '415': *id006
+        '422': *id007
+        '429': *id008
+        '502':
+          description: Provider rejected the request, violated protocol, or returned invalid output
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503': *id010
+        '504': *id011
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
   schemas:
+    TextTransformRequest:
+      type: object
+      additionalProperties: false
+      required: [text]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          description: UTF-8 input; configured byte and context limits also apply.
+        mode:
+          type: string
+          enum: [raw, written, polite, diplomatic]
+          default: raw
+        format:
+          type: string
+          enum: [normal, concise, structured]
+          default: normal
+        target_language:
+          type: string
+          enum: [none, en, sv, ru]
+          default: none
+        model:
+          type: string
+          nullable: true
+          minLength: 1
+          maxLength: 64
+          description: Optional configured logical model alias; explicit selection never falls back.
+        local_only:
+          type: boolean
+          default: false
+      description: When mode is raw, format must be normal. Validation is enforced by the Gateway.
+    TextTransformOptions:
+      type: object
+      additionalProperties: false
+      required: [mode, format, target_language, model, local_only]
+      properties:
+        mode:
+          type: string
+          enum: [raw, written, polite, diplomatic]
+        format:
+          type: string
+          enum: [normal, concise, structured]
+        target_language:
+          type: string
+          enum: [none, en, sv, ru]
+        model:
+          type: string
+          nullable: true
+        local_only:
+          type: boolean
+    TextTransformResponse:
+      type: object
+      additionalProperties: false
+      required: [original_text, transformed_text, options, model, provider, fallback_occurred, generated]
+      properties:
+        original_text:
+          type: string
+        transformed_text:
+          type: string
+        options:
+          $ref: '#/components/schemas/TextTransformOptions'
+        model:
+          type: string
+          nullable: true
+        provider:
+          type: string
+          nullable: true
+        fallback_occurred:
+          type: boolean
+        generated:
+          type: boolean
     Error:
       type: object
       required:

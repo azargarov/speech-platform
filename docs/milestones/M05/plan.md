@@ -1,12 +1,35 @@
 # M05 — Voice dictation and text transformation
 
-Status: **M05A evaluation COMPLETE; broader M05 roadmap remains future work. This work is outside STT v1 acceptance.**
+Status: **Umbrella roadmap: M05A evaluation complete and closed; M05B Stage 1 offline implementation PASS and operator-accepted (2026-10-22). Stage 2 remains unauthorized. Clients remain future work. This work is outside STT v1 acceptance.**
+
+## Current planning slice — 2026-10-22
+
+The [M05B proposal](../M05B/plan.md) is the current design for initial direct
+text transformation/translation: `raw`, `written`, `polite`, `diplomatic`;
+`normal`, `concise`, `structured`; targets `none`, `en`, `sv`, `ru`. It proposes
+an optional module in Gateway with configurable local/cloud providers, stable
+model order and explicitly permitted fallback. Translation can compose with
+rewriting in one invocation, while STT remains an independent operation.
+
+These requirements supersede the provisional mode list and local-only text
+assumption below for M05B. Those earlier ideas are historical future options,
+not an existing public API. The operator retains all three evaluated Qwen/GPT-OSS
+options subject to user review of generated text. M05A is closed for its
+bounded evaluation scope, with known limitations recorded in its result.
+M05B has two acceptance stages: offline implementation and live qualification;
+its revised plan addresses Astra findings A–I, including speech availability
+with missing optional keys and a shared-GPU gate on local production use.
+See [ADR 0021](../../adr/0021-configurable-text-transformation.md).
+This planning update authorized no M05B implementation or deployment. Stage 1
+implementation is now accepted; the current operator request separately
+authorizes its scoped commit. Stage 2 and milestone advancement remain
+unauthorized.
 
 ## Purpose
 
 Support voice-driven writing in Russian, English and Swedish by keeping speech recognition, optional translation and optional text transformation as independent operations. Preserve the original raw transcription in every transformed result.
 
-## Future scope
+## Earlier provisional scope and later client work
 
 - Per-request modes: `raw`, `clean`, `business`, `friendly`, `casual` and `formal_to_casual`.
 - A separate optional transformation service or module behind Gateway. It uses a configurable local LLM backend; the STT inference worker must not include or call an LLM.

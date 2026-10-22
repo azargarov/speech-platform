@@ -1,0 +1,84 @@
+listen_host: 127.0.0.1
+listen_port: 8080
+stt_url: http://127.0.0.1:8081
+stt_timeout: 180s
+tts_url: http://127.0.0.1:8082
+tts_timeout: 600s
+max_header_bytes: 1048576
+max_request_bytes: 26214400
+read_timeout: 30s
+write_timeout: 610s
+idle_timeout: 60s
+shutdown_timeout: 10s
+text_transform:
+  enabled: true
+  request_timeout: 240s
+  max_request_bytes: 65536
+  max_input_bytes: 10000
+  max_output_characters: 20000
+  max_response_bytes: 262144
+  max_concurrent_requests: 1
+  selection:
+    policy: ordered
+    allow_cloud: false
+  transport:
+    connect_timeout: 3s
+    tls_handshake_timeout: 5s
+    max_idle_connections: 2
+  providers:
+    - id: host-ollama
+      type: ollama
+      locality: local
+      endpoint: http://host.docker.internal:11434/api/generate
+      timeout: 180s
+    - id: groq
+      type: openai_compatible
+      locality: cloud
+      endpoint: https://api.groq.com/openai/v1/chat/completions
+      api_key_env: GROQ_API_KEY
+      timeout: 30s
+  models:
+    - id: local-qwen
+      provider: host-ollama
+      model: qwen3.5:9b-q4_K_M
+      enabled: true
+      context_limit_tokens: 8192
+      prompt_overhead_tokens: 512
+      parameters:
+        ollama:
+          think: false
+          keep_alive: 0s
+          num_predict: 1024
+          num_batch: 128
+          num_thread: 8
+          temperature: 0
+          top_p: 1
+          seed: 20261022
+    - id: groq-qwen
+      provider: groq
+      model: qwen/qwen3.8-27b
+      enabled: true
+      context_limit_tokens: 8192
+      prompt_overhead_tokens: 512
+      parameters:
+        openai_compatible:
+          max_completion_tokens: 1024
+          temperature: 0
+          top_p: 1
+          seed: 20261022
+          reasoning_effort: none
+          include_reasoning: false
+    - id: groq-gpt-oss
+      provider: groq
+      model: openai/gpt-oss-120b
+      enabled: true
+      context_limit_tokens: 8192
+      prompt_overhead_tokens: 512
+      parameters:
+        openai_compatible:
+          max_completion_tokens: 1024
+          temperature: 0
+          top_p: 1
+          seed: 20261022
+          reasoning_effort: low
+          include_reasoning: false
