@@ -1,6 +1,6 @@
 # M05 — Voice dictation and text transformation
 
-Status: **FUTURE; NOT STARTED. This work is outside STT v1 acceptance.**
+Status: **M05A evaluation COMPLETE; broader M05 roadmap remains future work. This work is outside STT v1 acceptance.**
 
 ## Purpose
 
