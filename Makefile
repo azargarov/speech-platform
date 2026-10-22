@@ -15,6 +15,13 @@ SERVICES_DEPLOYMENT_CONFIG ?= private/deployment/services.yaml
 GATEWAY_DEPLOYMENT_CONFIG ?= private/deployment/gateway.yaml
 TTS_DEPLOYMENT_CONFIG ?= private/deployment/tts.yaml
 MODEL_STORE ?= /srv/speech-platform/models
+MODEL_READ_GID ?= 988
+MODEL_READ_GROUP ?= $(shell getent group $(MODEL_READ_GID) | cut -d: -f1)
+TTS_MODEL_STORE ?= $(MODEL_STORE)
+TTS_MODEL_READ_GID ?= $(MODEL_READ_GID)
+TTS_MODEL_READ_GROUP ?= $(shell getent group $(TTS_MODEL_READ_GID) | cut -d: -f1)
+TTS_MODEL_OWNER_UID ?= 0
+SOURCE_REVISION ?= $(shell git rev-parse HEAD)
 LOCK_ROOT ?= $(SPEECH_PLATFORM_LOCK_ROOT)
 PROFILE ?= regular
 ifneq ($(filter legacy-plan legacy-install,$(MAKECMDGOALS)),)
@@ -66,7 +73,7 @@ else
 $(error Unknown publish service '$(SERVICE)'; choose gateway, stt, or tts)
 endif
 endif
-.PHONY: verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check release-check model-check model-fetch plan install legacy-plan legacy-install status logs test-stt stt-cpu-integration stt-cuda-http-integration
+.PHONY: verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check tts-lock-check release-check model-check model-fetch tts-model-check tts-model-fetch tts-warmup tts-state plan install legacy-plan legacy-install status logs test-stt stt-cpu-integration stt-cuda-http-integration
 bootstrap:
 	$(PYTHON) -m pip install -r requirements-dev.txt
 	$(PYTHON) -m pip install --require-hashes -r services/requirements-stt-cpu.lock
@@ -100,7 +107,8 @@ build:
 	go build ./...
 	$(PYTHON) -c 'import ast,pathlib; [ast.parse(p.read_text()) for p in pathlib.Path("services").rglob("*.py")]'
 image:
-	SOURCE_REVISION="$(shell git rev-parse HEAD)" STT_CPU_LOCK_SHA256="$$(sha256sum services/requirements-stt-cpu.lock | cut -d' ' -f1)" STT_CUDA_LOCK_SHA256="$$(sha256sum services/requirements-stt-cuda.lock | cut -d' ' -f1)" STT_APPLICATION_CONFIG="$(CURDIR)/configs/stt-application-cpu.example.yaml" STT_DEPLOYMENT_CONFIG="$(CURDIR)/configs/stt-deployment-cpu.example.yaml" STT_MODEL_ROOT=/models $(COMPOSE) -f $(IMAGE_COMPOSE_FILE) build $(IMAGE_SELECTION)
+	@if [ "$(IMAGE_SERVICE)" = "tts" ]; then SOURCE_REVISION="$(SOURCE_REVISION)" docker compose --env-file .env.example -f compose.yaml build tts; else SOURCE_REVISION="$(SOURCE_REVISION)" STT_CPU_LOCK_SHA256="$$(sha256sum services/requirements-stt-cpu.lock | cut -d' ' -f1)" STT_CUDA_LOCK_SHA256="$$(sha256sum services/requirements-stt-cuda.lock | cut -d' ' -f1)" STT_APPLICATION_CONFIG="$(CURDIR)/configs/stt-application-cpu.example.yaml" STT_DEPLOYMENT_CONFIG="$(CURDIR)/configs/stt-deployment-cpu.example.yaml" STT_MODEL_ROOT=/models $(COMPOSE) -f $(IMAGE_COMPOSE_FILE) build $(IMAGE_SELECTION); fi
+	@if [ -z "$(IMAGE_SERVICE)" ]; then SOURCE_REVISION="$(SOURCE_REVISION)" docker compose --env-file .env.example -f compose.yaml build tts; fi
 publish:
 	$(PYTHON) scripts/publish_images.py --version "$(PUBLISH_VERSION)" --services "$(PUBLISH_SELECTION)" --variant "$(PUBLISH_VARIANT)"
 release-check:
@@ -109,6 +117,16 @@ model-check:
 	$(PYTHON) -m scripts.provision_models check --release "$(PLATFORM_RELEASE)" --store "$(MODEL_STORE)"
 model-fetch:
 	$(PYTHON) -m scripts.provision_models fetch --release "$(PLATFORM_RELEASE)" --store "$(MODEL_STORE)"
+tts-model-check:
+	$(PYTHON) -m scripts.tts_model check --store "$(TTS_MODEL_STORE)"
+tts-model-fetch:
+	@if [ "$(TTS_MODEL_OWNER_UID)" = "0" ]; then sudo -n -g "$(TTS_MODEL_READ_GROUP)" $(PYTHON) -m scripts.tts_model fetch --store "$(TTS_MODEL_STORE)" --reader-gid "$(TTS_MODEL_READ_GID)" --owner-uid "$(TTS_MODEL_OWNER_UID)"; else $(PYTHON) -m scripts.tts_model fetch --store "$(TTS_MODEL_STORE)" --reader-gid "$(TTS_MODEL_READ_GID)" --owner-uid "$(TTS_MODEL_OWNER_UID)"; fi
+tts-lock-check:
+	$(PYTHON) scripts/check_tts_lock.py
+tts-warmup:
+	docker compose --env-file .env -f compose.yaml exec -T tts python -c 'import urllib.request; print(urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8082/internal/v1/warmup", data=b"", method="POST"), timeout=600).read().decode())'
+tts-state:
+	docker compose --env-file .env -f compose.yaml exec -T tts python -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8082/internal/v1/state", timeout=3).read().decode())'
 plan:
 	$(PYTHON) scripts/product_deployment.py plan
 install:
@@ -183,4 +201,4 @@ stt-cuda-http-integration:
 	      --maximum-request-count "$(if $(STT_CUDA_HTTP_MAX_REQUEST_COUNT),$(STT_CUDA_HTTP_MAX_REQUEST_COUNT),1)" \
 	      --overall-deadline-seconds "$(STT_CUDA_HTTP_DEADLINE_SECONDS)" \
 	      --resource-sample-interval-seconds "$(if $(STT_CUDA_RESOURCE_SAMPLE_INTERVAL_SECONDS),$(STT_CUDA_RESOURCE_SAMPLE_INTERVAL_SECONDS),disabled)"
-verify: lint config compose-check release-check test build governance-check stt-lock-check
+verify: lint config compose-check release-check test build governance-check stt-lock-check tts-lock-check

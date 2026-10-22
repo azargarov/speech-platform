@@ -2,17 +2,17 @@ openapi: 3.0.3
 info:
   title: TTS internal worker API
   version: 1.0.0
-  description: Private protocol, reserved in M01. No inference handler installed.
+  description: Private protocol for the existing TTS worker.
     Gateway translates platform aliases using configuration; internal provider selection
     never leaks into public API. Only gateway may reach worker network. Connection
-    close cancels job; gateway propagates remaining deadline in X-Request-Timeout-Ms.
-    Providers must check cancellation during inference. No STT-to-TTS calls. No runtime
-    downloads.
+    close stops response delivery but does not forcibly interrupt active native
+    inference; the Gateway propagates its request timeout in X-Request-Timeout-Ms.
+    No STT-to-TTS calls. No runtime downloads.
 paths:
   /internal/v1/speech:
     post:
       operationId: internalTTS
-      x-maxRequestSizeBytes: 26214400
+      x-maxRequestSizeBytes: 65536
       requestBody:
         required: true
         content:
@@ -22,7 +22,6 @@ paths:
               additionalProperties: false
               required:
               - text
-              - voice
               properties:
                 text:
                   type: string
@@ -30,42 +29,22 @@ paths:
                   maxLength: 10000
                 voice:
                   type: string
-                  minLength: 1
-                  maxLength: 128
+                  enum: [default]
+                  default: default
                 language:
                   type: string
                   default: auto
-                  minLength: 1
-                  maxLength: 64
-                  description: BCP-47 tag or auto. Auto uses provider text detection
-                    when supported; otherwise returns 400.
-                format:
+                  enum: [auto, en, ru, sv]
+                  description: Auto has no language metadata; explicit values are hints, not detected codes.
+                mode:
                   type: string
-                  enum:
-                  - wav
-                  - mp3
-                  - opus
-                  default: wav
-                stream:
-                  type: boolean
-                  enum:
-                  - false
-                  default: false
+                  enum: [quality, fast, auto]
+                  default: auto
       responses:
         '200':
-          description: Complete audio; Content-Type matches requested format. Unsupported
-            formats return 400. WAV is PCM16; Opus uses Ogg container. Sample rate
-            is provider-selected and encoded in the audio header.
+          description: Complete WAV PCM16 audio.
           content:
             audio/wav:
-              schema:
-                type: string
-                format: binary
-            audio/mpeg:
-              schema:
-                type: string
-                format: binary
-            audio/ogg:
               schema:
                 type: string
                 format: binary
@@ -146,6 +125,28 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /internal/v1/warmup:
+    post:
+      operationId: warmup
+      responses:
+        '200':
+          description: Model loaded and warm-up completed
+        '429':
+          description: Inference slot is busy
+        '503':
+          description: Model could not be loaded
+  /internal/v1/state:
+    get:
+      operationId: modelState
+      responses:
+        '200':
+          description: Model state and active inference flag
+  /internal/v1/voices:
+    get:
+      operationId: listConfiguredVoices
+      responses:
+        '200':
+          description: Configured voice alias and supported language hints
 components:
   schemas:
     Error:

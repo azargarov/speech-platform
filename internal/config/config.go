@@ -24,6 +24,8 @@ type Config struct {
 	STTURL          string `yaml:"stt_url"`
 	APIToken        string `yaml:"api_token"`
 	STTTimeout      string `yaml:"stt_timeout"`
+	TTSURL          string `yaml:"tts_url"`
+	TTSTimeout      string `yaml:"tts_timeout"`
 }
 
 const PublicMaxRequestBytes int64 = 25 * 1024 * 1024
@@ -66,9 +68,11 @@ func (c Config) Validate() error {
 			return fmt.Errorf("all timeouts must be positive durations")
 		}
 	}
-	workerURL, err := url.Parse(c.STTURL)
-	if err != nil || workerURL.Scheme != "http" || workerURL.Host == "" || workerURL.User != nil || workerURL.RawQuery != "" || workerURL.Fragment != "" || workerURL.Path != "" && workerURL.Path != "/" {
-		return fmt.Errorf("stt_url is required")
+	for name, raw := range map[string]string{"stt_url": c.STTURL, "tts_url": c.TTSURL} {
+		workerURL, err := url.Parse(raw)
+		if err != nil || workerURL.Scheme != "http" || workerURL.Host == "" || workerURL.User != nil || workerURL.RawQuery != "" || workerURL.Fragment != "" || workerURL.Path != "" && workerURL.Path != "/" {
+			return fmt.Errorf("%s is required", name)
+		}
 	}
 	if c.APIToken != "" && len(c.APIToken) < 32 {
 		return fmt.Errorf("SPEECH_API_TOKEN must contain at least 32 characters when configured")
@@ -76,6 +80,10 @@ func (c Config) Validate() error {
 	sttTimeout, err := time.ParseDuration(c.STTTimeout)
 	if err != nil || sttTimeout <= 0 || sttTimeout > 10*time.Minute {
 		return fmt.Errorf("stt_timeout must be a positive duration no greater than 10m")
+	}
+	ttsTimeout, err := time.ParseDuration(c.TTSTimeout)
+	if err != nil || ttsTimeout <= 0 || ttsTimeout > 10*time.Minute {
+		return fmt.Errorf("tts_timeout must be a positive duration no greater than 10m")
 	}
 	return nil
 }

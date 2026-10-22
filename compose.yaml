@@ -18,7 +18,9 @@ services:
     depends_on:
       stt:
         condition: service_healthy
-    networks: [publish, stt_private]
+      tts:
+        condition: service_healthy
+    networks: [publish, stt_private, tts_private]
     restart: unless-stopped
     read_only: true
     user: "65532:65532"
@@ -88,28 +90,47 @@ services:
     image: speech-platform-tts:${SOURCE_REVISION:-local}
     build:
       context: .
-      dockerfile: deployments/compose/worker.Dockerfile
+      dockerfile: deployments/compose/worker-tts-cuda.Dockerfile
       args:
         SOURCE_REVISION: ${SOURCE_REVISION:-local}
-        SERVICE_ROLE: tts-health-only
+        TTS_MODEL_REVISION: 32279effe8c19989596f05d353d1447f51d9e915
+        TTS_SOURCE_REVISION: cce58a5b59303c9bd63d12f23afe6a49a4a80c59
+        TTS_LOCK_SHA256: 618629a53f3a04cd395227ef3721a5cc1b36e9353fb26eec7bd1869a70c6a408
     command: ["services.tts.main", "--config", "/config/tts.yaml"]
     volumes:
       - ./configs/tts.yaml:/config/tts.yaml:ro
+      - ${TTS_MODEL_STORE:-${MODEL_STORE:?set MODEL_STORE}}/${TTS_MODEL_MANIFEST_SHA256:?set pinned TTS model manifest digest}:/models:ro
     networks: [tts_private]
     restart: unless-stopped
+    stop_grace_period: ${TTS_STOP_GRACE_PERIOD:-240s}
     read_only: true
     user: "65532:65532"
+    group_add: ["${TTS_MODEL_READ_GID:-${MODEL_READ_GID:-988}}"]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    mem_limit: ${TTS_MEMORY_LIMIT:-256m}
-    cpus: ${TTS_CPU_LIMIT:-1}
-    pids_limit: 64
+    mem_limit: ${TTS_GPU_MEMORY_LIMIT:-14g}
+    cpus: ${TTS_CPU_LIMIT:-4}
+    pids_limit: ${TTS_PIDS_LIMIT:-128}
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=1g
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      HF_HOME: /tmp/hf-cache
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8082/healthz', timeout=2)"]
       interval: 10s
       timeout: 3s
       retries: 3
-      start_period: 10s
+      start_period: 20s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${TTS_GPU_DEVICE:-0}"]
+              capabilities: [gpu]
 networks:
   publish:
     driver: bridge

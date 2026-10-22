@@ -1,6 +1,6 @@
 # VoiceService platform architecture and migration plan
 
-Status: historical deployment roadmap, superseded for normal operation by [ADR 0018](../adr/0018-git-compose-product-operations.md). M01C–M01E and M01F-A/B1/B2 retain their recorded outcomes. M01F-B3.1 implementation and evidence remain preserved as optional lifecycle tooling; G0 adoption and snapshot capture are not installation prerequisites. M02-D STT v1 is PASS/complete; M03 TTS is in planning for operator review and is not implementation-authorized. The repository remains `speech-platform`; Speech Platform is the product name.
+Status: historical deployment roadmap, superseded for normal operation by [ADR 0018](../adr/0018-git-compose-product-operations.md). M01C–M01E and M01F-A/B1/B2 retain their recorded outcomes. M01F-B3.1 implementation and evidence remain preserved as optional lifecycle tooling; G0 adoption and snapshot capture are not installation prerequisites. M02-D STT v1 is PASS/complete; M03A selected VoxCPM2 for initial M03B integration and M03B implementation is in progress with production acceptance pending. The repository remains `speech-platform`; Speech Platform is the product name.
 
 ## Current operating decision
 
@@ -33,7 +33,7 @@ flowchart LR
     TTS --> MT[Read-only pinned voice/model release]
 ```
 
-The diagram is the historical M01 target. The root `compose.yaml` is now the canonical product deployment and includes a Gateway-to-STT route, worker-backed readiness and optional bearer authentication when a non-loopback bind is configured. The TTS entry point remains health-only. The earlier direct STT smoke baseline remains protected and is not replaced by product installation.
+The diagram is the historical M01 target. The root `compose.yaml` is the canonical product deployment and includes Gateway-to-STT and Gateway-to-TTS routes, worker-backed readiness and optional bearer authentication when a non-loopback bind is configured. TTS now uses the existing private worker with a VoxCPM2 candidate; its quality, licensing and live shared-GPU acceptance remain pending. The earlier direct STT smoke baseline remains protected and is not replaced by product installation.
 
 ## Repository findings
 

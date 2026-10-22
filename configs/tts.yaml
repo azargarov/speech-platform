@@ -3,3 +3,13 @@ listen_host: 0.0.0.0
 listen_port: 8082
 socket_timeout_seconds: 60
 poll_interval_seconds: 0.5
+model_path: /models/artifact
+model_revision: 32279effe8c19989596f05d353d1447f51d9e915
+model_manifest_sha256: 04d6e05b69b22568030ac21f494e406ffdf2d06efeeab43cfdb4c21ba8c9bd41
+idle_unload_seconds: 60
+max_text_characters: 10000
+max_request_bytes: 65536
+min_free_vram_mib: 8000
+cuda_memory_fraction: 0.55
+shutdown_timeout_seconds: 240
+fast_mode_enabled: false

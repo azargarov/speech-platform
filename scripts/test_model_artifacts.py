@@ -150,6 +150,67 @@ class ModelArtifactProvisioning(unittest.TestCase):
         )
         self.assertEqual(directory.stat().st_gid, os.getegid())
 
+    def test_production_layout_allows_parent_group_different_from_reader_gid(self):
+        model, contents = self.create_model()
+        parent = self.root / "speech-platform"
+        parent.mkdir(mode=0o711)
+        parent.chmod(0o711)
+        store = parent / "models"
+        store.mkdir(mode=0o2710)
+        store.chmod(0o2710)
+
+        original_lstat = Path.lstat
+        original_stat = Path.stat
+
+        def production_parent_metadata(path):
+            result = original_lstat(path)
+            if path in {self.root, parent}:
+                values = list(result)
+                values[4] = 0
+                values[5] = 0
+                return os.stat_result(values)
+            return result
+
+        def production_store_metadata(path, *args, **kwargs):
+            result = original_stat(path, *args, **kwargs)
+            if path == store or store in path.parents:
+                values = list(result)
+                values[4] = 0
+                values[5] = 988
+                return os.stat_result(values)
+            return result
+
+        with (
+            mock.patch.object(Path, "lstat", production_parent_metadata),
+            mock.patch.object(Path, "stat", production_store_metadata),
+            mock.patch("scripts.model_artifacts.os.geteuid", return_value=0),
+            mock.patch("scripts.model_artifacts.os.getegid", return_value=988),
+        ):
+            results = provision_models(
+                self.release(model),
+                store,
+                self.root,
+                self.write_download(contents),
+                directory_mode=0o2750,
+                file_mode=0o640,
+                expected_owner_uid=0,
+                expected_group_gid=988,
+            )
+            self.assertEqual(results[0].status, "installed")
+            self.assertEqual(store.stat().st_uid, 0)
+            self.assertEqual(store.stat().st_gid, 988)
+            self.assertEqual(model_directory(store, model).stat().st_gid, 988)
+
+        self.assertEqual(results[0].status, "installed")
+        self.assertEqual(store.stat().st_mode & 0o7777, 0o2710)
+        directory = model_directory(store, model)
+        self.assertEqual(directory.stat().st_mode & 0o7777, 0o2750)
+        self.assertEqual((directory / "manifest.yaml").stat().st_mode & 0o777, 0o640)
+        self.assertEqual(
+            (directory / "artifact/weights.bin").stat().st_mode & 0o777, 0o640
+        )
+        self.assertEqual(directory.stat().st_gid, os.getegid())
+
     def test_missing_cache_is_reported_without_network_activity(self):
         model, _ = self.create_model()
         with self.assertRaisesRegex(ModelProvisionError, "not cached"):
@@ -186,14 +247,24 @@ class ModelArtifactProvisioning(unittest.TestCase):
         self.assertEqual(target.read_bytes(), corrupted_before)
 
     def test_download_checksum_mismatch_leaves_no_activated_directory(self):
-        model, _ = self.create_model(contents=b"good")
-        with self.assertRaises(ModelProvisionError):
+        model, expected_contents = self.create_model(contents=b"good")
+        actual_contents = b"evil"
+        with self.assertRaisesRegex(
+            ModelProvisionError,
+            "failed local verification: artifact file digest mismatch for "
+            "weights.bin: expected SHA-256 "
+            + digest(expected_contents)
+            + ", got "
+            + digest(actual_contents),
+        ) as raised:
             provision_models(
                 self.release(model),
                 self.store,
                 self.root,
-                self.write_download(b"evil"),
+                self.write_download(actual_contents),
             )
+        self.assertIsNotNone(raised.exception.__cause__)
+        self.assertIsNotNone(raised.exception.__cause__.__cause__)
         self.assertFalse(model_directory(self.store, model).exists())
         self.assertEqual(list(self.store.glob(".staging-*")), [])
 

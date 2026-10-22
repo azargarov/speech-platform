@@ -1,6 +1,18 @@
 # M03 — self-hosted Text-to-Speech
 
-Status: **PLANNING FOR OPERATOR REVIEW; NOT IMPLEMENTATION AUTHORIZED.**
+Status: **M03A PASS. M03B PASS and COMPLETE (2026-10-22) for the agreed implementation, live technical validation, and operator acceptance of the tested quality-mode baseline. Fast mode, production licensing, sustained concurrent load, and significant cold-model loading latency retain the limitations recorded below and in the result.**
+
+## Current operator direction — 2026-10-21
+
+Private technical evaluation and candidate selection are independent from
+production acceptance. The operator reports good VoxCPM2 results for English,
+Russian, Swedish and mixed-language input, and selects VoxCPM2 for initial M03B
+integration only. MOSS-TTS-Nano pure English is acceptable, while its Russian,
+Swedish and mixed-language speech is unsatisfactory; MOSS is not selected for
+initial integration. These are operator listening observations, not
+independently reproduced measurements or production approval. See
+[verification.md](verification.md) for measured performance, limitations,
+licensing observations and evidence provenance.
 
 ## Goal and product boundary
 
@@ -17,18 +29,53 @@ M03 is separated into two gated phases:
    generation per prompt. Only candidates that pass the quality/pronunciation
    screen proceed to the detailed benchmark, which uses the comprehensive
    criteria below. Publish reproducible evidence and obtain operator review of
-   one production model/voice set before M03B.
+   one integration candidate before M03B; production acceptance remains a
+   separate M03B/operator decision.
 2. **M03B — service implementation.** Implement the selected provider behind
    the existing public and private API contracts, and integrate it with the
    existing Gateway, TTS Compose service and persistent model store.
 
 The operator decisions listed here accept the M03A/M03B separation, candidate
 set, mandatory languages, quality-first evaluation order, independent asset
-license review, and isolation/preservation boundaries. This plan does not
-authorize downloads, benchmark execution, implementation, deployment or
-changes to running services. M03A execution remains pending approval of the
-concrete screening procedure and resource proposal. M03B is not authorized by
-M03A planning or execution.
+license review, and isolation/preservation boundaries. M03A screening is
+authorized under the approved procedure and the operator's revised GPU
+preflight below. M03A does not authorize M03B, deployment or changes to running
+services.
+
+### M03A focused follow-up — performance and automatic language behavior
+
+This operator-authorized follow-up reuses only the pinned VoxCPM2 and
+MOSS-TTS-Nano source, dependencies, and staged weights already recorded for
+M03A. It does not change production code, contracts, deployment, or running
+services. Private attempt outputs stay under `private/m03a/` and are excluded
+from Git.
+
+- **VoxCPM2 performance:** compare the existing `optimize=False` baseline with
+  the pinned wrapper's documented `optimize=True` (`torch.compile`) option.
+  Keep the same neutral voice description, fixed text, seed, BF16 checkpoint
+  precision, generation parameters, and device. Record cold model load,
+  compile/warm-up time, excluded warm-up, measured warm generations, RTF, audio
+  duration/format, peak GPU allocation/use, process peak RSS and cgroup peak.
+  Do not alter generation limits or audio speed/pitch. Keep at most these two
+  configurations.
+- **Language behavior:** inspect pinned interfaces, then send normal, short
+  ambiguous, and foreign-name/borrowed-word text for English, Russian, and
+  Swedish to each model without a language field or language-revealing
+  instruction. Use MOSS text-only `continuation`. Add only a small number of
+  mixed-language diagnostic inputs. Record native detected codes only if an
+  API actually returns them; human listening remains pending and no automatic
+  quality score is allowed.
+- **Isolation and stop conditions:** use a disposable network-disabled
+  container, existing artifact mounts, private temporary output, and the
+  existing GPU monitor. Abort only the candidate on STT activity, canonical
+  service health/restart change, unexpected GPU process, monitoring failure,
+  or less than 1 GiB free VRAM. Never stop/reconfigure a canonical service.
+
+Acceptance for this follow-up is reproducible observed measurements and samples
+plus a per-input language evidence table. Faster performance is not an
+improvement claim until the operator listens for pronunciation, words, and
+naturalness. The later operator decision selected VoxCPM2 for initial M03B
+integration; this is not production acceptance.
 
 ## Current state and affected boundaries
 
@@ -95,10 +142,11 @@ The Quadro RTX 5000 has 16 GB VRAM and is shared with the existing STT CUDA
 worker and other host GPU workloads. A memory probe is only an observation,
 not a reservation. Initial GPU and CPU experiments use an isolated,
 attempt-specific environment and must not attach to, restart, stop, or reconfigure
-the running STT deployment. GPU use is serialized in a separately approved idle
-window with fresh process/device preflight and a stop-on-contention rule. No
-concurrent STT/TTS inference is proposed. Do not change the canonical deployment
-during M03A. M03B remains a separate future authorization.
+the running STT deployment. M03A GPU evaluation used a fresh process/device
+preflight and stop-on-contention rule. M03B now includes the operator-requested
+bounded STT/TTS coexistence test; that test does not establish general capacity
+or throughput. Do not change the canonical deployment during M03A; the current
+M03B task separately authorizes implementation and its scoped live validation.
 
 ## Candidate comparison (research snapshot: 2026-10-21)
 
@@ -139,6 +187,26 @@ review that exact code revision or reject that path. The benchmark runtime must
 be offline after explicitly authorized provisioning, with no secrets or
 untrusted writable paths mounted.
 
+### Independent candidate gates (operator decision, 2026-10-21)
+
+Each candidate has independent **licensing**, **provisioning**, and
+**execution** gates. Record each gate separately in the attempt evidence as
+`APPROVED`, `BLOCKED`, or `FAILED`, with evidence and timestamp. A candidate
+with an unresolved gate is `BLOCKED`, not rejected; candidates whose gates are
+approved may proceed without waiting for blocked candidates. Do not propagate
+one candidate's block to another candidate.
+
+The license review covers source code, direct and transitive runtime
+dependencies, model weights, voice checkpoints, reference audio, and any
+applicable training-dataset or redistribution terms. Identify exact upstream
+revisions and link the upstream license, notice, model card, dataset terms, or
+maintainer statement supporting each conclusion. Record absent, ambiguous,
+and conflicting evidence as such. Neither repository-level metadata nor a
+model-card label overrides an individual checkpoint, dataset, dependency, or
+asset term. Uncertain or conflicting terms are not permission. Do not
+provision or execute a candidate until its own gates clear. A candidate-specific
+legal or safety blocker does not stop other independently approved candidates.
+
 ## M03A — benchmark proposal
 
 ### Scope and reproducibility
@@ -166,7 +234,11 @@ untrusted writable paths mounted.
    the product contract.
 5. Review the randomized candidate outputs for intelligibility, correct
    language, pronunciation, omissions and basic naturalness before recording
-   any performance data. Screening pass/fail is recorded for each language;
+   screening judgments and descriptive timing/resource observations. Record
+   model-load duration, generation wall duration, output duration, RTF where
+   measurable, CPU/RAM/GPU use, and failures. These one-shot measurements do
+   not establish latency percentiles or capacity. Screening pass/fail is
+   recorded for each language;
    any missing/incorrect language, unintelligible output, or recurring severe
    pronunciation/omission issue fails the candidate. A candidate must pass all
    three languages to advance. Keep all audio and reference recordings under
@@ -181,7 +253,8 @@ untrusted writable paths mounted.
    the isolated experiment and separately approved maintenance window after
    GPU process/device preflight confirms no STT or other protected inference.
    If that condition cannot be met, record CUDA results as NOT ESTABLISHED and
-   continue only an independently isolated CPU evaluation.
+   continue only an independently isolated CPU evaluation. CPU-only candidates
+   may proceed without waiting for a GPU candidate.
 
 ### Measures and provisional gates
 
@@ -216,12 +289,49 @@ not make a production selection by averaging away a weak language.
 
 ## M03B — implementation boundaries and acceptance proposal
 
+**Authorization:** The operator's 2026-10-21 instruction authorizes M03A
+closeout and M03B implementation using VoxCPM2 as the selected initial
+integration candidate. This supersedes earlier M03A-era statements that M03B
+was unauthorized. It does not authorize a production-readiness claim, commit,
+push, release tag, or milestone closeout. The operator separately requires
+live RTX 5000 validation and will validate M03B before completion.
+
+### M03B minimal implementation plan
+
+1. Preserve the existing Go Gateway, Python TTS worker, canonical Compose
+   service and model-store mount convention. Add the public speech route to
+   Gateway and the private route to the existing worker.
+2. Make the public request `{text, language?, mode?}` with strict size and
+   enum validation. Default `language=auto`, `mode=quality`; return complete
+   WAV PCM16. Explicit language values are instruction hints, never detected
+   codes. `auto` passes multilingual text through without language metadata.
+3. Keep `quality` at the measured 10-step baseline. Keep `fast` unavailable
+   until the 8-step configuration passes operator quality acceptance. `auto`
+   selects quality unless a measured, reviewed selection rule is later added.
+4. Add a small worker-owned lazy model lifecycle: explicit warm-up; loaded state;
+   one serialized GPU inference; configurable idle unload; active inference
+   prevents unload. A disconnected client does not kill native inference.
+5. Pin runtime dependencies and immutable model identity, require a read-only
+   local artifact mount and offline runtime. Keep strict config, private worker
+   network, non-root execution, health probes, bounded shutdown and safe
+   resource-exhaustion errors. Do not change STT's service or deployment.
+6. Add focused API, mode, language hint, lifecycle, cancellation, recovery and
+   Gateway/worker tests; run the repository verification targets.
+7. Perform the requested live GPU/deployment checks only after artifacts are
+   reviewable. Record unavailable or blocked checks; stop before milestone
+   completion until operator validation and explicit closeout.
+
+Material design: reuse the existing service boundary and Compose service;
+worker owns model lifecycle, Gateway owns authentication/validation/routing.
+No new scheduler is introduced. Resource-free-memory checks are advisory and
+cannot guarantee shared-GPU coexistence. See [ADR 0020](../../adr/0020-voxcpm2-tts-integration.md).
+
 ### In scope
 
-- Contract-first verification/update of the reserved public and internal TTS
-  OpenAPI contracts; preserve current required `text`/`voice`, language,
-  format and non-streaming fields unless the operator approves a compatible
-  additive change. Reuse existing Gateway auth and common error policy.
+- Contract-first update of the reserved public and internal TTS OpenAPI
+  contracts. Accept `text`, optional language/mode and the optional default
+  compatibility voice; return complete WAV PCM16. Reuse Gateway auth and
+  common errors.
 - Gateway handlers for `POST /v1/tts/speech` and `GET /v1/tts/voices`, with
   bounded JSON/text, deadlines, disconnect propagation, worker readiness and
   response format handling. No provider identifiers or parameters leak into
@@ -248,9 +358,9 @@ not make a production selection by averaging away a weak language.
   arbitrary voice cloning, multi-model serving, dynamic batching frameworks,
   orchestration, public model download endpoints, streaming, multi-host
   scheduling and automatic GPU arbitration.
-- Simultaneous TTS/STT GPU inference until separately measured and explicitly
-  approved. M03 must not modify the protected STT deployment or other GPU
-  services.
+- General GPU scheduling, capacity guarantees and performance claims. M03B
+  includes only the bounded, operator-requested TTS/STT coexistence test; do
+  not modify STT configuration or unrelated GPU services.
 
 ### Proposed M03B acceptance criteria
 
@@ -295,24 +405,29 @@ not make a production selection by averaging away a weak language.
   operator-approved idle-window check.
 - Accepted exclusion: M03B is not implemented and canonical deployment is not
   modified during M03A.
-- Pending before M03A execution: operator approval of the exact procedure,
-  artifact storage allocation and hardware/resource proposal in the approval
-  brief appended to this plan. Prompt text, voice/reference rights, and exact
-  pinned revisions/hashes must then be frozen before provisioning.
+- Approved for M03A execution: the screening procedure, private artifact
+  storage, and hardware/resource proposal in this brief, as revised by the
+  operator clarification. Prompt text and exact pinned revisions/hashes are
+  frozen in the private attempt record before provisioning. Each candidate has
+  independent licensing, provisioning and execution gates. Mark unresolved
+  candidates BLOCKED, not rejected; proceed with any other candidate whose
+  gates are approved. Unclear terms block that candidate only.
 
 ## M03A screening approval brief
 
-This is the proposed execution procedure and resource request for operator
-approval. No artifact has been downloaded and no benchmark has been run.
+This is the approved M03A procedure, incorporating the operator's GPU
+preflight clarification of 2026-10-21.
 
 ### Screening procedure
 
 1. Approve three prompts per language (nine total), with approved text and
    normalization notes covering a short phrase, ordinary punctuated text with
    a number/name, and a longer sentence. Freeze text before generation.
-2. Independently review candidate repository/code, model-weight, and exact
-   voice/dataset licenses. Record revisions, source links, license evidence
-   and SHA-256 values. Do not provision an asset whose terms remain unclear.
+2. Independently review candidate source code, dependencies, model weights,
+   voice checkpoints, reference audio, and applicable dataset/redistribution
+   terms. Record exact revisions, upstream evidence links, notices, and
+   SHA-256 values. Uncertain or conflicting terms are not permission. Do not
+   provision an asset whose terms remain unclear.
 3. Stage only approved artifacts and the isolated candidate runtime under
    `private/m03a/<attempt-id>/models/{voxcpm2,moss-tts-nano,piper}/`. Keep the
    frozen prompt manifest under `private/m03a/<attempt-id>/inputs/`, generated
@@ -321,14 +436,21 @@ approval. No artifact has been downloaded and no benchmark has been run.
    model store or runtime container.
 4. Record host/OS, CPU/RAM, GPU UUID and processes, driver/runtime, candidate
    revisions and checksums, isolated environment identity, and free storage.
-   For GPU use, require a separate approved idle window and fresh confirmation
-   that no STT or other protected process is using the GPU. Stop on contention.
+   For GPU use, GPU-idle means no active STT inference; a resident STT model
+   and its allocated memory are permitted. At preflight require at least 8
+   GiB free VRAM before loading VoxCPM2. Record STT process state, GPU
+   utilization and memory, and canonical service health. During GPU testing,
+   monitor STT activity, GPU utilization, free memory and service health. Run
+   generations sequentially and stop if STT inference begins, resource
+   contention appears, or service health deteriorates. Never kill, restart,
+   unload or modify canonical STT to free resources.
 5. For each candidate, set and record one voice configuration per language;
    use only approved fixed reference audio when required by the model. Make
    exactly one generation for each of the nine prompts, sequentially. Screening
-   produces nine candidate outputs (27 total across three candidates), without
-   warm-up, reruns or performance tuning. Record generation failures without
-   silently retrying.
+   produces up to nine outputs per approved candidate, without warm-up, reruns
+   or performance tuning. Record model-load time, generation duration, audio
+   duration, RTF where measurable, resource consumption and failures. Never
+   silently retry a failure.
 6. Randomize/blind candidate identity for listening. A qualified listener for
    each language records pass/fail for intelligibility, language correctness,
    pronunciation, omissions and basic naturalness. Keep per-language results.
@@ -340,9 +462,9 @@ approval. No artifact has been downloaded and no benchmark has been run.
 
 ### Artifact sizes and storage request
 
-Sizes below are current repository-reported downloads, not downloaded or
-locally verified sizes. Piper voice licenses and hashes must be rechecked at
-the pinned revisions before acquisition.
+Sizes below are historical repository-reported estimates, not downloaded or
+locally verified sizes. Each candidate's exact revisions, terms and hashes
+must be rechecked before acquisition.
 
 | Candidate | Screening weights / voice files | Approximate total |
 | --- | --- | ---: |
@@ -366,11 +488,14 @@ exact revision and voice terms remain to be approved independently.
   preferred headroom if dependencies and generated artifacts share the host.
   MOSS vendor documentation describes CPU inference on four cores, but does
   not establish this host's performance.
-- VoxCPM2 GPU screening: the vendor reports about 8 GB VRAM. The host's Quadro
-  RTX 5000 has 16 GB VRAM, but the experiment receives exclusive, serialized
-  use only in an approved idle window. Require at least 8 GiB free device
-  memory at preflight, then stop if any protected GPU process appears. VRAM
-  availability is a gate, not a reservation or guarantee.
+- VoxCPM2 GPU screening: the vendor reports about 8 GB VRAM; this estimate is
+  unverified. The host's Quadro RTX 5000 has 16 GB VRAM. A resident canonical
+  STT model is allowed, but no active STT inference is allowed during TTS GPU
+  generations. Require at least 8 GiB free device memory before loading
+  VoxCPM2. Monitor STT activity, GPU utilization/free memory, and canonical
+  service health throughout; stop on inference, contention, or health
+  degradation. Do not kill, unload, restart or modify STT. Free VRAM is a
+  point-in-time admission check, not a reservation or guarantee.
 - Host context in the architecture record is 64 GB RAM and a 16 GB Quadro RTX
   5000. Reconfirm current hardware and GPU/process state immediately before
   any authorized run. No hardware request authorizes changing or stopping the
@@ -400,3 +525,24 @@ exact revision and voice terms remain to be approved independently.
 Product roadmap status is tracked in [PLANS.md](../../../PLANS.md). Existing
 architecture rules are in [principles](../../architecture/principles.md) and
 [overview](../../architecture/overview.md).
+
+## M03A Round 2 approved execution addendum — 2026-10-21
+
+The operator authorized a focused private listening comparison using only the
+already approved pinned VoxCPM2 and MOSS-TTS-Nano environments. The original
+Round 1 blind IDs and provided ratings are retained; `69378afb` remains
+unrated. Round 2 uses the operator's exact one-per-language English, Russian,
+and Swedish texts, one recording per language/model/supported configuration,
+and no model parameter changes except VoxCPM2's natural-language voice/style
+description. MOSS-TTS-Nano uses only its reference-free text continuation
+configuration. No external recordings, voice cloning, checkpoints, retries,
+production selection, or M03B work are included.
+
+Acceptance for this bounded execution is: (1) summarize supplied Round 1
+ratings by language/model without inferring the missing rating; (2) document
+native versus prompt-based controls from the pinned code; (3) produce samples
+and per-sample metadata under the six required language/model categories plus
+a flat blind manifest; (4) record measurements, errors/warnings and host
+safety evidence; and (5) leave Round 2 quality judgments and M03 closeout
+pending operator listening review. Detailed results are in the private
+`private/m03a/M03A-20261021-02/results/run-report.md`.

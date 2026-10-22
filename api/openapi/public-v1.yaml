@@ -2,13 +2,7 @@ openapi: 3.0.3
 info:
   title: Speech Platform public API
   version: 1.0.0
-  description: STT transcription route is implemented. Optional bearer authentication is enforced when configured; non-loopback host exposure requires a secret token. Default total request limit 25 MiB;
-    TTS text ceiling 10000 characters. Deployment limits and deadlines are configured
-    and may be stricter; clients handle 413 and 504. Default deadline 180 seconds;
-    upload read deadline 30 seconds. Client disconnect cancels the Gateway context and
-    requests downstream cancellation; resource cleanup may finish asynchronously, and
-    no result is returned to a disconnected client. Deadline exhaustion returns 504
-    where the connection remains writable.
+  description: STT transcription and complete WAV TTS routes are implemented. Optional bearer authentication is enforced when configured; non-loopback host exposure requires a secret token. STT request limit is 25 MiB; TTS JSON request limit is 64 KiB and text ceiling 10000 characters. Default STT deadline is 180 seconds and TTS deadline is 600 seconds; upload read deadline is 30 seconds. Client disconnect cancels the Gateway request and stops response delivery; active native TTS inference may finish asynchronously, and no result is returned to a disconnected client. Deadline exhaustion returns 504 where the connection remains writable.
     Streaming is reserved, not implemented; capability flags remain false until supported.
     Timestamps are optional; unsupported requests return 400. Errors never contain
     audio or transcript payloads.
@@ -114,7 +108,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '422': &id007
-          description: Audio cannot be decoded or language cannot be detected
+          description: Input cannot be processed or a requested mode is unavailable
           content:
             application/json:
               schema:
@@ -146,7 +140,7 @@ paths:
   /v1/tts/speech:
     post:
       operationId: synthesize
-      x-maxRequestSizeBytes: 26214400
+      x-maxRequestSizeBytes: 65536
       requestBody:
         required: true
         content:
@@ -156,7 +150,6 @@ paths:
               additionalProperties: false
               required:
               - text
-              - voice
               properties:
                 text:
                   type: string
@@ -164,42 +157,24 @@ paths:
                   maxLength: 10000
                 voice:
                   type: string
-                  minLength: 1
-                  maxLength: 128
+                  enum: [default]
+                  default: default
+                  description: Compatibility field; only the configured default voice is available.
                 language:
                   type: string
                   default: auto
-                  minLength: 1
-                  maxLength: 64
-                  description: BCP-47 tag or auto. Auto uses provider text detection
-                    when supported; otherwise returns 400.
-                format:
+                  enum: [auto, en, ru, sv]
+                  description: auto sends text without language metadata. Explicit codes are model instruction hints and do not report a detected language.
+                mode:
                   type: string
-                  enum:
-                  - wav
-                  - mp3
-                  - opus
-                  default: wav
-                stream:
-                  type: boolean
-                  enum:
-                  - false
-                  default: false
+                  enum: [quality, fast, auto]
+                  default: auto
+                  description: quality uses the validated 10-step baseline; auto currently selects quality. fast is unavailable pending quality acceptance.
       responses:
         '200':
-          description: Complete audio; Content-Type matches requested format. Unsupported
-            formats return 400. WAV is PCM16; Opus uses Ogg container. Sample rate
-            is provider-selected and encoded in the audio header.
+          description: Complete WAV PCM16 audio. Sample rate is encoded in the WAV header.
           content:
             audio/wav:
-              schema:
-                type: string
-                format: binary
-            audio/mpeg:
-              schema:
-                type: string
-                format: binary
-            audio/ogg:
               schema:
                 type: string
                 format: binary

@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 DIGEST = "86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6"
+TTS_DIGEST = "04d6e05b69b22568030ac21f494e406ffdf2d06efeeab43cfdb4c21ba8c9bd41"
 COMPOSE = [
     "docker",
     "compose",
@@ -34,16 +35,22 @@ ALLOWED_ENV = {
     "SPEECH_API_TOKEN",
     "MODEL_STORE",
     "MODEL_MANIFEST_SHA256",
+    "TTS_MODEL_MANIFEST_SHA256",
+    "TTS_MODEL_STORE",
+    "TTS_MODEL_READ_GID",
     "MODEL_READ_GID",
     "STT_GPU_DEVICE",
+    "TTS_GPU_DEVICE",
     "STT_GPU_MEMORY_LIMIT",
     "STT_CPU_LIMIT",
     "STT_PIDS_LIMIT",
     "STT_STOP_GRACE_PERIOD",
     "GATEWAY_MEMORY_LIMIT",
     "GATEWAY_CPU_LIMIT",
-    "TTS_MEMORY_LIMIT",
+    "TTS_GPU_MEMORY_LIMIT",
     "TTS_CPU_LIMIT",
+    "TTS_PIDS_LIMIT",
+    "TTS_STOP_GRACE_PERIOD",
     "SPEECH_API_URL",
 }
 
@@ -223,9 +230,11 @@ def checks(
     required = {
         "MODEL_STORE",
         "MODEL_MANIFEST_SHA256",
+        "TTS_MODEL_MANIFEST_SHA256",
         "SPEECH_BIND_IP",
         "SPEECH_PORT",
         "STT_GPU_DEVICE",
+        "TTS_GPU_DEVICE",
     }
     missing = required - values.keys()
     if missing:
@@ -234,18 +243,30 @@ def checks(
         )
     if values["MODEL_MANIFEST_SHA256"] != DIGEST:
         raise OperatorError("MODEL_MANIFEST_SHA256 must match the pinned v0.1.2 model")
+    if values["TTS_MODEL_MANIFEST_SHA256"] != TTS_DIGEST:
+        raise OperatorError(
+            "TTS_MODEL_MANIFEST_SHA256 must match the pinned VoxCPM2 artifact"
+        )
     if not Path(values["MODEL_STORE"]).is_absolute():
         raise OperatorError("MODEL_STORE must be an absolute host path")
+    if (
+        values.get("TTS_MODEL_STORE")
+        and not Path(values["TTS_MODEL_STORE"]).is_absolute()
+    ):
+        raise OperatorError("TTS_MODEL_STORE must be an absolute host path")
     try:
         port = int(values["SPEECH_PORT"])
         gpu = int(values["STT_GPU_DEVICE"])
+        tts_gpu = int(values["TTS_GPU_DEVICE"])
         ip = str(ipaddress.IPv4Address(values["SPEECH_BIND_IP"]))
     except ValueError as exc:
         raise OperatorError(
-            "SPEECH_PORT, STT_GPU_DEVICE or SPEECH_BIND_IP is invalid"
+            "SPEECH_PORT, STT_GPU_DEVICE, TTS_GPU_DEVICE or SPEECH_BIND_IP is invalid"
         ) from exc
-    if not 1 <= port <= 65535 or gpu < 0:
-        raise OperatorError("SPEECH_PORT or STT_GPU_DEVICE is outside its valid range")
+    if not 1 <= port <= 65535 or gpu < 0 or tts_gpu < 0:
+        raise OperatorError(
+            "SPEECH_PORT or a GPU device index is outside its valid range"
+        )
     if not socket.inet_aton(ip):
         raise OperatorError("SPEECH_BIND_IP must resolve to an IPv4 address")
     if not ipaddress.ip_address(ip).is_loopback:
@@ -263,6 +284,16 @@ def checks(
         or not 1 <= int(values.get("MODEL_READ_GID", "988")) <= 2147483647
     ):
         raise OperatorError("MODEL_READ_GID must be in 1..2147483647")
+    if (
+        values.get(
+            "TTS_MODEL_READ_GID", values.get("MODEL_READ_GID", "988")
+        ).isdecimal()
+        is False
+        or not 1
+        <= int(values.get("TTS_MODEL_READ_GID", values.get("MODEL_READ_GID", "988")))
+        <= 2147483647
+    ):
+        raise OperatorError("TTS_MODEL_READ_GID must be in 1..2147483647")
     if "SPEECH_API_URL" in values:
         parsed_api = urlparse(values["SPEECH_API_URL"])
         if (
@@ -304,17 +335,22 @@ def checks(
             capture=True,
         )
         rows = [line.strip() for line in gpu_query.stdout.splitlines() if line.strip()]
-        if gpu >= len(rows):
+        if gpu >= len(rows) or tts_gpu >= len(rows):
             raise OperatorError(
-                f"STT_GPU_DEVICE={gpu} is unavailable; detected {len(rows)} GPU(s)"
+                f"configured STT/TTS GPU device is unavailable; detected {len(rows)} GPU(s)"
             )
         try:
             free_mib = int(rows[gpu].split(",")[2].strip().split()[0])
+            tts_free_mib = int(rows[tts_gpu].split(",")[2].strip().split()[0])
         except (IndexError, ValueError) as exc:
             raise OperatorError("could not parse selected GPU free memory") from exc
         if free_mib < 6144:
             raise OperatorError(
                 f"selected GPU has {free_mib} MiB free; at least 6144 MiB is required by the STT model profile"
+            )
+        if tts_free_mib < 8192:
+            raise OperatorError(
+                f"selected TTS GPU has {tts_free_mib} MiB free; at least 8192 MiB is required at model load"
             )
         runtime = run(
             ["docker", "info", "--format", "{{json .Runtimes}}"], capture=True
@@ -329,16 +365,16 @@ def checks(
             ],
             capture=True,
         )
-        selected_uuid = rows[gpu].split(",")[1].strip()
-        active_gpu_processes = sum(
-            line.split(",")[0].strip() == selected_uuid
+        selected_uuids = {rows[index].split(",")[1].strip() for index in {gpu, tts_gpu}}
+        active_gpu_processes = {
+            line.split(",")[0].strip()
             for line in processes.stdout.splitlines()
-            if "," in line
-        )
-        allowed_processes = 1 if owns_project else 0
-        if require_idle_gpu and active_gpu_processes > allowed_processes:
+            if "," in line and line.split(",")[0].strip() in selected_uuids
+        }
+        allowed_processes = 1 if owns_project and gpu == tts_gpu else 0
+        if require_idle_gpu and len(active_gpu_processes) > allowed_processes:
             raise OperatorError(
-                f"safe installation requires an idle selected GPU (or only the existing canonical STT worker); found {active_gpu_processes} active compute process(es). Existing workloads were left untouched."
+                f"safe installation requires selected GPU(s) idle (or only the existing canonical STT worker); found {len(active_gpu_processes)} active compute process(es). Existing workloads were left untouched."
             )
 
     revision = run(["git", "rev-parse", "HEAD"], capture=True).stdout.strip()
@@ -421,6 +457,35 @@ def checks(
             message = (check.stderr or check.stdout).strip()
             raise OperatorError(
                 "persistent model verification failed; preserve the current artifact and correct MODEL_STORE permissions/configuration. "
+                + message
+            )
+        tts_model_command = [
+            sys.executable,
+            "-m",
+            "scripts.tts_model",
+            "check",
+            "--store",
+            values.get("TTS_MODEL_STORE") or values["MODEL_STORE"],
+        ]
+        tts_check = run(tts_model_command, check=False, capture=True)
+        if (
+            tts_check.returncode
+            and "Permission denied" in (tts_check.stderr or "")
+            and shutil.which("sudo")
+        ):
+            privileged = run(
+                ["sudo", "-n", *tts_model_command], check=False, capture=True
+            )
+            if privileged.returncode == 0:
+                tts_check = privileged
+            else:
+                raise OperatorError(
+                    "TTS model store is root-owned; run `sudo -v` to authorize the read-only integrity check"
+                )
+        if tts_check.returncode:
+            message = (tts_check.stderr or tts_check.stdout).strip()
+            raise OperatorError(
+                "pinned VoxCPM2 artifact is not available or failed verification; run `make tts-model-fetch` after reviewing the artifact terms. "
                 + message
             )
         if DIGEST not in check.stdout:

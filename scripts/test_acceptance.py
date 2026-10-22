@@ -11,6 +11,7 @@ from http.server import ThreadingHTTPServer
 import yaml
 from openapi_spec_validator import validate
 from services.worker.server import handler, load_config
+from services.tts.config import load_config as load_tts_config
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,7 +24,7 @@ class Acceptance(unittest.TestCase):
                 self.assertIn(f"*.{suffix}", text)
 
     def test_worker_config(self):
-        for kind in ("stt", "tts"):
+        for kind in ("stt",):
             path = ROOT / f"configs/{kind}.yaml"
             valid = yaml.safe_load(path.read_text())
             self.assertEqual(load_config(path, kind), valid)
@@ -70,9 +71,10 @@ class Acceptance(unittest.TestCase):
                 )
                 with self.assertRaises(ValueError):
                     load_config(bad, kind)
+        self.assertEqual(load_tts_config(ROOT / "configs/tts.yaml")["kind"], "tts")
 
     def test_worker_http(self):
-        for kind in ("stt", "tts"):
+        for kind in ("stt",):
             config = load_config(ROOT / f"configs/{kind}.yaml", kind)
             server = ThreadingHTTPServer(("127.0.0.1", 0), handler(config))
             thread = threading.Thread(target=server.serve_forever)
@@ -119,6 +121,7 @@ class Acceptance(unittest.TestCase):
                 set(operation["responses"]), {"200", "401", "403", "500", "503"}
             )
         tts = public["paths"]["/v1/tts/speech"]["post"]
+        self.assertEqual(tts["x-maxRequestSizeBytes"], 65536)
         self.assertEqual(
             tts["requestBody"]["content"]["application/json"]["schema"]["properties"][
                 "text"
@@ -128,7 +131,8 @@ class Acceptance(unittest.TestCase):
         for name in ("internal-stt-v1.yaml", "internal-tts-v1.yaml"):
             internal = yaml.safe_load((ROOT / "api/openapi" / name).read_text())
             operation = next(iter(internal["paths"].values()))["post"]
-            self.assertEqual(operation["x-maxRequestSizeBytes"], 26214400)
+            expected_limit = 65536 if name == "internal-tts-v1.yaml" else 26214400
+            self.assertEqual(operation["x-maxRequestSizeBytes"], expected_limit)
             self.assertNotIn("401", operation["responses"])
             self.assertNotIn("403", operation["responses"])
             not_ready = internal["paths"]["/readyz"]["get"]["responses"]["503"]

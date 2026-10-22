@@ -36,7 +36,9 @@ func run() error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	duration := func(s string) time.Duration { d, _ := time.ParseDuration(s); return d }
 	stt := gateway.NewSTTProxy(c.STTURL, c.APIToken, duration(c.STTTimeout))
-	srv := &http.Server{Addr: net.JoinHostPort(c.ListenHost, fmt.Sprint(c.ListenPort)), Handler: gateway.HandlerWithSTT(stt, c.MaxRequestBytes, stt), ReadTimeout: duration(c.ReadTimeout), ReadHeaderTimeout: duration(c.ReadTimeout), WriteTimeout: duration(c.WriteTimeout), IdleTimeout: duration(c.IdleTimeout), MaxHeaderBytes: c.MaxHeaderBytes}
+	tts := gateway.NewTTSProxy(c.TTSURL, c.APIToken, duration(c.TTSTimeout))
+	ready := gateway.NewWorkersReadiness(stt, tts)
+	srv := &http.Server{Addr: net.JoinHostPort(c.ListenHost, fmt.Sprint(c.ListenPort)), Handler: gateway.HandlerWithWorkers(ready, c.MaxRequestBytes, stt, tts), ReadTimeout: duration(c.ReadTimeout), ReadHeaderTimeout: duration(c.ReadTimeout), WriteTimeout: duration(c.WriteTimeout), IdleTimeout: duration(c.IdleTimeout), MaxHeaderBytes: c.MaxHeaderBytes}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	errs := make(chan error, 1)

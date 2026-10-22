@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import tempfile
 import urllib.error
 import urllib.parse
@@ -77,6 +78,37 @@ def _store_root(path: str | Path, *, create: bool) -> Path:
     return root
 
 
+def _validate_staging_parent(path: Path, expected_owner_uid: int) -> None:
+    """Reject symlink or untrusted-writable components above a staged store."""
+    absolute = Path(os.path.abspath(path))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current = current / part
+        try:
+            info = current.lstat()
+        except OSError as error:
+            raise ModelProvisionError(
+                "model staging store parent must already exist"
+            ) from error
+        mode = info.st_mode
+        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+            raise ModelProvisionError(
+                "model staging store parent path must contain real directories"
+            )
+        if info.st_uid not in {0, expected_owner_uid}:
+            raise ModelProvisionError(
+                "model staging store parent has an untrusted owner"
+            )
+        writable_by_group_or_other = mode & 0o022
+        safe_sticky_directory = (
+            info.st_uid == 0 and mode & 0o1000 and writable_by_group_or_other
+        )
+        if writable_by_group_or_other and not safe_sticky_directory:
+            raise ModelProvisionError(
+                "model staging store parent is writable by an untrusted user"
+            )
+
+
 def model_directory(store_root: str | Path, model: dict) -> Path:
     return Path(store_root) / model["manifest_sha256"]
 
@@ -89,8 +121,14 @@ def _verify_directory(model: dict, directory: Path) -> None:
             ArtifactRoot(directory / "artifact", directory / "manifest.yaml"),
         )
     except Exception as error:
+        # verify_artifact deliberately exposes a generic SpeechFailure, while
+        # its ValueError cause contains only a safe validation category (for
+        # example, "artifact file digest mismatch"). Keep that detail visible
+        # to the operator without exposing arbitrary I/O exception text.
+        detail = error.__cause__
+        reason = f": {detail}" if isinstance(detail, ValueError) else ""
         raise ModelProvisionError(
-            f"model artifact {model['id']} failed local verification"
+            f"model artifact {model['id']} failed local verification{reason}"
         ) from error
 
 
@@ -148,15 +186,8 @@ def provision_models(
         )
     root_path = Path(store_root)
     root_preexisting = root_path.exists()
-    if expected_group_gid is not None and not root_path.parent.is_dir():
-        raise ModelProvisionError("model staging store parent must already exist")
-    if (
-        expected_group_gid is not None
-        and root_path.parent.stat().st_gid != expected_group_gid
-    ):
-        raise ModelProvisionError(
-            "model staging store parent must use the configured reader group"
-        )
+    if expected_group_gid is not None:
+        _validate_staging_parent(root_path.parent, expected_owner_uid)
     root = _store_root(root_path, create=True)
     if not root_preexisting and (
         expected_owner_uid is not None or expected_group_gid is not None
@@ -177,7 +208,7 @@ def provision_models(
             )
             or (expected_group_gid is not None and root_mode & 0o007)
             or (expected_group_gid is not None and root_mode & 0o020)
-            or (expected_group_gid is not None and (root_mode & 0o2750) != 0o2750)
+            or (expected_group_gid is not None and root_mode not in {0o2710, 0o2750})
         ):
             raise ModelProvisionError(
                 "model staging store ownership does not match the deployment profile"

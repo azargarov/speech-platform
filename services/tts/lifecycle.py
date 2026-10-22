@@ -1,0 +1,271 @@
+"""Serialized lazy model lifecycle; native inference is never cancelled mid-call."""
+
+from __future__ import annotations
+
+import gc
+import hashlib
+import json
+import threading
+import time
+from pathlib import Path
+from typing import Callable
+
+
+class TTSFailure(Exception):
+    def __init__(self, code: str, message: str, status: int = 503):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status = status
+
+
+class ModelLifecycle:
+    def __init__(self, config: dict, model_factory: Callable[[], object]):
+        self.config = config
+        self.model_factory = model_factory
+        self._condition = threading.Condition()
+        self._model = None
+        self._state = "unloaded"
+        self._active = False
+        self._stopping = False
+        self._last_used = time.monotonic()
+        self._load_error = False
+        self._unloader = threading.Thread(
+            target=self._idle_loop, name="tts-idle-unloader", daemon=True
+        )
+        self._unloader.start()
+
+    def state(self) -> dict:
+        with self._condition:
+            return {"model_state": self._state, "inference_active": self._active}
+
+    def ready(self) -> bool:
+        with self._condition:
+            return not self._stopping
+
+    def warmup(self) -> None:
+        self._with_model(lambda model: None)
+
+    def synthesize(self, text: str, language: str, mode: str) -> tuple[bytes, str]:
+        if mode not in {"quality", "fast", "auto"}:
+            raise TTSFailure("invalid_mode", "mode must be quality, fast, or auto", 400)
+        if mode == "fast" and not self.config["fast_mode_enabled"]:
+            raise TTSFailure(
+                "mode_unavailable", "fast mode has not passed quality acceptance", 422
+            )
+        steps = mode_timesteps(mode)
+        return self._with_model(
+            lambda model: self._generate(model, text, language, steps)
+        )
+
+    def _generate(
+        self, model, text: str, language: str, steps: int
+    ) -> tuple[bytes, str]:
+        hints = {
+            "en": "Speak in English with clear, neutral pronunciation.",
+            "ru": "Speak in Russian with clear, neutral pronunciation.",
+            "sv": "Speak in Swedish with clear, neutral pronunciation.",
+        }
+        prompt = language_instruction(text, language, hints)
+        try:
+            import io
+            import soundfile as sf
+
+            import torch
+
+            with torch.inference_mode():
+                audio = model.generate(
+                    text=prompt,
+                    retry_badcase=False,
+                    normalize=False,
+                    inference_timesteps=steps,
+                )
+            output = io.BytesIO()
+            sf.write(
+                output,
+                audio,
+                int(model.tts_model.sample_rate),
+                format="WAV",
+                subtype="PCM_16",
+            )
+            return output.getvalue(), "audio/wav"
+        except Exception as error:
+            if _is_oom(error):
+                raise TTSFailure(
+                    "resource_exhausted",
+                    "GPU resources are temporarily unavailable",
+                    503,
+                ) from error
+            raise TTSFailure(
+                "inference_failed", "speech generation failed", 500
+            ) from error
+
+    def _with_model(self, operation):
+        with self._condition:
+            while self._active and not self._stopping:
+                self._condition.wait()
+            if self._stopping:
+                raise TTSFailure("worker_draining", "worker is shutting down", 503)
+            self._active = True
+            self._state = "loading" if self._model is None else "loaded"
+        try:
+            if self._model is None:
+                try:
+                    self._model = self.model_factory()
+                except Exception as error:
+                    with self._condition:
+                        self._state = "unloaded"
+                    if _is_oom(error):
+                        raise TTSFailure(
+                            "resource_exhausted",
+                            "GPU resources are temporarily unavailable",
+                            503,
+                        ) from error
+                    raise TTSFailure(
+                        "model_load_failed", "TTS model could not be loaded", 503
+                    ) from error
+                with self._condition:
+                    self._state = "loaded"
+                    self._load_error = False
+            result = operation(self._model)
+            return result
+        except TTSFailure as error:
+            if error.code == "resource_exhausted":
+                self._unload_locked()
+            raise
+        finally:
+            with self._condition:
+                self._active = False
+                self._last_used = time.monotonic()
+                if self._model is not None:
+                    self._state = "loaded"
+                elif not self._stopping:
+                    self._state = "unloaded"
+                self._condition.notify_all()
+
+    def _unload_locked(self) -> None:
+        model, self._model = self._model, None
+        del model
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+        self._state = "unloaded"
+
+    def unload(self) -> bool:
+        with self._condition:
+            if self._active or self._model is None:
+                return False
+            self._unload_locked()
+            return True
+
+    def stop(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            self._stopping = True
+            while self._active:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(remaining)
+            self._unload_locked()
+        self._unloader.join(timeout=max(0, deadline - time.monotonic()))
+        return not self._unloader.is_alive()
+
+    def _idle_loop(self) -> None:
+        interval = self.config["idle_unload_seconds"]
+        if interval <= 0:
+            return
+        while True:
+            time.sleep(min(interval, 1.0))
+            with self._condition:
+                if self._stopping:
+                    return
+                if (
+                    self._model is not None
+                    and not self._active
+                    and time.monotonic() - self._last_used >= interval
+                ):
+                    self._unload_locked()
+
+
+def _is_oom(error: Exception) -> bool:
+    return (
+        "out of memory" in str(error).lower()
+        or "cuda error: out of memory" in str(error).lower()
+    )
+
+
+def mode_timesteps(mode: str) -> int:
+    if mode == "fast":
+        return 8
+    if mode in {"quality", "auto"}:
+        return 10
+    raise TTSFailure("invalid_mode", "mode must be quality, fast, or auto", 400)
+
+
+def language_instruction(text: str, language: str, instructions: dict[str, str]) -> str:
+    if language == "auto":
+        return text
+    return f"({instructions[language]}){text}"
+
+
+def vox_model_factory(config: dict):
+    def load():
+        path = Path(config["model_path"])
+        manifest_path = path.parent / "manifest.yaml"
+        if (
+            path.is_symlink()
+            or not path.is_dir()
+            or manifest_path.is_symlink()
+            or not manifest_path.is_file()
+        ):
+            raise RuntimeError("model artifact is unavailable")
+        import yaml
+
+        from services.worker.server import StrictLoader
+
+        manifest = yaml.load(manifest_path.read_text(), Loader=StrictLoader)
+        digest = hashlib.sha256(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if (
+            digest != config["model_manifest_sha256"]
+            or manifest.get("model", {}).get("revision") != config["model_revision"]
+        ):
+            raise RuntimeError("model artifact identity mismatch")
+        expected = {
+            entry["path"]: entry["size_bytes"] for entry in manifest.get("files", [])
+        }
+        actual = {}
+        for child in path.iterdir():
+            if child.is_symlink() or not child.is_file():
+                raise RuntimeError("model artifact contains an unsupported entry")
+            actual[child.name] = child.stat().st_size
+        if not expected or actual != expected or "model.safetensors" not in expected:
+            raise RuntimeError("model artifact files do not match the manifest")
+        import torch
+        from voxcpm import VoxCPM
+
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is required for the configured TTS worker")
+        free_mib, _total_mib = torch.cuda.mem_get_info()
+        if free_mib < config["min_free_vram_mib"] * 1024 * 1024:
+            raise RuntimeError(
+                "GPU out of memory: insufficient free VRAM before model load"
+            )
+        torch.cuda.set_per_process_memory_fraction(config["cuda_memory_fraction"])
+        torch.set_num_threads(4)
+        return VoxCPM.from_pretrained(
+            str(path),
+            load_denoiser=False,
+            local_files_only=True,
+            optimize=False,
+            device="cuda",
+        )
+
+    return load

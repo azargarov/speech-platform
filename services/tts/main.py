@@ -1,6 +1,6 @@
-"""TTS process entry point; inference is deliberately unavailable in M01."""
+"""TTS process entry point."""
 
-from services.worker.server import main
+from services.tts.server import main
 
 if __name__ == "__main__":
-    main("tts")
+    main()

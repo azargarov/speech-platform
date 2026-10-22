@@ -1,6 +1,6 @@
 # Speech Platform
 
-Speech Platform is a self-hosted set of reusable speech services. STT v1 is the first product release: a CUDA faster-whisper worker behind one Gateway API. It supports Russian, English and Swedish transcription, automatic or request-selected spoken language, and request-selected output language. TTS remains health-only. Voice dictation and text transformation are future work.
+Speech Platform is a self-hosted set of reusable speech services. STT v1 is the first product release: a CUDA faster-whisper worker behind one Gateway API. It supports Russian, English and Swedish transcription, automatic or request-selected spoken language, and request-selected output language. M03B adds a VoxCPM2 TTS candidate through the existing Gateway and worker; production acceptance remains pending. Voice dictation and text transformation are future work.
 
 Git releases and the root `compose.yaml` are the normal deployment source of truth. The persistent model store stays on the host and is mounted read-only. Ordinary install and recovery do not use `private/deployment/`, generation state or snapshots. See [ADR 0018](docs/adr/0018-git-compose-product-operations.md).
 
@@ -103,7 +103,26 @@ curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:8080/readyz
 ```
 
-`healthz` confirms Gateway process liveness. `readyz` confirms the STT worker has loaded its model and accepts work. `make logs` follows the configured project logs. Docker Compose restarts crashed services. If configuration or model files are unavailable, inspect the logs and restore the expected configuration or artifact permissions.
+`healthz` confirms Gateway process liveness. `readyz` confirms the configured STT and TTS workers are available; the TTS model may be unloaded because it loads on demand. `make logs` follows the configured project logs. Docker Compose restarts crashed services. If configuration or model files are unavailable, inspect the logs and restore the expected configuration or artifact permissions.
+
+## TTS candidate API
+
+The M03B candidate accepts text and returns a complete WAV PCM16 file. The
+default mode is `quality` (10 steps); `auto` currently selects the same mode.
+`fast` (8 steps) remains unavailable until its quality is accepted. `language`
+defaults to `auto`, which passes multilingual text without language metadata;
+`en`, `ru` and `sv` are client hints and do not produce a detected-language
+code. The request body is limited to 64 KiB and 10,000 text characters.
+
+```sh
+curl --fail-with-body -H 'Content-Type: application/json' \
+  --data '{"text":"Hello, мир!","language":"auto","mode":"quality"}' \
+  http://127.0.0.1:8080/v1/tts/speech --output speech.wav
+```
+
+See [TTS operations](docs/operations/tts.md) for model staging, warm-up,
+loaded state and resource controls. Model fetching is explicit; runtime
+downloads are disabled.
 
 Redeploy a known-good release with:
 
@@ -128,7 +147,7 @@ make verify PYTHON=.venv/bin/python
 ## Roadmap
 
 - **STT v1:** Russian, English and Swedish transcription with automatic and forced source selection. Translation is advertised only for models whose configuration enables a verified translation capability; the deployed large-v3-turbo model has translation disabled.
-- **TTS:** future inference milestone. Current TTS process is health-only.
+- **TTS:** M03A selected VoxCPM2 for initial M03B integration after operator listening; M03B implementation and live acceptance are in progress. This selection is not production acceptance.
 - **Voice dictation and text transformation:** future separate optional service after STT v1. It will preserve raw transcription and offer per-request `raw`, `clean`, `business`, `friendly`, `casual` and `formal_to_casual` modes through a configurable local LLM. It will not put an LLM in the STT worker and should continue to allow ordinary STT when the transformation service is unavailable. Desktop shortcuts and insertion must account for Linux Wayland restrictions; mobile mode selection can follow.
 - **Transcript Refinement:** optional future text-processing capability; it will remain separate from raw STT.
 

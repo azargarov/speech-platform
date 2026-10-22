@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,10 +15,13 @@ func TestFoundation(t *testing.T) {
 	for _, tc := range []struct {
 		method, path string
 		status       int
-	}{{"GET", "/metrics", 200}, {"GET", "/healthz", 200}, {"GET", "/readyz", 503}, {"POST", "/v1/stt/transcriptions", 503}, {"POST", "/v1/tts/speech", 404}, {"GET", "/v1/stt/models", 404}, {"GET", "/v1/tts/voices", 404}} {
+	}{{"GET", "/metrics", 200}, {"GET", "/healthz", 200}, {"GET", "/readyz", 503}, {"POST", "/v1/stt/transcriptions", 503}, {"POST", "/v1/tts/speech", 503}, {"GET", "/v1/stt/models", 404}, {"GET", "/v1/tts/voices", 503}} {
 		r := httptest.NewRequest(tc.method, tc.path, nil)
 		if tc.path == "/v1/stt/transcriptions" {
 			r.Header.Set("Content-Type", "multipart/form-data; boundary=x")
+		} else if tc.path == "/v1/tts/speech" {
+			r.Header.Set("Content-Type", "application/json")
+			r.Body = io.NopCloser(strings.NewReader(`{"text":"hello"}`))
 		}
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
@@ -89,5 +93,62 @@ func TestSTTProxyForwardsBoundedRequestAndRequiresConfiguredToken(t *testing.T) 
 	h.ServeHTTP(ready, httptest.NewRequest("GET", "/readyz", nil))
 	if ready.Code != http.StatusOK {
 		t.Fatalf("readiness=%d", ready.Code)
+	}
+}
+
+func TestTTSProxyValidationForwardingAndAudioResponse(t *testing.T) {
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/readyz" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.URL.Path != "/internal/v1/speech" || r.Header.Get("X-Request-Timeout-Ms") != "600000" {
+			t.Errorf("bad forwarded request: path=%s timeout=%s", r.URL.Path, r.Header.Get("X-Request-Timeout-Ms"))
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if body["language"] != "auto" || body["mode"] != "auto" || body["voice"] != "default" {
+			t.Errorf("unexpected defaults: %#v", body)
+		}
+		w.Header().Set("Content-Type", "audio/wav")
+		_, _ = w.Write([]byte("RIFF-test"))
+	}))
+	defer worker.Close()
+	proxy := NewTTSProxy(worker.URL, "12345678901234567890123456789012", 600*time.Second)
+	stt := NewSTTProxy(worker.URL, "", time.Second)
+	h := HandlerWithWorkers(NewWorkersReadiness(stt, proxy), 1024, stt, proxy)
+	for _, tc := range []struct {
+		name, body string
+		status     int
+		code       string
+	}{
+		{"valid", `{"text":"hello"}`, 200, ""},
+		{"invalid_language", `{"text":"hello","language":"zh"}`, 400, "invalid_language"},
+		{"invalid_mode", `{"text":"hello","mode":"turbo"}`, 400, "invalid_mode"},
+		{"unknown_field", `{"text":"hello","extra":true}`, 400, "invalid_request"},
+		{"empty_text", `{"text":"   "}`, 400, "invalid_text"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/v1/tts/speech", strings.NewReader(tc.body))
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("Authorization", "Bearer 12345678901234567890123456789012")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != tc.status {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			if tc.status == 200 && (w.Header().Get("Content-Type") != "audio/wav" || w.Body.String() != "RIFF-test") {
+				t.Fatalf("unexpected audio response: %#v %q", w.Header(), w.Body.String())
+			}
+			if tc.code != "" {
+				var got map[string]string
+				_ = json.Unmarshal(w.Body.Bytes(), &got)
+				if got["code"] != tc.code {
+					t.Fatalf("error=%v", got)
+				}
+			}
+		})
 	}
 }

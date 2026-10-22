@@ -34,7 +34,7 @@ GATEWAY_FIELDS = {
     "idle_timeout",
     "shutdown_timeout",
 }
-GATEWAY_OPTIONAL_FIELDS = {"stt_url", "stt_timeout"}
+GATEWAY_OPTIONAL_FIELDS = {"stt_url", "stt_timeout", "tts_url", "tts_timeout"}
 
 
 def _fields(value, expected: set[str], label: str) -> None:
@@ -174,4 +174,20 @@ def load_gateway_config(path: str | Path) -> dict:
             raise ValueError("Gateway stt_timeout must be a positive Go duration")
         if _duration_seconds(value) <= 0:
             raise ValueError("Gateway stt_timeout must be a positive Go duration")
+    if "tts_url" in config:
+        worker = urlparse(
+            config["tts_url"] if isinstance(config["tts_url"], str) else ""
+        )
+        if worker.scheme != "http" or not worker.netloc or worker.path not in ("", "/"):
+            raise ValueError("Gateway tts_url must be an internal HTTP origin")
+    if "tts_timeout" in config:
+        value = config["tts_timeout"]
+        if (
+            not isinstance(value, str)
+            or not GO_DURATION_PATTERN.fullmatch(value)
+            or not 0 < _duration_seconds(value) <= 600
+        ):
+            raise ValueError(
+                "Gateway tts_timeout must be a positive Go duration no greater than 10m"
+            )
     return config

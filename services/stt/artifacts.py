@@ -71,7 +71,11 @@ def verify_artifact(model: ModelConfig, location: ArtifactRoot) -> VerifiedArtif
                 raise ValueError("artifact file size mismatch")
             digest = _file_digest(file_path)
             if digest != entry["sha256"]:
-                raise ValueError("artifact file digest mismatch")
+                raise ValueError(
+                    "artifact file digest mismatch for "
+                    f"{relative}: expected SHA-256 {entry['sha256']}, "
+                    f"got {digest}"
+                )
         return VerifiedArtifact(
             ArtifactIdentity(model.manifest_sha256, model.artifact_format),
             root.resolve(),
