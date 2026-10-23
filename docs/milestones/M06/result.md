@@ -1,6 +1,6 @@
 # M06 interim implementation result
 
-Status: **M06B offline implementation and verification ACCEPTED 2026-10-23. M06C offline implementation and verification ACCEPTED 2026-10-23. M06D offline integration and regression qualification ACCEPTED 2026-10-23. M06E deployment/live qualification authorized and underway, pending operator acceptance; public Gateway TTS integration remains unresolved.**
+Status: **M06 COMPLETE; M06A, M06B, M06C, M06D, and M06E accepted 2026-10-23 with documented limitations.**
 
 M06B makes STT model ownership on demand while preserving the existing supervised child process, bounded admission, request contracts and cleanup boundary. The STT HTTP worker starts ready with no model child, initializes the child for inference or internal warmup, and reaps it after the configured idle interval when no admitted or active work requires it. The preflight ownership handoff is mutually exclusive, and shutdown now reports uncertain cleanup rather than racing an active inference owner or waiting indefinitely for its supervisor lock.
 
@@ -15,6 +15,6 @@ M06D offline integration adds real Gateway handler tests against fake STT/TTS/Ol
 Remaining milestone scope:
 
 - **M06D:** offline integration and regression qualification accepted 2026-10-23.
-- **M06E (in progress):** live qualification/deployment were explicitly authorized on 2026-10-23. STT lifecycle and Ollama warmup/residency passed observed checks. TTS worker warmup/synthesis passed directly; Gateway corrections for its response and legacy default text field are offline-verified but undeployed because the canonical installer requires a clean checkout. Public Gateway TTS remains unqualified. M06E acceptance and overall M06 closeout remain pending.
+- **M06E (accepted 2026-10-23):** Gateway correction was committed and deployed through the canonical installer. Public TTS warmup returned ready and synthetic plain-text synthesis returned valid WAV; public STT warmup and Ollama text-transform warmup also passed. STT lifecycle, idle unload/reload, GPU recovery, natural Ollama expiry, and the tested bounded TTS resource rejection are recorded in [verification.md](verification.md), alongside image IDs, source revisions, timings, and health. M06E and M06 overall are accepted with the listed limitations.
 
-See [implementation](implementation.md), [plan](plan.md), [operator validation](user-validation.md), and [verification](verification.md). M06A through M06D acceptance is limited to the scope recorded in each stage. M06E is authorized and in progress but not accepted; public Gateway/TTS compatibility and reproducible redeployment of the correction remain unresolved. Overall M06 closeout remains pending.
+Known limitations remain: explicit SSML was not live-qualified; tested GPU coexistence is not a universal capacity guarantee; Ollama is shared and not exclusively controlled by SpeechPlatform; non-cooperative native calls require conservative cleanup; and model residency is only established under observed conditions. Existing text-transformation routing and cloud authorization remain unchanged, with no new fallback policy for cold or warming local models. See [implementation](implementation.md), [plan](plan.md), [operator validation](user-validation.md), and [verification](verification.md). M06 is complete within the accepted scope.

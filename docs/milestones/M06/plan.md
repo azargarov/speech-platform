@@ -1,6 +1,6 @@
 # M06 — Model Lifecycle, Predictive Warmup and Readiness-Aware Routing
 
-Status: **IN PROGRESS; M06A finalized; M06B offline implementation and verification ACCEPTED 2026-10-23; M06C offline implementation and verification ACCEPTED 2026-10-23; M06D offline integration/regression qualification ACCEPTED 2026-10-23. M06E live qualification/deployment authorized and underway, pending operator acceptance.**
+Status: **COMPLETE; M06A architecture, M06B offline implementation/verification, M06C offline integration, M06D offline qualification, and M06E live qualification accepted 2026-10-23, with documented limitations.**
 
 ## Objective
 
@@ -130,7 +130,7 @@ M06 does not add routing behavior. Keep `ordered`, `local_first`, `cloud_first`,
 | **M06B — STT lazy loading, idle unloading, reload and readiness** | M06A approved; implementation authorized by the M06B request. | **ACCEPTED 2026-10-23** for implementation and offline verification, including the documented limitation for non-cooperative native calls. This does not claim live GPU behavior or complete M06. |
 | **M06C — Gateway warmup API, TTS reuse and Ollama warmup** | **ACCEPTED 2026-10-23 for offline implementation and verification, including documented shared-GPU, cancellation and installed-Ollama qualification limitations.** | Contract-first OpenAPI update and handler/config tests prove strict request validation, auth, multiple/partial outcomes, repeat/concurrency safety, per-operation deadlines, no content generation/transmission, no cloud warmup, TTS endpoint reuse, finite Ollama keep-alive and unchanged M05B routing/fallback. Broader integration/regression qualification remains M06D. |
 | **M06D — Offline integration and regression verification** | **ACCEPTED 2026-10-23** based on offline integration and regression evidence; acceptance does not include live GPU or production deployment qualification. | Public Gateway warmup and inference exercised against fake STT/TTS/Ollama services; STT/TTS worker HTTP lifecycles exercised with fake model backends; routing, privacy, API/config/OpenAPI and repository regression checks passed. Real GPU capacity, installed Ollama behavior and deployment networking remain unestablished. |
-| **M06E — Operator-authorized live qualification and deployment** | **Authorized and underway 2026-10-23; pending operator acceptance.** Depends on accepted M06D evidence. | Sequential qualification records load/warm/idle/reload, GPU samples, health, Ollama state and workload observations. Current live evidence found a Gateway/TTS response contract defect and request-schema incompatibility with retained TTS; public TTS integration remains incomplete. See [verification.md](verification.md). |
+| **M06E — Operator-authorized live qualification and deployment** | **ACCEPTED 2026-10-23** based on live qualification evidence and documented limitations. | Gateway was deployed from commit `f2f2d337271d5ed677daf13a8c5fcd875d68000a`. Public TTS warmup and plain-text synthesis passed; STT and Ollama warmup passed; tested contention produced bounded TTS resource rejection without eviction. See [verification.md](verification.md). |
 
 ## Acceptance criteria for M06 implementation
 
@@ -162,9 +162,9 @@ Implemented behavior and offline evidence are recorded in [implementation.md](im
 
 Offline M06D verification must cover lifecycle races, queue/active use, load/reload/failure, worker readiness, public authentication and request schema, partial results, deadlines, caller disconnect semantics, no content generation, no cloud warmup, strict config, TTS regression, M05B selection policies, OpenAPI and shutdown. Use fake worker/Ollama boundaries; no GPU inference is needed.
 
-Live M06E qualification is not authorized by M06A. If separately authorized, use an operator-reviewed target and run envelope; record per-workload state, finite keep-alive, natural expiry, sampled GPU use/free memory, service health/restarts and recovery. Do not stop or reconfigure shared Ollama, force unload, deploy, or infer unrelated-client safety without the explicit approved scope.
+Live M06E qualification was separately authorized and completed on 2026-10-23. Recorded observations are bounded to this server and the tested workload sequence; they do not guarantee untested GPU model combinations or future Ollama residency.
 
-The operator accepted M06D offline integration and regression qualification on 2026-10-23 based on the recorded evidence. That acceptance preserves the limitations for real GPU capacity, CUDA lifecycle behavior, installed Ollama, shared Ollama ownership and production networking. M06E live qualification/deployment was explicitly authorized on 2026-10-23. It is in progress and pending operator acceptance; see [verification.md](verification.md) for observed results and unresolved Gateway/TTS integration. Overall M06 closeout remains a separate decision.
+The operator accepted M06D offline integration/regression and M06E live qualification on 2026-10-23. M06 is complete. Known limitations include explicit SSML not being live-qualified, GPU coexistence being established only for tested workloads, shared Ollama not being exclusively controlled by SpeechPlatform, conservative cleanup after non-cooperative native calls, and no guarantee of model residency beyond observed conditions. Existing M05B text-transformation routing/cloud authorization semantics remain unchanged; no fallback policy was added for cold or warming local models. Detailed evidence is in [verification.md](verification.md).
 
 ## References
 
