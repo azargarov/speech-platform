@@ -67,6 +67,7 @@ class LifecycleConfig:
     cooperative_cancel_grace_seconds: float
     process_exit_timeout_seconds: float
     shutdown_drain_timeout_seconds: float
+    model_idle_unload_seconds: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -366,15 +367,29 @@ def load_application_config(path: str | Path) -> ApplicationConfig:
         raise ValueError("max_result_bytes cannot exceed the IPC message limit")
 
     lifecycle = data["lifecycle"]
-    _fields(
-        lifecycle,
-        {
+    lifecycle_fields = {
+        "model_load_timeout_seconds",
+        "cooperative_cancel_grace_seconds",
+        "process_exit_timeout_seconds",
+        "shutdown_drain_timeout_seconds",
+        "model_idle_unload_seconds",
+    }
+    if (
+        not isinstance(lifecycle, dict)
+        or not {
             "model_load_timeout_seconds",
             "cooperative_cancel_grace_seconds",
             "process_exit_timeout_seconds",
             "shutdown_drain_timeout_seconds",
-        },
-        "lifecycle",
+        }.issubset(lifecycle)
+        or set(lifecycle) - lifecycle_fields
+    ):
+        raise ValueError("lifecycle fields must match the versioned schema")
+    idle_unload = _number(
+        lifecycle.get("model_idle_unload_seconds", 60),
+        "model_idle_unload_seconds",
+        0,
+        86400,
     )
     lifecycle_config = LifecycleConfig(
         _number(
@@ -401,6 +416,7 @@ def load_application_config(path: str | Path) -> ApplicationConfig:
             0.001,
             86400,
         ),
+        idle_unload,
     )
     recovery = data["recovery"]
     _fields(recovery, {"policy"}, "recovery")

@@ -39,6 +39,7 @@ admission:
   queue_wait_timeout_seconds: 10
   request_timeout_seconds: 60
 lifecycle:
+  model_idle_unload_seconds: 60
   model_load_timeout_seconds: 120
   cooperative_cancel_grace_seconds: 0.2
   process_exit_timeout_seconds: 2

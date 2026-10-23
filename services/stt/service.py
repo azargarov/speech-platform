@@ -19,7 +19,7 @@ class DeferredSTTApplication:
         self._delegate = None
         self._lifecycle = Lifecycle()
         self._lifecycle.set_worker(WorkerState.SERVING)
-        self._lifecycle.set_model(ModelState.LOADING)
+        self._lifecycle.set_model(ModelState.VALIDATING)
 
     @property
     def lifecycle(self):
@@ -61,6 +61,12 @@ class DeferredSTTApplication:
         if application is None:
             raise SpeechFailure(FailureCode.NOT_READY)
         return application.transcribe_uploaded(*args, **kwargs)
+
+    def warmup(self, *args, **kwargs):
+        application = self._current()
+        if application is None:
+            raise SpeechFailure(FailureCode.NOT_READY)
+        return application.warmup(*args, **kwargs)
 
     def close(self):
         application = self._current()

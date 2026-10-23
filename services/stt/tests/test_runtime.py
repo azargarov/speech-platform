@@ -10,7 +10,7 @@ from unittest.mock import patch
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from services.stt.application import create_application
+from services.stt.application import _RunnerFactoryHandoff, create_application
 from services.stt.config import ArtifactRoot, DeploymentConfig, load_application_config
 from services.stt.domain import (
     ArtifactIdentity,
@@ -156,14 +156,18 @@ def load_app_config(
     cancel_grace=0.1,
     exit_timeout=0.5,
     translation_supported=True,
+    idle_timeout=60,
+    shutdown_drain_timeout=1,
 ):
     data = application_data()
     data["backend"]["id"] = backend
     data["admission"]["max_queued"] = max_queued
     data["admission"]["queue_wait_timeout_seconds"] = queue_wait
     data["lifecycle"]["model_load_timeout_seconds"] = load_timeout
+    data["lifecycle"]["model_idle_unload_seconds"] = idle_timeout
     data["lifecycle"]["cooperative_cancel_grace_seconds"] = cancel_grace
     data["lifecycle"]["process_exit_timeout_seconds"] = exit_timeout
+    data["lifecycle"]["shutdown_drain_timeout_seconds"] = shutdown_drain_timeout
     data["models"][0]["translation_supported"] = translation_supported
     path = Path(directory) / "app.yaml"
     import yaml
@@ -185,6 +189,8 @@ def make_application(
     exit_timeout=0.5,
     process_control=None,
     translation_supported=True,
+    idle_timeout=60,
+    shutdown_drain_timeout=1,
 ):
     config = load_app_config(
         directory,
@@ -194,6 +200,8 @@ def make_application(
         cancel_grace=cancel_grace,
         exit_timeout=exit_timeout,
         translation_supported=translation_supported,
+        idle_timeout=idle_timeout,
+        shutdown_drain_timeout=shutdown_drain_timeout,
     )
     factory = FakeBackendFactory(behavior, duration, auto, timestamps)
     deployment = DeploymentConfig(
@@ -236,6 +244,12 @@ class LifecycleTests(unittest.TestCase):
     def test_worker_and_model_states_are_independent(self):
         lifecycle = Lifecycle()
         lifecycle.set_worker(WorkerState.SERVING)
+        lifecycle.set_model(ModelState.UNLOADED)
+        self.assertTrue(lifecycle.ready())
+        lifecycle.set_model(ModelState.LOADING)
+        self.assertTrue(lifecycle.ready())
+        lifecycle.set_model(ModelState.UNLOADING)
+        self.assertTrue(lifecycle.ready())
         lifecycle.set_model(ModelState.FAULTED)
         self.assertTrue(lifecycle.live())
         self.assertFalse(lifecycle.ready())
@@ -259,8 +273,8 @@ class LifecycleTests(unittest.TestCase):
         thread.start()
         try:
             self.assertEqual(self._get(server, "/healthz")[0], 200)
-            self.assertEqual(self._get(server, "/readyz")[0], 503)
-            self.assertIn(b"speech_ready 0", self._get(server, "/metrics")[1])
+            self.assertEqual(self._get(server, "/readyz")[0], 200)
+            self.assertIn(b"speech_ready 1", self._get(server, "/metrics")[1])
             lifecycle.set_model(ModelState.READY)
             self.assertEqual(self._get(server, "/readyz")[0], 200)
             self.assertIn(b"speech_ready 1", self._get(server, "/metrics")[1])
@@ -513,6 +527,559 @@ class SupervisorTests(unittest.TestCase):
 
 
 class ApplicationTests(unittest.TestCase):
+    def test_start_is_lazy_warmup_loads_once_and_inference_reuses_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory)
+            self.assertTrue(app.lifecycle.ready())
+            self.assertEqual(app.lifecycle.snapshot()[1], ModelState.UNLOADED)
+            self.assertIsNone(app.runner)
+            self.assertEqual(app.warmup(), {"model_state": "ready"})
+            runner = app.runner
+            self.assertTrue(runner.child_alive)
+            app.transcribe(TranscriptionRequest(b"audio", "audio/wav"))
+            self.assertIs(app.runner, runner)
+            app.close()
+
+    def test_idle_unload_and_subsequent_inference_reload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory, idle_timeout=0.05)
+            previous = None
+            for _ in range(3):
+                app.warmup()
+                current = app.runner
+                self._wait_for(
+                    lambda: app.lifecycle.snapshot()[1] == ModelState.UNLOADED
+                )
+                self.assertFalse(current.child_alive)
+                if previous is not None:
+                    self.assertIsNot(current, previous)
+                previous = current
+            app.transcribe(TranscriptionRequest(b"again", "audio/wav"))
+            self.assertIsNot(app.runner, previous)
+            app.close()
+
+    def test_zero_timeout_waits_for_active_and_admitted_queued_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory, duration=0.15, idle_timeout=0)
+            failures = []
+
+            def invoke(audio):
+                _capture(
+                    failures,
+                    lambda: app.transcribe(TranscriptionRequest(audio, "audio/wav")),
+                )
+
+            first = threading.Thread(target=invoke, args=(b"active",))
+            first.start()
+            self._wait_for(lambda: app._admission.snapshot()["active"])
+            self._wait_for(lambda: app.lifecycle.snapshot()[1] == ModelState.READY)
+            second = threading.Thread(target=invoke, args=(b"queued",))
+            second.start()
+            self._wait_for(lambda: app._admission.snapshot()["queued"] == 1)
+            self.assertEqual(app.lifecycle.snapshot()[1], ModelState.READY)
+            self.assertTrue(app.runner.child_alive)
+            first.join(2)
+            second.join(2)
+            self.assertFalse(first.is_alive() or second.is_alive())
+            self.assertEqual(failures, [])
+            self._wait_for(lambda: app.lifecycle.snapshot()[1] == ModelState.UNLOADED)
+            app.close()
+
+    def test_zero_timeout_unload_after_completion_does_not_dereference_runner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory, idle_timeout=0)
+            validation_entered = threading.Event()
+            release_validation = threading.Event()
+            original_validate = app._validate_result
+
+            def gated_validate(result):
+                validation_entered.set()
+                self.assertTrue(release_validation.wait(2))
+                return original_validate(result)
+
+            app._validate_result = gated_validate
+            outcome = []
+            request = threading.Thread(
+                target=lambda: _capture(
+                    outcome,
+                    lambda: app.transcribe(TranscriptionRequest(b"audio", "audio/wav")),
+                )
+            )
+            request.start()
+            self.assertTrue(validation_entered.wait(2))
+            self._wait_for(lambda: app.lifecycle.snapshot()[1] == ModelState.UNLOADED)
+            release_validation.set()
+            request.join(2)
+            self.assertFalse(request.is_alive())
+            self.assertEqual(outcome, [])
+            app.close()
+
+    def test_shared_load_failure_fails_all_admitted_jobs_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory, behavior="load_failure", max_queued=2)
+            factory_calls = []
+            original_factory = app._runner_factory
+
+            def counted_factory():
+                factory_calls.append(True)
+                return original_factory()
+
+            app._runner_factory = counted_factory
+            failure_entered = threading.Event()
+            release_failure = threading.Event()
+            original_fail_admitted = app._admission.fail_admitted
+
+            def gated_fail_admitted(failure, finish_generation):
+                failure_entered.set()
+                self.assertTrue(release_failure.wait(2))
+                return original_fail_admitted(failure, finish_generation)
+
+            app._admission.fail_admitted = gated_fail_admitted
+            outcomes = []
+            first = threading.Thread(
+                target=lambda: _capture(
+                    outcomes,
+                    lambda: app.transcribe(TranscriptionRequest(b"first", "audio/wav")),
+                )
+            )
+            first.start()
+            self.assertTrue(failure_entered.wait(2))
+            second = threading.Thread(
+                target=lambda: _capture(
+                    outcomes,
+                    lambda: app.transcribe(
+                        TranscriptionRequest(b"second", "audio/wav")
+                    ),
+                )
+            )
+            second.start()
+            self._wait_for(lambda: app._admission.snapshot()["queued"] == 1)
+            release_failure.set()
+            first.join(3)
+            second.join(3)
+            self.assertFalse(first.is_alive() or second.is_alive())
+            self.assertEqual(len(outcomes), 2)
+            self.assertTrue(all(isinstance(item, SpeechFailure) for item in outcomes))
+            self.assertEqual(len(factory_calls), 1)
+            snapshot = app._admission.snapshot()
+            self.assertFalse(snapshot["active"])
+            self.assertEqual(snapshot["queued"], 0)
+            self.assertEqual(snapshot["retained_bytes"], 0)
+            app.close()
+
+    def test_blocked_device_preflight_times_out_and_late_factory_cannot_start_child(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory, load_timeout=0.05, exit_timeout=0.05)
+            original_factory = app._runner_factory
+            entered = threading.Event()
+            release = threading.Event()
+            created = []
+
+            def blocked_factory():
+                entered.set()
+                release.wait(2)
+                runner = original_factory()
+                created.append(runner)
+                return runner
+
+            app._runner_factory = blocked_factory
+            with self.assertRaises(SpeechFailure) as caught:
+                app.warmup(OperationContext(time.monotonic() + 1))
+            self.assertEqual(caught.exception.code, FailureCode.MODEL_LOAD_FAILED)
+            self.assertTrue(entered.is_set())
+            self.assertTrue(app.lifecycle.cleanup_unconfirmed())
+            closer = threading.Thread(target=app.close)
+            closer.start()
+            release.set()
+            closer.join(2)
+            self.assertFalse(closer.is_alive())
+            self.assertTrue(created)
+            self.assertFalse(created[0].child_alive)
+
+    def test_preflight_handoff_timeout_and_completion_have_one_owner(self):
+        late = _RunnerFactoryHandoff()
+        self.assertEqual(late.claim(0), (None, None, True))
+        late_runner = object()
+        self.assertTrue(late.publish(late_runner, None))
+        late.cleanup_finished()
+
+        completed = _RunnerFactoryHandoff()
+        completed_runner = object()
+        self.assertFalse(completed.publish(completed_runner, None))
+        self.assertEqual(completed.claim(0), (completed_runner, None, False))
+
+        for _ in range(25):
+            handoff = _RunnerFactoryHandoff()
+            runner = object()
+            start = threading.Barrier(3)
+            publish_result = []
+            claim_result = []
+
+            publisher = threading.Thread(
+                target=lambda: (
+                    start.wait(),
+                    publish_result.append(handoff.publish(runner, None)),
+                )
+            )
+            claimant = threading.Thread(
+                target=lambda: (start.wait(), claim_result.append(handoff.claim(0.002)))
+            )
+            publisher.start()
+            claimant.start()
+            start.wait()
+            publisher.join(1)
+            claimant.join(1)
+            self.assertFalse(publisher.is_alive() or claimant.is_alive())
+            claimed_runner, _error, abandoned = claim_result[0]
+            if abandoned:
+                self.assertIsNone(claimed_runner)
+                self.assertEqual(publish_result, [True])
+                handoff.cleanup_finished()
+            else:
+                self.assertIs(claimed_runner, runner)
+                self.assertEqual(publish_result, [False])
+
+    def test_shutdown_during_non_cooperative_inference_is_bounded_and_latched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(
+                directory,
+                load_timeout=2,
+                exit_timeout=0.05,
+                shutdown_drain_timeout=0.12,
+            )
+            app.warmup()
+            runner = app.runner
+            inference_entered = threading.Event()
+            release_inference = threading.Event()
+            shutdown_calls = []
+
+            def blocked_inference(_request, _context):
+                inference_entered.set()
+                release_inference.wait(3)
+                return TranscriptionResult("test", "en")
+
+            original_shutdown = runner.shutdown
+
+            def tracked_shutdown(timeout):
+                shutdown_calls.append(timeout)
+                return original_shutdown(timeout)
+
+            runner.transcribe = blocked_inference
+            runner.shutdown = tracked_shutdown
+            outcomes = []
+            request = threading.Thread(
+                target=lambda: _capture(
+                    outcomes,
+                    lambda: app.transcribe(
+                        TranscriptionRequest(b"audio", "audio/wav"),
+                        OperationContext(time.monotonic() + 5),
+                    ),
+                )
+            )
+            request.start()
+            self.assertTrue(inference_entered.wait(2))
+
+            started = time.monotonic()
+            app.close()
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 0.35)
+            self.assertTrue(app.lifecycle.cleanup_unconfirmed())
+            self.assertFalse(app.lifecycle.ready())
+            self.assertEqual(shutdown_calls, [])
+
+            release_inference.set()
+            request.join(2)
+            self.assertFalse(request.is_alive())
+            self.assertEqual(
+                app.lifecycle.snapshot()[1], ModelState.CLEANUP_UNCONFIRMED
+            )
+            self.assertEqual(shutdown_calls, [])
+
+            # Release the test child only after its fake active owner has exited.
+            original_shutdown(0.5)
+
+    def test_supervisor_shutdown_lock_wait_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory)
+            app.warmup()
+            runner = app.runner
+            lock_held = threading.Event()
+            release_lock = threading.Event()
+
+            def hold_lock():
+                with runner._lock:
+                    lock_held.set()
+                    release_lock.wait(2)
+
+            holder = threading.Thread(target=hold_lock)
+            holder.start()
+            self.assertTrue(lock_held.wait(1))
+            started = time.monotonic()
+            self.assertFalse(runner.shutdown(0.05))
+            self.assertLess(time.monotonic() - started, 0.15)
+            self.assertTrue(runner.cleanup_unconfirmed)
+            self.assertTrue(runner.child_alive)
+            release_lock.set()
+            holder.join(1)
+            self.assertFalse(holder.is_alive())
+            runner.shutdown(0.5)
+            app.close()
+
+    def test_shutdown_reports_blocked_preflight_as_cleanup_unconfirmed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory, load_timeout=0.05, exit_timeout=0.05)
+            entered = threading.Event()
+            release = threading.Event()
+            original_factory = app._runner_factory
+
+            def blocked_factory():
+                entered.set()
+                release.wait(2)
+                return original_factory()
+
+            app._runner_factory = blocked_factory
+            with self.assertRaises(SpeechFailure):
+                app.warmup(OperationContext(time.monotonic() + 1))
+            self.assertTrue(entered.is_set())
+            app.close()
+            self.assertTrue(app.lifecycle.cleanup_unconfirmed())
+            self.assertFalse(app.lifecycle.ready())
+            release.set()
+            app._preflight_thread.join(2)
+            self.assertFalse(app._preflight_thread.is_alive())
+
+    def test_concurrent_warmups_share_recoverable_load_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory, behavior="load_failure")
+            original_factory = app._runner_factory
+            calls = []
+            entered = threading.Event()
+            release = threading.Event()
+
+            def gated_factory():
+                calls.append(True)
+                runner = original_factory()
+                start = runner.start
+
+                def blocked_start():
+                    entered.set()
+                    release.wait(2)
+                    return start()
+
+                runner.start = blocked_start
+                return runner
+
+            app._runner_factory = gated_factory
+            outcomes = []
+            first = threading.Thread(target=lambda: _capture(outcomes, app.warmup))
+            second = threading.Thread(target=lambda: _capture(outcomes, app.warmup))
+            first.start()
+            self.assertTrue(entered.wait(2))
+            second.start()
+            release.set()
+            first.join(3)
+            second.join(3)
+            self.assertFalse(first.is_alive() or second.is_alive())
+            self.assertEqual(len(outcomes), 2)
+            self.assertTrue(all(isinstance(item, SpeechFailure) for item in outcomes))
+            self.assertEqual(len(calls), 1)
+            self.assertFalse(app._load_thread.is_alive())
+            app.close()
+
+    def test_upload_acquired_before_unload_reservation_prevents_unload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory, idle_timeout=0)
+            with app.acquire_upload():
+                app.warmup()
+                self.assertEqual(app.lifecycle.snapshot()[1], ModelState.READY)
+                self.assertTrue(app.runner.child_alive)
+            self._wait_for(lambda: app.lifecycle.snapshot()[1] == ModelState.UNLOADED)
+            app.close()
+
+    def test_new_request_waits_boundedly_while_child_shutdown_is_reserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory, idle_timeout=10)
+            app.warmup()
+            runner = app.runner
+            original_shutdown = runner.shutdown
+            entered = threading.Event()
+            release = threading.Event()
+
+            def blocked_shutdown(timeout):
+                entered.set()
+                release.wait(2)
+                return original_shutdown(timeout)
+
+            runner.shutdown = blocked_shutdown
+            with app._condition:
+                app._last_use = 0
+                app._condition.notify_all()
+            self.assertTrue(entered.wait(2))
+            result = []
+            request = threading.Thread(
+                target=lambda: _capture(
+                    result,
+                    lambda: app.transcribe(
+                        TranscriptionRequest(b"audio", "audio/wav"),
+                        OperationContext(time.monotonic() + 0.05),
+                    ),
+                )
+            )
+            request.start()
+            request.join(1)
+            self.assertFalse(request.is_alive())
+            self.assertEqual(result[0].code, FailureCode.DEADLINE_EXCEEDED)
+            release.set()
+            self._wait_for(lambda: app.lifecycle.snapshot()[1] == ModelState.UNLOADED)
+            app.close()
+
+    def test_completed_inference_resets_idle_unload_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory, duration=0.15, idle_timeout=1.0)
+            app.warmup()
+            threading.Event().wait(0.7)
+            done = threading.Event()
+
+            def invoke():
+                app.transcribe(TranscriptionRequest(b"audio", "audio/wav"))
+                done.set()
+
+            worker = threading.Thread(target=invoke)
+            worker.start()
+            self.assertTrue(done.wait(2))
+            worker.join(1)
+            threading.Event().wait(0.4)
+            self.assertEqual(app.lifecycle.snapshot()[1], ModelState.READY)
+            self._wait_for(lambda: app.lifecycle.snapshot()[1] == ModelState.UNLOADED)
+            app.close()
+
+    def test_concurrent_warmup_and_inference_share_one_initialization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory)
+            original_factory = app._runner_factory
+            factory_calls = []
+            start_entered = threading.Event()
+            release_start = threading.Event()
+
+            def gated_factory():
+                runner = original_factory()
+                factory_calls.append(runner)
+                original_start = runner.start
+
+                def gated_start():
+                    start_entered.set()
+                    if not release_start.wait(2):
+                        raise RuntimeError("test gate timed out")
+                    return original_start()
+
+                runner.start = gated_start
+                return runner
+
+            app._runner_factory = gated_factory
+            failures = []
+            warmup = threading.Thread(target=lambda: _capture(failures, app.warmup))
+            inference = threading.Thread(
+                target=lambda: _capture(
+                    failures,
+                    lambda: app.transcribe(TranscriptionRequest(b"audio", "audio/wav")),
+                )
+            )
+            warmup.start()
+            self.assertTrue(start_entered.wait(2))
+            self.assertTrue(app.lifecycle.ready())
+            inference.start()
+            release_start.set()
+            warmup.join(3)
+            inference.join(3)
+            self.assertFalse(warmup.is_alive() or inference.is_alive())
+            self.assertEqual(failures, [])
+            self.assertEqual(len(factory_calls), 1)
+            app.close()
+
+    def test_warmup_wait_timeout_does_not_cancel_shared_initialization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory)
+            original_factory = app._runner_factory
+            start_entered = threading.Event()
+            release_start = threading.Event()
+
+            def gated_factory():
+                runner = original_factory()
+                original_start = runner.start
+
+                def gated_start():
+                    start_entered.set()
+                    if not release_start.wait(2):
+                        raise RuntimeError("test gate timed out")
+                    return original_start()
+
+                runner.start = gated_start
+                return runner
+
+            app._runner_factory = gated_factory
+            failures = []
+            waiter = threading.Thread(
+                target=lambda: _capture(
+                    failures,
+                    lambda: app.warmup(OperationContext(time.monotonic() + 0.05)),
+                )
+            )
+            waiter.start()
+            self.assertTrue(start_entered.wait(2))
+            waiter.join(1)
+            self.assertFalse(waiter.is_alive())
+            self.assertEqual(len(failures), 1)
+            self.assertIsInstance(failures[0], SpeechFailure)
+            self.assertEqual(failures[0].code, FailureCode.DEADLINE_EXCEEDED)
+            self.assertEqual(app.lifecycle.snapshot()[1], ModelState.LOADING)
+            release_start.set()
+            self._wait_for(lambda: app.lifecycle.snapshot()[1] == ModelState.READY)
+            self.assertTrue(app.runner.child_alive)
+            app.close()
+
+    def test_shutdown_during_loading_waits_for_supervised_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory)
+            original_factory = app._runner_factory
+            start_entered = threading.Event()
+            release_start = threading.Event()
+            runners = []
+
+            def gated_factory():
+                runner = original_factory()
+                runners.append(runner)
+                original_start = runner.start
+
+                def gated_start():
+                    start_entered.set()
+                    if not release_start.wait(2):
+                        raise RuntimeError("test gate timed out")
+                    return original_start()
+
+                runner.start = gated_start
+                return runner
+
+            app._runner_factory = gated_factory
+            warmup_errors = []
+            warmup = threading.Thread(
+                target=lambda: _capture(warmup_errors, app.warmup)
+            )
+            warmup.start()
+            self.assertTrue(start_entered.wait(2))
+            closer = threading.Thread(target=app.close)
+            closer.start()
+            self.assertTrue(app._stopping.wait(1))
+            release_start.set()
+            warmup.join(3)
+            closer.join(3)
+            self.assertFalse(warmup.is_alive() or closer.is_alive())
+            self.assertEqual(len(warmup_errors), 1)
+            self.assertFalse(app._load_thread.is_alive())
+            self.assertFalse(runners[0].child_alive)
+            self.assertEqual(app.lifecycle.snapshot()[0], WorkerState.STOPPED)
+
     def test_translation_capability_is_model_configured(self):
         for detected_language in ("ru", "sv"):
             with (
@@ -520,6 +1087,7 @@ class ApplicationTests(unittest.TestCase):
                 tempfile.TemporaryDirectory() as directory,
             ):
                 app = make_application(directory, translation_supported=False)
+                app.warmup()
                 requests = []
 
                 def transcribe(request, _context):
@@ -541,6 +1109,7 @@ class ApplicationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             app = make_application(directory, translation_supported=False)
+            app.warmup()
             app.runner.transcribe = lambda _request, _context: TranscriptionResult(
                 "raw transcript", "ru"
             )
@@ -556,6 +1125,7 @@ class ApplicationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             app = make_application(directory, translation_supported=False)
+            app.warmup()
             app.runner.transcribe = lambda _request, _context: TranscriptionResult(
                 "unexpected translated text", "ru", translated=True
             )
@@ -567,6 +1137,7 @@ class ApplicationTests(unittest.TestCase):
     def test_v1_language_validation_and_unsupported_detection(self):
         with tempfile.TemporaryDirectory() as directory:
             app = make_application(directory)
+            app.warmup()
             with self.assertRaises(SpeechFailure) as invalid:
                 app.transcribe(
                     TranscriptionRequest(b"x", "audio/wav", output_language="de")
@@ -696,21 +1267,22 @@ class ApplicationTests(unittest.TestCase):
             self.assertEqual(app._admission.snapshot()["retained_bytes"], 0)
             app.close()
 
-    def test_startup_load_failure_keeps_worker_live_but_not_ready(self):
+    def test_cold_load_failure_is_bounded_and_worker_remains_operational(self):
         with tempfile.TemporaryDirectory() as directory:
             app = make_application(directory, behavior="load_failure")
-            self.assertFalse(app.lifecycle.ready())
+            self.assertTrue(app.lifecycle.ready())
             self.assertTrue(app.lifecycle.live())
             with self.assertRaises(SpeechFailure) as caught:
                 app.transcribe(TranscriptionRequest(b"x", "audio/wav"))
-            self.assertEqual(caught.exception.code, FailureCode.NOT_READY)
+            self.assertEqual(caught.exception.code, FailureCode.MODEL_LOAD_FAILED)
             app.close()
 
         with tempfile.TemporaryDirectory() as directory:
             app = make_application(directory, behavior="wrong_identity")
-            self.assertFalse(app.lifecycle.ready())
-            self.assertEqual(app.startup_failure.code, FailureCode.MODEL_LOAD_FAILED)
-            self.assertFalse(app.runner.child_alive)
+            with self.assertRaises(SpeechFailure) as caught:
+                app.transcribe(TranscriptionRequest(b"x", "audio/wav"))
+            self.assertEqual(caught.exception.code, FailureCode.MODEL_LOAD_FAILED)
+            self.assertTrue(app.lifecycle.ready())
             app.close()
 
     def test_model_load_timeout_with_unconfirmed_exit_reports_cleanup_unconfirmed(self):
@@ -724,18 +1296,30 @@ class ApplicationTests(unittest.TestCase):
                 exit_timeout=0.03,
                 process_control=process_control,
             )
-            self.assertEqual(app.startup_failure.code, FailureCode.MODEL_LOAD_FAILED)
+            runners = []
+            original_factory = app._runner_factory
+
+            def capture_runner():
+                runner = original_factory()
+                runners.append(runner)
+                return runner
+
+            app._runner_factory = capture_runner
+            with self.assertRaises(SpeechFailure) as load_error:
+                app.warmup()
+            self.assertEqual(load_error.exception.code, FailureCode.MODEL_LOAD_FAILED)
+            runner = runners[0]
             self.assertTrue(app.lifecycle.live())
             self.assertFalse(app.lifecycle.ready())
             self.assertTrue(app.lifecycle.cleanup_unconfirmed())
-            self.assertTrue(app.runner.cleanup_unconfirmed)
+            self.assertTrue(runner.cleanup_unconfirmed)
             with self.assertRaises(SpeechFailure) as caught:
                 app.transcribe(TranscriptionRequest(b"audio", "audio/wav"))
             self.assertEqual(caught.exception.code, FailureCode.NOT_READY)
 
             process_control.hold_exit_confirmation = False
-            self.assertTrue(app.runner.cleanup_event.wait(1))
-            self.assertFalse(app.runner.cleanup_unconfirmed)
+            self.assertTrue(runner.cleanup_event.wait(1))
+            self.assertFalse(runner.cleanup_unconfirmed)
             self.assertFalse(app.lifecycle.ready())
             app.close()
 
@@ -780,6 +1364,7 @@ class ApplicationTests(unittest.TestCase):
             active = threading.Thread(target=invoke, args=(b"a",))
             active.start()
             self._wait_for(lambda: app._admission.snapshot()["active"])
+            self._wait_for(lambda: app.lifecycle.snapshot()[1] == ModelState.READY)
             queued = threading.Thread(target=invoke, args=(b"q",))
             queued.start()
             self._wait_for(lambda: app._admission.snapshot()["queued"] == 1)
@@ -787,7 +1372,19 @@ class ApplicationTests(unittest.TestCase):
             active.join(1)
             queued.join(1)
             self.assertFalse(active.is_alive() or queued.is_alive())
-            self.assertEqual(captured.count(FailureCode.NOT_READY), 1)
+            self.assertEqual(len(captured), 2)
+            self.assertGreaterEqual(captured.count(FailureCode.NOT_READY), 1)
+            self.assertTrue(
+                all(
+                    code
+                    in {
+                        FailureCode.NOT_READY,
+                        FailureCode.CANCELLED,
+                        FailureCode.DEADLINE_EXCEEDED,
+                    }
+                    for code in captured
+                )
+            )
             self.assertFalse(app.runner.child_alive)
             self.assertEqual(app._admission.snapshot()["retained_bytes"], 0)
             self.assertFalse(app.lifecycle.live())
@@ -800,6 +1397,13 @@ class ApplicationTests(unittest.TestCase):
                 return
             time.sleep(0.005)
         raise AssertionError("condition did not become true")
+
+
+def _capture(failures, callback):
+    try:
+        callback()
+    except Exception as exc:
+        failures.append(exc)
 
 
 if __name__ == "__main__":

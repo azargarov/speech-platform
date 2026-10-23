@@ -1,6 +1,6 @@
 # M06 — Model Lifecycle, Predictive Warmup and Readiness-Aware Routing
 
-Status: **PROPOSED; M06A architecture and contract finalized on 2026-10-23. Application implementation has not started. M06B–M06E require their stated stage gates and authorization.**
+Status: **IN PROGRESS; M06A finalized; M06B offline implementation and verification ACCEPTED 2026-10-23. M06C is the next planned development stage. M06D and M06E remain pending.**
 
 ## Objective
 
@@ -19,7 +19,7 @@ M05B is closed with accepted limitations. Its 6,270 MiB Qwen minimum-free sample
 | Area | Current implementation (OBSERVED) | M06 requirement |
 |---|---|---|
 | Gateway | Public `/v1/stt/transcriptions`, `/v1/tts/speech`, and `/v1/text/transformations`; optional configured bearer authentication; bounded requests; readiness proxies for workers; no public warmup route. | Add one strict public warmup route; preserve current inference endpoints and auth convention. Gateway readiness continues to reflect required worker service availability, not optional model residency. |
-| STT | `DeferredSTTApplication.start()` starts `STTApplication`, whose `runner.start()` launches a supervised child and loads one model before READY. `/readyz` requires model READY. Admission is bounded and serialized; child cleanup/fault safeguards exist. | Make child/model lazy; first inference or internal warmup starts the same bounded load path; safe idle unload/reload; worker `/readyz` remains true while operational and unloaded. |
+| STT | M06A baseline was eager loading and loaded-model readiness. M06B now starts bounded admission without a child, lazily starts one supervised child for inference/internal warmup, unloads after idle, and reports readiness while unloaded/loading/ready/unloading. | M06D verifies integration/regression; M06E separately qualifies target GPU behavior. |
 | TTS | `ModelLifecycle` lazy-loads, serializes native use, has internal `/internal/v1/warmup` and `/internal/v1/state`, a configurable 60-second idle default, active-use protection and an 8,000 MiB free-VRAM load guard. | Reuse existing behavior/endpoints. Preserve its HTTP inference slot; competing warmup may receive 429. No TTS lifecycle rewrite. |
 | Ollama | Gateway adapter uses `/api/generate`, configured options, top-level `think`, and configured `keep_alive`. No warmup operation. Tracked example is 0s; accepted production setting was finite 5s. | Use native empty `/api/generate` request, no user content, top-level `think:false`, and finite configured keep-alive. Never explicitly unload or change shared service settings. Runtime compatibility remains for M06E. |
 | Text selection | `ordered`, `local_first`, `cloud_first`, explicit model, `local_only`, `allow_cloud`, and typed failure fallback exist. Text request concurrency is limited to one. | Preserve all behavior. Cold/warming local models remain eligible; warmup state does not cause automatic cloud fallback. |
@@ -66,7 +66,7 @@ Internal `POST /internal/v1/warmup` invokes the same load path as first inferenc
 - `/readyz`: worker is serving and can accept bounded on-demand inference/warmup. `unloaded`, `loading`, and safe `unloading` are not by themselves unready; requests may wait/queue within configured bounds.
 - `faulted`, `cleanup_unconfirmed`, draining/stopped, or inability to accept work means not ready.
 - Gateway `/readyz` remains based on required worker availability; ordinary STT idle unload must not flap Gateway readiness.
-- This changes current STT `/readyz` semantics, which presently requires loaded-model READY. Review health probes/operational consumers before M06B implementation. Public inference response schema and normal successful behavior remain compatible.
+- This changes STT `/readyz` semantics from loaded-model readiness to on-demand worker readiness. Gateway compatibility was checked offline; deployment/target probe behavior remains for separately authorized qualification. Public inference response schema and normal successful behavior remain compatible.
 
 ## Public warmup API proposal for M06C
 
@@ -127,10 +127,10 @@ M06 does not add routing behavior. Keep `ordered`, `local_first`, `cloud_first`,
 | Stage | Scope and dependency | Acceptance evidence / gate |
 |---|---|---|
 | **M06A — Architecture and contract finalization** | This documentation-only stage; based on M05B closeout and current implementation. | Operator-approved ADR and plan; aligned lifecycle/readiness/API/routing/resource requirements; no implementation. This document stage is finalized; no milestone closeout is implied. |
-| **M06B — STT lazy loading, idle unloading, reload and readiness** | Depends on M06A approval and separate M06B implementation authorization. | Offline fake-child coverage proves lazy startup, normal first-request load, internal warmup, concurrent load singleflight, active/queued-use protection, 60-second idle behavior, unload/reap, reload, readiness while unloaded, fatal/cleanup-unconfirmed behavior, bounded failure/retry, shutdown and unchanged public inference schema. |
-| **M06C — Gateway warmup API, TTS reuse and Ollama warmup** | Depends on M06B contracts and separate M06C implementation authorization. | Contract-first OpenAPI update and handler/config tests prove strict request validation, auth, multiple/partial outcomes, repeat/concurrency safety, per-operation deadlines, no content generation/transmission, no cloud warmup, TTS endpoint reuse, finite Ollama keep-alive and unchanged M05B routing/fallback. |
-| **M06D — Offline integration and regression verification** | Depends on M06B/M06C implementation. | Run scoped STT/TTS/Gateway/config/API/full repository verification; record exact commands/results and limitations; verify inference from unloaded state and compatibility; prepare reviewed qualification/rollback procedure. No live service action. |
-| **M06E — Operator-authorized live qualification and deployment** | Depends on accepted M06D evidence and separate explicit authorization for each live qualification/deployment action. | Operator selects target and shared-Ollama ownership acceptance, approves run envelope, monitoring, resource sequence, recovery and rollback. Sequential qualification records load/warm/idle/reload, GPU samples, health, Ollama state and unrelated-workload observations. Deployment requires its own explicit scope approval and rollback plan; M06A–D do not authorize it. |
+| **M06B — STT lazy loading, idle unloading, reload and readiness** | M06A approved; implementation authorized by the M06B request. | **ACCEPTED 2026-10-23** for implementation and offline verification, including the documented limitation for non-cooperative native calls. This does not claim live GPU behavior or complete M06. |
+| **M06C — Gateway warmup API, TTS reuse and Ollama warmup** | **Next development stage; requires separate M06C implementation authorization.** | Contract-first OpenAPI update and handler/config tests prove strict request validation, auth, multiple/partial outcomes, repeat/concurrency safety, per-operation deadlines, no content generation/transmission, no cloud warmup, TTS endpoint reuse, finite Ollama keep-alive and unchanged M05B routing/fallback. |
+| **M06D — Offline integration and regression verification** | Depends on M06C implementation in addition to accepted M06B. | Run scoped STT/TTS/Gateway/config/API/full repository verification; record exact commands/results and limitations; verify inference from unloaded state and compatibility; prepare reviewed qualification/rollback procedure. No live service action. |
+| **M06E — Operator-authorized live qualification and deployment** | Depends on accepted M06D evidence and separate explicit authorization for live GPU qualification; deployment separately requires its own explicit authorization. | Operator selects target and shared-Ollama ownership acceptance, approves run envelope, monitoring, resource sequence, recovery and rollback. Sequential qualification records load/warm/idle/reload, GPU samples, health, Ollama state and unrelated-workload observations. M06A–D do not authorize live qualification or deployment. |
 
 ## Acceptance criteria for M06 implementation
 
@@ -142,12 +142,17 @@ M06 does not add routing behavior. Keep `ordered`, `local_first`, `cloud_first`,
 6. Public warmup request/response conforms to the schema and errors above, validates all operations before side effects, supports partial success, and contains no provider internals or user content.
 7. Ollama warmup uses empty native request, no generated user-facing content, `think:false`, finite nonzero keep-alive and no unload action; target-version compatibility is only claimed after separately authorized M06E evidence.
 8. Inference works normally without prior warmup. Existing M05B route ordering, explicit selection, `local_only`, `allow_cloud`, and typed fallback behavior remain unchanged. Cold/warming local state alone never triggers cloud fallback.
+
 9. Resource exhaustion, timeout, disconnect and shutdown do not evict/preempt active models or falsely claim cancellation/release. Partial operation failure leaves successful operations intact.
 10. Offline verification is recorded separately from live GPU qualification. No simultaneous residency or production-readiness claim exceeds evidence.
 
+## M06B implementation evidence
+
+Implemented behavior and offline evidence are recorded in [implementation.md](implementation.md) and [verification.md](verification.md). The operator accepted M06B implementation and offline verification on 2026-10-23. Remaining M06D integration qualification is still required. In particular, live GPU memory/recovery, production health-probe behavior, and load-timeout behavior on the target are not established.
+
 ## Risks and unresolved matters
 
-- **Observed:** STT `/readyz` currently requires loaded model; Gateway readiness includes worker readiness. Update health-probe expectations with M06B.
+- **M06A baseline observed:** STT `/readyz` required a loaded model; M06B changes this to worker availability. Gateway readiness consumes worker `/readyz`; Gateway code was not changed. Target health-probe behavior remains for operator review/qualification.
 - **Observed:** TTS load guard is 8,000 MiB free; Qwen historical sample had 6,270 MiB free. Do not expect Qwen-resident TTS cold load to pass that preflight.
 - **Not established:** model-pair capacity, exact VRAM recovery after object deletion, concurrent external Ollama impact, and installed target support/behavior for empty request with the selected finite keep-alive.
 - **Proposal requiring strict config confirmation:** STT idle timeout 60 seconds (allowed `0..86400`, where zero means unload as soon as safe); Gateway total warmup timeout 180 seconds (`1s..10m`); Ollama keep-alive 60 seconds (finite positive, maximum 24 hours). Historical production `5s` remains recorded and unchanged until authorized configuration work.
@@ -159,7 +164,7 @@ Offline M06D verification must cover lifecycle races, queue/active use, load/rel
 
 Live M06E qualification is not authorized by M06A. If separately authorized, use an operator-reviewed target and run envelope; record per-workload state, finite keep-alive, natural expiry, sampled GPU use/free memory, service health/restarts and recovery. Do not stop or reconfigure shared Ollama, force unload, deploy, or infer unrelated-client safety without the explicit approved scope.
 
-Deployment and milestone closeout each remain separate decisions. Implementation authorization does not authorize commit.
+M06C is the next planned development stage and requires separate authorization. M06D integration verification and M06E live GPU qualification/deployment are not accepted by the M06B decision. Deployment and overall M06 closeout remain separate decisions.
 
 ## References
 

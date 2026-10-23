@@ -6,15 +6,20 @@ import unittest
 from types import SimpleNamespace
 
 from aiohttp import FormData
+from aiohttp.payload import AsyncIterablePayload
 from aiohttp.test_utils import TestClient, TestServer
 
 from services.stt.admission import UploadGate
 from services.stt.domain import (
     FailureCode,
+    OperationContext,
     SpeechFailure,
     TranscriptionResult,
 )
-from services.stt.http_server import create_http_app
+from services.stt.http_server import (
+    _validate_empty_warmup_body,
+    create_http_app,
+)
 
 
 class FakeLifecycle:
@@ -30,7 +35,14 @@ class FakeLifecycle:
 
 
 class FakeApplication:
-    def __init__(self, *, block_until_cancel=False, max_uploads=2, failure=None):
+    def __init__(
+        self,
+        *,
+        block_until_cancel=False,
+        block_warmup=False,
+        max_uploads=2,
+        failure=None,
+    ):
         self.config = SimpleNamespace(
             admission=SimpleNamespace(
                 max_request_bytes=1024,
@@ -42,8 +54,11 @@ class FakeApplication:
         self.lifecycle = FakeLifecycle()
         self.uploads = UploadGate(max_uploads, 1024, 1024, 1024)
         self.block_until_cancel = block_until_cancel
+        self.block_warmup = block_warmup
         self.failure = failure
         self.started = threading.Event()
+        self.warmup_done = threading.Event()
+        self.release_warmup = threading.Event()
         self.cancelled = threading.Event()
 
     def start(self):
@@ -79,6 +94,15 @@ class FakeApplication:
             "en",
             () if timestamps else None,
         )
+
+    def warmup(self, context=None):
+        if self.failure is not None:
+            raise self.failure
+        self.started.set()
+        if self.block_warmup:
+            self.release_warmup.wait(2)
+        self.warmup_done.set()
+        return {"model_state": "ready"}
 
 
 class HTTPTests(unittest.IsolatedAsyncioTestCase):
@@ -117,6 +141,90 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         metrics_body = await metrics.text()
         self.assertIn('speech_stt_requests_total{outcome="success"} 1', metrics_body)
         self.assertNotIn("synthetic transcript", metrics_body)
+
+    async def test_internal_warmup_empty_body_repeat_and_validation(self):
+        headers = {"X-Request-Timeout-Ms": "4000"}
+        first = await self.client.post("/internal/v1/warmup", headers=headers)
+        second = await self.client.post("/internal/v1/warmup", headers=headers)
+        self.assertEqual(first.status, 200)
+        self.assertEqual(await first.json(), {"model_state": "ready"})
+        self.assertEqual(second.status, 200)
+        invalid = await self.client.post(
+            "/internal/v1/warmup", data=b"user content", headers=headers
+        )
+        self.assertEqual(invalid.status, 400)
+
+    async def test_warmup_missing_and_malformed_timeout_are_sanitized_json(self):
+        for headers in (
+            {},
+            {"X-Request-Timeout-Ms": "not-a-number"},
+            {"X-Request-Timeout-Ms": "9" * 40},
+            {"X-Request-Timeout-Ms": "0"},
+        ):
+            response = await self.client.post("/internal/v1/warmup", headers=headers)
+            self.assertEqual(response.status, 400)
+            body = await response.json()
+            self.assertEqual(body["code"], "invalid_input")
+            self.assertNotIn("invalid timeout", body["message"])
+        self.assertFalse(self.application.started.is_set())
+
+    async def test_warmup_oversized_and_chunked_body_rejected_before_loading(self):
+        headers = {"X-Request-Timeout-Ms": "1000"}
+        oversized = await self.client.post(
+            "/internal/v1/warmup", data=b"x" * 2048, headers=headers
+        )
+        self.assertEqual(oversized.status, 413)
+        self.assertEqual((await oversized.json())["code"], "input_limit")
+
+        async def chunks():
+            yield b""
+
+        chunked = await self.client.post(
+            "/internal/v1/warmup",
+            data=AsyncIterablePayload(chunks()),
+            headers=headers,
+        )
+        self.assertEqual(chunked.status, 400)
+        self.assertEqual((await chunked.json())["code"], "invalid_input")
+        self.assertFalse(self.application.started.is_set())
+
+    async def test_warmup_stalled_unknown_length_body_is_bounded(self):
+        class StalledStream:
+            async def read(self, _size):
+                await asyncio.Event().wait()
+
+        request = SimpleNamespace(
+            content_length=None,
+            headers={},
+            can_read_body=True,
+            content=StalledStream(),
+        )
+        with self.assertRaises(SpeechFailure) as caught:
+            await _validate_empty_warmup_body(
+                request,
+                OperationContext(time.monotonic() + 0.05),
+                1024,
+            )
+        self.assertEqual(caught.exception.code, FailureCode.DEADLINE_EXCEEDED)
+        self.assertFalse(self.application.started.is_set())
+
+    async def test_warmup_http_timeout_does_not_cancel_model_load(self):
+        await self.client.close()
+        self.application = FakeApplication(block_warmup=True)
+        self.client = TestClient(TestServer(create_http_app(self.application)))
+        await self.client.start_server()
+        response = await self.client.post(
+            "/internal/v1/warmup", headers={"X-Request-Timeout-Ms": "1"}
+        )
+        self.assertEqual(response.status, 504)
+        self.assertEqual((await response.json())["code"], "deadline_exceeded")
+        self.assertTrue(self.application.started.is_set())
+        self.application.release_warmup.set()
+        self.assertTrue(
+            await asyncio.wait_for(
+                asyncio.to_thread(self.application.warmup_done.wait), 1
+            )
+        )
 
     async def test_source_language_alias_conflict_is_rejected(self):
         form = self.form(timestamps="false")

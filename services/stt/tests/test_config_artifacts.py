@@ -50,6 +50,7 @@ def application_data(**overrides):
             "request_timeout_seconds": 5,
         },
         "lifecycle": {
+            "model_idle_unload_seconds": 60,
             "model_load_timeout_seconds": 2,
             "cooperative_cancel_grace_seconds": 0.1,
             "process_exit_timeout_seconds": 0.5,
@@ -97,6 +98,7 @@ class ConfigValidation(unittest.TestCase):
         self.assertEqual(config.device_preference, ("cpu",))
         self.assertEqual(config.admission.max_queued, 2)
         self.assertEqual(config.admission.max_retained_audio_bytes, 30)
+        self.assertEqual(config.lifecycle.model_idle_unload_seconds, 60)
         self.assertTrue(config.models[0].translation_supported)
         disabled = application_data()
         disabled["models"][0]["translation_supported"] = False
@@ -119,6 +121,25 @@ class ConfigValidation(unittest.TestCase):
             )
             deployed = load_deployment_config(path)
             self.assertIn("primary", deployed.artifact_roots)
+
+    def test_idle_unload_timeout_bounds_and_legacy_default(self):
+        data = application_data()
+        data["lifecycle"].pop("model_idle_unload_seconds")
+        self.assertEqual(self.load_data(data).lifecycle.model_idle_unload_seconds, 60)
+        for value in (0, 60, 86400):
+            with self.subTest(value=value):
+                config_data = application_data()
+                config_data["lifecycle"]["model_idle_unload_seconds"] = value
+                self.assertEqual(
+                    self.load_data(config_data).lifecycle.model_idle_unload_seconds,
+                    value,
+                )
+        for value in (-1, 86401, True, float("nan")):
+            with self.subTest(value=value):
+                config_data = application_data()
+                config_data["lifecycle"]["model_idle_unload_seconds"] = value
+                with self.assertRaises(ValueError):
+                    self.load_data(config_data)
 
     def test_unknown_missing_duplicate_and_unimplemented_values_fail(self):
         data = application_data()

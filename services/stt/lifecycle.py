@@ -61,7 +61,12 @@ class Lifecycle:
 
     def ready(self) -> bool:
         worker, model = self.snapshot()
-        return worker == WorkerState.SERVING and model == ModelState.READY
+        return worker == WorkerState.SERVING and model in {
+            ModelState.UNLOADED,
+            ModelState.LOADING,
+            ModelState.READY,
+            ModelState.UNLOADING,
+        }
 
     def cleanup_unconfirmed(self) -> bool:
         return self.snapshot()[1] == ModelState.CLEANUP_UNCONFIRMED

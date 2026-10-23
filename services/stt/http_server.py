@@ -178,6 +178,7 @@ def create_http_app(application):
                 return web.json_response(
                     {"code": error.code, "message": error.message}, status=status
                 )
+
             except (ConnectionResetError, asyncio.CancelledError):
                 if context is not None:
                     context.cancel()
@@ -218,6 +219,48 @@ def create_http_app(application):
                     status=500,
                 )
 
+    async def warmup(request):
+        context = None
+        worker_task = None
+        try:
+            context = _operation_context(
+                request, application.config.admission.request_timeout_seconds
+            )
+            await _validate_empty_warmup_body(request, context, maximum)
+            worker_task = asyncio.create_task(
+                asyncio.to_thread(application.warmup, context)
+            )
+            while not worker_task.done():
+                if _disconnected(request):
+                    raise ConnectionResetError
+                remaining = _remaining(context)
+                if remaining <= 0:
+                    worker_task.add_done_callback(_consume_task_result)
+                    status, error = safe_error(
+                        SpeechFailure(FailureCode.DEADLINE_EXCEEDED)
+                    )
+                    return web.json_response(
+                        {"code": error.code, "message": error.message}, status=status
+                    )
+                await asyncio.wait({worker_task}, timeout=min(remaining, 0.05))
+            return web.json_response(await worker_task)
+        except SpeechFailure as exc:
+            status, error = safe_error(exc)
+            return web.json_response(
+                {"code": error.code, "message": error.message}, status=status
+            )
+        except (ConnectionResetError, asyncio.CancelledError):
+            if context is not None:
+                context.cancel()
+            if worker_task is not None:
+                worker_task.add_done_callback(_consume_task_result)
+            raise
+        except web.HTTPException:
+            status, error = safe_error(SpeechFailure(FailureCode.INVALID_INPUT))
+            return web.json_response(
+                {"code": error.code, "message": error.message}, status=status
+            )
+
     async def on_startup(_app):
         _app[STARTUP_TASK_KEY] = asyncio.create_task(
             asyncio.to_thread(application.start)
@@ -238,18 +281,41 @@ def create_http_app(application):
     http_app.router.add_get("/readyz", ready)
     http_app.router.add_get("/metrics", prometheus)
     http_app.router.add_post("/internal/v1/transcriptions", transcriptions)
+    http_app.router.add_post("/internal/v1/warmup", warmup)
     return http_app
 
 
 def _operation_context(request, maximum_seconds):
     raw = request.headers.get("X-Request-Timeout-Ms")
-    if raw is None or not raw.isascii() or not raw.isdecimal():
-        raise web.HTTPBadRequest(text="invalid timeout")
-    milliseconds = int(raw)
+    if raw is None or len(raw) > 10 or not raw.isascii() or not raw.isdecimal():
+        raise SpeechFailure(FailureCode.INVALID_INPUT, "request timeout is invalid")
+    try:
+        milliseconds = int(raw)
+    except ValueError as exc:
+        raise SpeechFailure(FailureCode.INVALID_INPUT) from exc
     if milliseconds < 1:
-        raise web.HTTPBadRequest(text="invalid timeout")
+        raise SpeechFailure(FailureCode.INVALID_INPUT, "request timeout is invalid")
     timeout = min(milliseconds / 1000, maximum_seconds)
     return OperationContext(time.monotonic() + timeout)
+
+
+async def _validate_empty_warmup_body(request, context, maximum):
+    if request.content_length is not None and request.content_length > maximum:
+        raise SpeechFailure(FailureCode.INPUT_LIMIT)
+    if request.content_length not in (None, 0):
+        raise SpeechFailure(FailureCode.INVALID_INPUT, "request body must be empty")
+    if request.headers.get("Transfer-Encoding"):
+        raise SpeechFailure(FailureCode.INVALID_INPUT, "request body must be empty")
+    if request.can_read_body:
+        remaining = _remaining(context)
+        if remaining <= 0:
+            raise SpeechFailure(FailureCode.DEADLINE_EXCEEDED)
+        try:
+            body_byte = await asyncio.wait_for(request.content.read(1), remaining)
+        except asyncio.TimeoutError as exc:
+            raise SpeechFailure(FailureCode.DEADLINE_EXCEEDED) from exc
+        if body_byte:
+            raise SpeechFailure(FailureCode.INVALID_INPUT, "request body must be empty")
 
 
 async def _next_part(reader, context, request):
@@ -312,6 +378,13 @@ def _remaining(context):
     if context.deadline is None:
         return float("inf")
     return max(0.0, context.deadline - time.monotonic())
+
+
+def _consume_task_result(task):
+    try:
+        task.result()
+    except Exception:
+        pass
 
 
 def _disconnected(request):

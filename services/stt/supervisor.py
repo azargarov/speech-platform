@@ -64,6 +64,7 @@ class InferenceSupervisor:
         process_control=None,
         response_reader=None,
         response_poller=None,
+        cleanup_event=None,
     ):
         self._factory = backend_factory
         self._selection = selection
@@ -91,7 +92,7 @@ class InferenceSupervisor:
         self._faulted = False
         self._cleanup_unconfirmed = False
         self._monitor_started = False
-        self.cleanup_event = threading.Event()
+        self.cleanup_event = cleanup_event or threading.Event()
         self.cleanup_event.set()
         self.metadata: ModelMetadata | None = None
 
@@ -289,14 +290,23 @@ class InferenceSupervisor:
             )
 
     def shutdown(self, timeout_seconds: float):
-        with self._lock:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        acquired = self._lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
+        if not acquired:
+            # The inference owner still holds the IPC channel. Do not race it;
+            # retain the child and surface that its cleanup is unconfirmed.
+            self._faulted = True
+            self._cleanup_unconfirmed = True
+            self.cleanup_event.clear()
+            return False
+        try:
             if self._closed and not self._cleanup_unconfirmed:
-                return
+                return True
             was_closed = self._closed
             self._closed = True
             if not self._started:
                 self.cleanup_event.set()
-                return
+                return True
             if not was_closed and self._is_alive(self._process) and not self._faulted:
                 try:
                     self._request_pipe.send_bytes(
@@ -305,9 +315,11 @@ class InferenceSupervisor:
                 except (BrokenPipeError, EOFError, OSError):
                     self._faulted = True
             process = self._process
+        finally:
+            self._lock.release()
         stopped_confirmed = False
         if self._is_alive(process) and not self._faulted:
-            wait = min(max(timeout_seconds, 0), self._exit_timeout)
+            wait = min(max(0.0, deadline - time.monotonic()), self._exit_timeout)
             try:
                 if self._poll_response(wait):
                     response = self._read_response()
@@ -318,12 +330,13 @@ class InferenceSupervisor:
             except IPCProtocolError:
                 self._faulted = True
         if stopped_confirmed and self._is_alive(process):
-            self._join_bounded(process, self._exit_timeout)
+            self._join_bounded(process, max(0.0, deadline - time.monotonic()))
         if self._is_alive(process):
             self._faulted = True
-            self._force_reap()
+            self._force_reap(deadline=deadline)
         else:
             self._confirm_exit()
+        return not self._is_alive(process) and not self._cleanup_unconfirmed
 
     def _cancel_failure(self, context, *, retain_resources=False):
         if context.deadline is not None and time.monotonic() >= context.deadline:
@@ -455,7 +468,7 @@ class InferenceSupervisor:
         self._faulted = True
         return self._force_reap()
 
-    def _force_reap(self):
+    def _force_reap(self, deadline=None):
         with self._lock:
             process = self._process
             if process is None:
@@ -469,13 +482,21 @@ class InferenceSupervisor:
                 self._process_control.terminate(process)
             except (OSError, ProcessLookupError):
                 pass
-            self._join_bounded(process, self._exit_timeout)
+            first_wait = self._exit_timeout
+            if deadline is not None:
+                first_wait = min(first_wait, max(0.0, deadline - time.monotonic()))
+            self._join_bounded(process, first_wait)
             if self._is_alive(process):
                 try:
                     self._process_control.kill(process)
                 except (OSError, ProcessLookupError):
                     pass
-                self._join_bounded(process, self._exit_timeout)
+                second_wait = self._exit_timeout
+                if deadline is not None:
+                    second_wait = min(
+                        second_wait, max(0.0, deadline - time.monotonic())
+                    )
+                self._join_bounded(process, second_wait)
             if self._is_alive(process):
                 self._cleanup_unconfirmed = True
                 self.cleanup_event.clear()

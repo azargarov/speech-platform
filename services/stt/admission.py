@@ -247,6 +247,17 @@ class AdmissionController:
         self._closing = False
         self._thread = None
 
+    @contextmanager
+    def acquire_upload(self):
+        """Acquire an upload lease atomically with idle lifecycle reservations."""
+        with self._condition:
+            lease_context = self.uploads.acquire()
+            lease = lease_context.__enter__()
+        try:
+            yield lease
+        finally:
+            lease_context.__exit__(None, None, None)
+
     def start(self):
         with self._condition:
             if self._thread is not None:
@@ -364,6 +375,23 @@ class AdmissionController:
                 "accepting": self._accepting,
             }
 
+    def run_if_idle(self, reserve, callback):
+        """Reserve an idle action under admission lock, then run it lock-free."""
+        with self._condition:
+            if (
+                not self._accepting
+                or self._closing
+                or self._active is not None
+                or self._pending is not None
+                or self._queue
+                or self.uploads.snapshot()["active_uploads"]
+            ):
+                return False
+            if not reserve():
+                return False
+        callback()
+        return True
+
     def latch_fault(self):
         with self._condition:
             self._accepting = False
@@ -379,10 +407,26 @@ class AdmissionController:
             self._condition.notify_all()
         self.uploads.close()
 
+    def fail_admitted(self, failure, finish_generation):
+        """Fail pending and queued work from one failed initialization generation."""
+        with self._condition:
+            if self._pending is not None:
+                job = self._pending
+                self._pending = None
+                self._finish_locked(job, failure=failure)
+            while self._queue:
+                job = self._queue.popleft()
+                self._queued_bytes -= len(job.request.audio)
+                self._finish_locked(job, failure=failure)
+            # Publish UNLOADED while admission is still closed to this transition.
+            finish_generation()
+            self._condition.notify_all()
+
     def close(self, drain_timeout_seconds: float):
+        deadline = time.monotonic() + max(0.0, drain_timeout_seconds)
         with self._condition:
             if self._thread is None:
-                return
+                return True
             self._accepting = False
             self._closing = True
             while self._queue:
@@ -397,15 +441,18 @@ class AdmissionController:
             self._condition.notify_all()
             thread = self._thread
         self.uploads.close()
-        thread.join(timeout=drain_timeout_seconds)
+        thread.join(timeout=max(0.0, (deadline - time.monotonic()) / 2))
         if thread.is_alive():
             with self._condition:
                 active = self._active or self._pending
                 if active is not None:
                     active.context.cancel()
                 self._condition.notify_all()
-            # The daemon admission owner remains latched until cleanup is confirmed.
-            thread.join(timeout=drain_timeout_seconds)
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        with self._condition:
+            admission_idle = self._active is None and self._pending is None
+        thread.join(timeout=0)
+        return admission_idle and not thread.is_alive()
 
     def _run(self):
         while True:
