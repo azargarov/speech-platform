@@ -29,7 +29,7 @@ text_transform:
     - id: host-ollama
       type: ollama
       locality: local
-      endpoint: http://host.docker.internal:11434/api/generate
+      endpoint: http://ollama:11434/api/generate
       timeout: 180s
     - id: groq
       type: openai_compatible

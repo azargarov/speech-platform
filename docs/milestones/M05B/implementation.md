@@ -1,6 +1,6 @@
 # M05B implementation record
 
-Status: **M05B IN PROGRESS; Stage 1 offline implementation PASS and operator-accepted (2026-10-22). No deployment or live inference.**
+Status: **M05B IN PROGRESS; Stage 1 implementation and Stage 2A/2B qualification are operator-accepted. Stage 2A completed all 18 sequential 4K/8K requests; seven outputs per context failed lexical invariants and remain failed. The operator retains local Qwen only for user-reviewed transformations, with no quality guarantee. Stage 2C network provisioning and deployment tooling are implemented and offline-verified. No production Gateway deployment or service restart occurred.**
 
 2026-10-22: inspected architecture, configuration/HTTP code, public OpenAPI,
 canonical and historical Compose patterns, evaluation runners and M05A records.
@@ -16,19 +16,21 @@ inference, deployment, commit or milestone closeout was performed.
 M05A closeout was independently verified in Git: commit
 `a5d22ab2ce7e52b2dc15380b5391832d0523ab8e`, titled `docs: close M05A evaluation`,
 records PASS/COMPLETE and the accepted three-model retention. Its files are not
-being changed. The operator authorized M05B Stage 1 offline implementation.
-Stage 2, deployment, live inference and closeout remain unauthorized. The
-current operator request authorizes a commit of intended Stage 1 implementation
-and documentation files.
+being changed. The operator authorized M05B Stage 1 offline implementation. Later requests
+authorized the bounded Stage 2A and Stage 2B live qualifications, whose results
+were accepted with the limitations recorded in their qualification documents.
+Stage 2C deployment preparation is authorized; deployment and M05B closeout
+remain separately gated. Repository governance requires separate operator
+authorization before committing.
 Record implementation files and deviations below.
 
 ## Stage 1 acceptance — 2026-10-22
 
 The operator accepted Stage 1 with PASS after the implementation and offline
 verification recorded below. No implementation scope change was requested.
-Stage 2 remains pending and unauthorized; this acceptance does not qualify
-live providers, deployment, GPU coexistence, tokenizer/template bounds, model
-unload/cancellation, or production readiness. M05B remains IN PROGRESS.
+Stage 1 acceptance did not qualify live providers, deployment, GPU coexistence,
+tokenizer/template bounds, model unload/cancellation, or production readiness.
+Later bounded qualification results are recorded in the Stage 2A/2B records. M05B remains IN PROGRESS.
 
 ## Stage 1 offline implementation — 2026-10-22
 
@@ -103,3 +105,55 @@ or commit occurred.
 - Design/boundary: this is example configuration and offline budget behavior;
   M05A remains the isolated sequential measurement harness. Actual context
   acceptance, GPU resource impact and Stage 2 suitability remain unmeasured.
+
+## Stage 2A preflight — 2026-10-22
+
+The operator authorized only local Qwen 4K/8K infrastructure qualification.
+Recorded the read-only GPU/Ollama/service baseline and a bounded nine-case
+synthetic English/Swedish/Russian procedure in
+[stage-2a-qualification.md](stage-2a-qualification.md). Prepared the private
+mode-0600 case file under ignored `private/m05a/`; existing M05A case files,
+prompts and run outputs were not modified. The runner's offline validation
+passed. No tracked implementation code changed.
+
+The operator subsequently requested a non-destructive revision that does not
+require exclusive server ownership. The procedure specifies finite
+`keep_alive: "60s"`, no unload requests, sequential 4K/8K runs, pre-run and
+continuous residency/GPU sampling, contamination handling, and explicit
+separation of inference, residency, natural expiry and recovery observations.
+The operator later authorized the bounded comparison. One 4K request returned
+successfully, but a post-response import error in the private harness prevented
+saving its response and token metadata. Execution stopped under the procedure's
+no-retry rule; no 8K comparison request was sent. The Qwen model expired
+naturally and sampled GPU memory returned to baseline. No shared Ollama settings
+or services were changed. Later bounded Stage 2B live qualification was separately authorized and is recorded below.
+
+## Stage 2B offline qualification preparation — 2026-10-22
+
+Added only test coverage to the existing Stage 1 Go test files: full option
+forwarding across all 36 supported transformation/format/language combinations,
+the configured reasoning payload fields for both retained Groq models, and an
+authenticated generated request through the public Gateway handler using a
+fake provider. No production Go source, API contract, production configuration,
+Compose file or running service was changed. The private isolated profile and
+bounded live proposal are recorded in
+[stage-2b-qualification.md](stage-2b-qualification.md). Live inference,
+deployment and M05B closeout remain pending separate operator decisions.
+
+## Stage 2A resumed execution — 2026-10-22
+
+After the operator accepted the root-cause analysis and offline regression
+results, formatted the existing private runner, fixed its repository-root
+import path, and preserved the earlier run artifacts by directing resumed
+evidence to a fresh private directory. The tracked response helper persists
+the bounded raw body before parsing and invariant checks. Its quality-failure
+classification does not abort the corpus; harness, completion and infrastructure
+failures still stop execution. Ruff lint/format, actual-path import verification,
+four response-helper regression tests and the nine-case offline corpus check
+passed before inference.
+
+The bounded 4K then 8K run completed all 18 requests with no monitor errors or
+abort conditions. Responses, measurements and a private output review are in
+[stage-2a-qualification.md](stage-2a-qualification.md). No unload, restart,
+deployment or shared Ollama configuration change occurred. Stage 2A operator
+acceptance with limitations and Stage 2B are now operator-accepted; deployment and closeout remain separately gated.

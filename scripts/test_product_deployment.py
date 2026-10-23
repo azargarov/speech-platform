@@ -1,15 +1,197 @@
 import json
 import errno
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+import os
 
 from scripts import product_deployment
 
 
 class ProductDeploymentTests(unittest.TestCase):
+    def test_plan_reports_local_ollama_requirement_from_selected_config(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "gateway.yaml"
+            config.write_text(
+                """text_transform:
+  enabled: true
+  providers:
+    - {id: local, type: ollama, locality: local, endpoint: http://ollama:11434/api/generate}
+  models:
+    - {id: model, provider: local, enabled: true}
+"""
+            )
+            values = {
+                "COMPOSE_PROJECT_NAME": "speech-platform",
+                "SPEECH_BIND_IP": "127.0.0.1",
+                "SPEECH_PORT": "8080",
+                "MODEL_STORE": "/models",
+                "OLLAMA_NETWORK_NAME": "speech-platform_ollama_private",
+                "OLLAMA_CONTAINER_NAME": "ollama",
+            }
+            with (
+                patch.object(sys, "argv", ["product_deployment.py", "plan"]),
+                patch.object(
+                    product_deployment,
+                    "checks",
+                    return_value=(values, "revision", "compose", "gpu", 0),
+                ),
+                patch.object(
+                    product_deployment, "gateway_config_path", return_value=config
+                ),
+                patch("builtins.print") as output,
+            ):
+                self.assertEqual(product_deployment.main(), 0)
+            rendered = " ".join(str(call.args[0]) for call in output.call_args_list)
+            self.assertIn("Local Ollama: enabled", rendered)
+            self.assertIn("speech-platform_ollama_private", rendered)
+
+    def test_ollama_network_is_selected_only_for_enabled_local_ollama_models(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "gateway.yaml"
+            config.write_text("listen_port: 8080\n")
+            self.assertFalse(product_deployment.gateway_uses_local_ollama(config))
+            config.write_text(
+                """text_transform:
+  enabled: false
+  providers:
+    - {id: local, type: ollama, locality: local, endpoint: http://ollama:11434/api/generate}
+  models:
+    - {id: model, provider: local, enabled: true}
+"""
+            )
+            self.assertFalse(product_deployment.gateway_uses_local_ollama(config))
+            config.write_text(
+                """text_transform:
+  enabled: true
+  providers:
+    - {id: cloud, type: openai_compatible, locality: cloud, endpoint: https://example.invalid/v1/chat/completions}
+  models:
+    - {id: model, provider: cloud, enabled: true}
+"""
+            )
+            self.assertFalse(product_deployment.gateway_uses_local_ollama(config))
+            config.write_text(
+                """text_transform:
+  enabled: true
+  providers:
+    - {id: local, type: ollama, locality: local, endpoint: http://ollama:11434/api/generate}
+  models:
+    - {id: model, provider: local, enabled: true}
+"""
+            )
+            self.assertTrue(product_deployment.gateway_uses_local_ollama(config))
+
+    def test_local_ollama_config_requires_the_network_alias_and_port(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "gateway.yaml"
+            config.write_text(
+                """text_transform:
+  enabled: true
+  providers:
+    - {id: local, type: ollama, locality: local, endpoint: http://host.docker.internal:11434/api/generate}
+  models:
+    - {id: model, provider: local, enabled: true}
+"""
+            )
+            with self.assertRaisesRegex(
+                product_deployment.OperatorError, "ollama:11434"
+            ):
+                product_deployment.gateway_uses_local_ollama(config)
+
+    def test_gateway_config_override_is_resolved_inside_repository(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            private = root / "private" / "deployment"
+            private.mkdir(parents=True)
+            configs = root / "configs"
+            configs.mkdir()
+            (configs / "gateway.yaml").write_text("listen_port: 8080\n")
+            config = private / "gateway.yaml"
+            config.write_text("listen_port: 8080\n")
+            with patch.object(product_deployment, "ROOT", root):
+                resolved = product_deployment.gateway_config_path(
+                    {"GATEWAY_CONFIG": "private/deployment/gateway.yaml"}
+                )
+                self.assertEqual(resolved, config.resolve())
+                self.assertFalse(product_deployment.gateway_uses_local_ollama(resolved))
+
+                outside = root.parent / "outside-gateway.yaml"
+                outside.write_text("listen_port: 8080\n")
+                with self.assertRaisesRegex(
+                    product_deployment.OperatorError, "inside the repository"
+                ):
+                    product_deployment.gateway_config_path(
+                        {"GATEWAY_CONFIG": str(outside)}
+                    )
+
+                with self.assertRaisesRegex(
+                    product_deployment.OperatorError, "parent-directory traversal"
+                ):
+                    product_deployment.gateway_config_path(
+                        {"GATEWAY_CONFIG": "private/../configs/gateway.yaml"}
+                    )
+
+                link = private / "linked.yaml"
+                link.symlink_to(config)
+                with self.assertRaisesRegex(
+                    product_deployment.OperatorError, "symlinks"
+                ):
+                    product_deployment.gateway_config_path(
+                        {"GATEWAY_CONFIG": str(link)}
+                    )
+
+    def test_compose_uses_optional_overlay_only_for_local_ollama(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_dir = root / "configs"
+            config_dir.mkdir()
+            gateway_config = config_dir / "gateway.yaml"
+            gateway_config.write_text("listen_port: 8080\n")
+            values = {}
+            with (
+                patch.object(product_deployment, "ROOT", root),
+                patch.object(
+                    product_deployment,
+                    "COMPOSE",
+                    ["docker", "compose", "-f", "root.yaml"],
+                ),
+                patch.object(
+                    product_deployment,
+                    "run",
+                    return_value=SimpleNamespace(returncode=0),
+                ) as run,
+                patch.dict(os.environ, {}, clear=False),
+            ):
+                product_deployment.compose(values, "revision", "config", "--quiet")
+                self.assertNotIn("compose.ollama.yaml", run.call_args.args[0])
+                gateway_config.write_text(
+                    """text_transform:
+  enabled: true
+  providers:
+    - {id: local, type: ollama, locality: local, endpoint: http://ollama:11434/api/generate}
+  models:
+    - {id: model, provider: local, enabled: true}
+"""
+                )
+                product_deployment.compose(values, "revision", "config", "--quiet")
+                self.assertTrue(
+                    any("compose.ollama.yaml" in arg for arg in run.call_args.args[0])
+                )
+
+                private_config = root / "private" / "gateway.yaml"
+                private_config.parent.mkdir()
+                private_config.write_text(gateway_config.read_text())
+                values["GATEWAY_CONFIG"] = str(private_config)
+                product_deployment.compose(values, "revision", "config", "--quiet")
+                self.assertEqual(os.environ["GATEWAY_CONFIG"], str(private_config))
+                self.assertTrue(
+                    any("compose.ollama.yaml" in arg for arg in run.call_args.args[0])
+                )
+
     def test_gateway_port_preflight_accepts_a_free_port(self):
         probe = SimpleNamespace(bind=lambda _address: None, close=lambda: None)
         with (

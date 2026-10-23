@@ -1,0 +1,17 @@
+# M05B Stage 2C Gateway-only deployment overlay.
+# Supply M05B_GATEWAY_IMAGE and M05B_GATEWAY_CONFIG from a reviewed release
+# directory. This overlay does not change STT, TTS, shared Ollama, or cloud
+# permission; the supplied Gateway config controls text-transform policy.
+services:
+  gateway:
+    image: ${M05B_GATEWAY_IMAGE:?set a uniquely tagged, verified Gateway image}
+    build: !reset null
+    volumes:
+      - ${M05B_GATEWAY_CONFIG:?set the private, validated Gateway config}:/config/gateway.yaml:ro
+    networks:
+      - ollama_private
+
+networks:
+  ollama_private:
+    external: true
+    name: speech-platform_ollama_private

@@ -14,7 +14,7 @@ services:
       SPEECH_LISTEN_PORT: "8080"
       SPEECH_API_TOKEN: "${SPEECH_API_TOKEN:-}"
     volumes:
-      - ./configs/gateway.yaml:/config/gateway.yaml:ro
+      - ${GATEWAY_CONFIG:-./configs/gateway.yaml}:/config/gateway.yaml:ro
     depends_on:
       stt:
         condition: service_healthy

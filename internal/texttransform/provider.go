@@ -73,9 +73,6 @@ func (g HTTPGenerator) generate(ctx context.Context, p config.TextProvider, m co
 			keepWire = 0
 		}
 		params := map[string]any{"num_ctx": m.ContextLimitTokens, "num_predict": op.NumPredict, "num_batch": op.NumBatch, "num_thread": op.NumThread}
-		if op.Think != nil {
-			params["think"] = *op.Think
-		}
 		if op.Temperature != nil {
 			params["temperature"] = *op.Temperature
 		}
@@ -85,7 +82,11 @@ func (g HTTPGenerator) generate(ctx context.Context, p config.TextProvider, m co
 		if op.Seed != nil {
 			params["seed"] = *op.Seed
 		}
-		payload = map[string]any{"model": m.Model, "system": system, "prompt": userPrompt(input, options), "stream": false, "keep_alive": keepWire, "options": params}
+		body := map[string]any{"model": m.Model, "system": system, "prompt": userPrompt(input, options), "stream": false, "keep_alive": keepWire, "options": params}
+		if op.Think != nil {
+			body["think"] = *op.Think
+		}
+		payload = body
 	} else {
 		op := m.Parameters.OpenAI
 		msg := []map[string]string{{"role": "system", "content": system}, {"role": "user", "content": userPrompt(input, options)}}

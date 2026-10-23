@@ -1,0 +1,11 @@
+# Include only when configs/gateway.yaml enables a local Ollama-backed model.
+# scripts/product_deployment.py prepares this external internal network first.
+services:
+  gateway:
+    networks:
+      - ollama_private
+
+networks:
+  ollama_private:
+    external: true
+    name: ${OLLAMA_NETWORK_NAME:-speech-platform_ollama_private}

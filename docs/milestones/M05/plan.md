@@ -1,6 +1,6 @@
 # M05 — Voice dictation and text transformation
 
-Status: **Umbrella roadmap: M05A evaluation complete and closed; M05B Stage 1 offline implementation PASS and operator-accepted (2026-10-22). Stage 2 remains unauthorized. Clients remain future work. This work is outside STT v1 acceptance.**
+Status: **Umbrella roadmap: M05A evaluation complete and closed; M05B Stage 1 and Stage 2A/2B are operator-accepted. The 4K/8K comparison completed all 18 requests with natural expiry and GPU recovery. Seven outputs per context failed lexical invariants and remain failed; local Qwen is retained only for user-reviewed transformations, with no quality guarantee. Stage 2C deployment remains separately gated. Clients remain future work. This work is outside STT v1 acceptance.**
 
 ## Current planning slice — 2026-10-22
 
@@ -16,14 +16,14 @@ assumption below for M05B. Those earlier ideas are historical future options,
 not an existing public API. The operator retains all three evaluated Qwen/GPT-OSS
 options subject to user review of generated text. M05A is closed for its
 bounded evaluation scope, with known limitations recorded in its result.
-M05B has two acceptance stages: offline implementation and live qualification;
+M05B has an offline implementation gate, a bounded Stage 2A local qualification, and a separately authorized Stage 2B live-service qualification;
 its revised plan addresses Astra findings A–I, including speech availability
 with missing optional keys and a shared-GPU gate on local production use.
 See [ADR 0021](../../adr/0021-configurable-text-transformation.md).
 This planning update authorized no M05B implementation or deployment. Stage 1
-implementation is now accepted; the current operator request separately
-authorizes its scoped commit. Stage 2 and milestone advancement remain
-unauthorized.
+implementation is operator-accepted. Stage 2A is accepted with the limitations
+recorded in its qualification; Stage 2B technical qualification is accepted PASS.
+Stage 2C deployment and M05B closeout remain unauthorized.
 
 ## Purpose
 

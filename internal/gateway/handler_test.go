@@ -14,6 +14,48 @@ import (
 	"speech-platform/internal/texttransform"
 )
 
+type gatewayFakeGenerator struct{ calls []string }
+
+func (g *gatewayFakeGenerator) Generate(_ context.Context, _ config.TextProvider, m config.TextModel, _, _, _, _ string) (string, error) {
+	g.calls = append(g.calls, m.ID)
+	return "synthetic fake response", nil
+}
+
+func TestTextTransformationRunsThroughPublicGatewayRouteWithFakeProvider(t *testing.T) {
+	cfg, err := config.Load("../../configs/gateway-text.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const token = "01234567890123456789012345678901"
+	generator := &gatewayFakeGenerator{}
+	service, err := texttransform.New(context.Background(), cfg.TextTransform, token, generator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	h := HandlerWithWorkersAndText(Foundation{}, config.PublicMaxRequestBytes, nil, nil, service)
+
+	unauthorized := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/text/transformations", strings.NewReader(`{"text":"Synthetic note","model":"local-qwen"}`))
+	r.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(unauthorized, r)
+	if unauthorized.Code != http.StatusUnauthorized || len(generator.calls) != 0 {
+		t.Fatalf("unauthorized status=%d provider calls=%v", unauthorized.Code, generator.calls)
+	}
+
+	response := httptest.NewRecorder()
+	r = httptest.NewRequest(http.MethodPost, "/v1/text/transformations", strings.NewReader(`{"text":"Synthetic note; keep November 18 unchanged.","mode":"diplomatic","format":"structured","target_language":"sv","model":"local-qwen","local_only":true}`))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Authorization", "Bearer "+token)
+	h.ServeHTTP(response, r)
+	if response.Code != http.StatusOK || len(generator.calls) != 1 || generator.calls[0] != "local-qwen" {
+		t.Fatalf("status=%d provider calls=%v body=%s", response.Code, generator.calls, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"provider":"host-ollama"`) || !strings.Contains(response.Body.String(), `"fallback_occurred":false`) {
+		t.Fatalf("unexpected response metadata: %s", response.Body.String())
+	}
+}
+
 func TestTextTransformationRouteUsesSharedGatewayAndBearerBoundary(t *testing.T) {
 	disabled := false
 	cfg := &config.TextTransform{Enabled: &disabled}

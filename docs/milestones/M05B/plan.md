@@ -1,6 +1,6 @@
 # M05B — Configurable text transformation and translation
 
-Status: **M05B IN PROGRESS; Stage 1 — Offline Implementation PASS and operator-accepted (2026-10-22). Stage 2 is pending and not authorized. Deployment, live inference and closeout are not authorized.**
+Status: **M05B IN PROGRESS; Stage 1 — Offline Implementation PASS and operator-accepted (2026-10-22). Stage 2A completed all nine synthetic cases at 4K and 8K with natural GPU recovery; seven outputs per context failed lexical invariants and remain failed. The operator accepts retaining local Qwen only for user-reviewed transformations; this is not a quality pass or a guarantee of meaning preservation or multilingual quality. Stage 2B bounded live model compatibility and consolidated offline compiled-Gateway integration acceptance PASS and are operator-accepted. Stage 2C deployment preparation is complete for review; production deployment and M05B closeout remain unauthorized.**
 
 ## Scope, prior decision and gates
 
@@ -17,10 +17,11 @@ record PASS/COMPLETE and explicit operator approval. Its bounded quality evidenc
 and limitations remain unchanged: generated text requires user review, and
 completion does not establish production readiness, account cost suitability,
 independent linguistic validation or safe LLM/TTS concurrency. M05B Stage 1
-offline implementation is explicitly authorized. No deployment, live
-inference, Stage 2 or M05B closeout is authorized. Stage 1 commit authorization
-is provided by the current operator request and is limited to intended Stage 1
-implementation and documentation files.
+offline implementation was explicitly authorized and accepted. The bounded
+Stage 2A and Stage 2B qualifications are complete and operator-accepted. Stage
+2C source and deployment preparation is authorized, but production deployment
+requires separate operator authorization. M05B closeout remains unauthorized.
+Repository governance requires separate operator authorization before commits.
 
 Include direct text rewriting/translation through Gateway, validated provider
 and model configuration, explicit selection, stable ordering, bounded fallback,
@@ -691,14 +692,21 @@ capacity; capacity/cost and cloud permission remain deployment decisions.
 
 ## 9. Implementation stages and expected files
 
-Keep **one M05B milestone with two acceptance stages**. Stage 1 offline
-implementation is authorized by the operator; Stage 2 is not. No automatic
-deployment, closeout or commit.
+Keep **one M05B milestone with staged acceptance gates**. Stage 1 offline
+implementation is PASS and operator-accepted. Stage 2A completed its sequential
+4K/8K comparison with all 18 responses saved; seven outputs per context failed
+lexical invariants and remain failed. The operator accepts Qwen only for
+user-reviewed transformations. Stage 2B live provider compatibility and
+consolidated offline compiled-Gateway acceptance are operator-accepted PASS.
+Stage 2C deployment preparation is under review; deployment and closeout remain
+separate, unauthorized gates.
+No automatic closeout or commit.
 
 | Stage | Work / expected files | Exit evidence |
 | --- | --- | --- |
 | Stage 1 — Offline implementation | Extend `internal/config/config.go` and tests; add cohesive `internal/texttransform/` options, service, selection, prompt, errors and two adapters with standard Go HTTP and existing YAML. Add non-secret example. Update `api/openapi/public-v1.yaml` before the handler; wire service lifetime in `cmd/gateway/main.go`, additive handler/route limits in `internal/gateway/`, and contract/auth tests. Prepare minimal Compose/env overlay, config checks and runbook artifacts offline as needed for Stage 2. | Strict config, context arithmetic, fake-server adapters, table-driven fallback, auth, shutdown/cancellation, privacy and regression evidence. Full `make verify` **plus dedicated TTS/SSML suite**. No live providers or deployment. Stop for review before Stage 2. |
-| Stage 2 — Live qualification | Review concrete Gateway-only rollout/rollback, then separately authorized controlled deployment; qualify local Ollama and both Groq models, tokenizer/template bounds, both fallback directions, permissions, resource coexistence, remote cancellation/shutdown and speech regression. Maintain `docs/operations/text-transformation.md` and architecture overview alongside actual changes. | All bounded live cases in user-validation.md; operator text review; production restrictions/policy if GPU coexistence fails; rollback verification; explicit operator acceptance. A Stage 1 pass alone is not M05B completion. |
+| Stage 2A — Local Qwen infrastructure | Use a sequential no-unload harness for one 4K then one 8K run of the same nine private synthetic English/Swedish/Russian cases. Specify finite `keep_alive: "60s"`; record baseline/peak/post-run GPU memory and residency, request timing, prompt counts, completion, natural expiry and confirmed recovery. Detect contamination and stop when attribution is unsafe. Do not deploy or run simultaneous speech inference. | [Stage 2A qualification record](stage-2a-qualification.md); no exclusive ownership of Ollama is required, but safe request/GPU attribution is. Standalone results do not establish GPU coexistence. Cold-start and forced-unload behavior are unmeasurable in this procedure. |
+| Stage 2B — Gateway integration qualification | Offline fake-provider API acceptance plus separately authorized bounded sequential calls through the isolated Gateway to each retained model; review wire settings, public metadata and synthetic output. Excludes production rollout and concurrent TTS/LLM inference. | [Stage 2B qualification record](stage-2b-qualification.md); consolidated offline and live compatibility evidence is operator-accepted PASS. Deployment, broader GPU coexistence and final M05B acceptance remain separate gates. |
 
 Maintain these milestone records and ADR 0021 alongside actual changes. Do not
 modify M05A runners/prompts/results or old deployment profiles merely to share
@@ -779,10 +787,12 @@ Only these decisions require operator input before their dependent action:
 1. **M05A formal disposition:** **COMPLETE** in commit
    `a5d22ab2ce7e52b2dc15380b5391832d0523ab8e`; the accepted three-model decision
    and documented quality limitations remain unchanged.
-2. **Implementation authorization:** **Stage 1 authorized, implemented and
-   operator-accepted PASS (2026-10-22).** The current operator request
-   separately authorizes the scoped Stage 1 commit. This does not authorize
-   deployment, Stage 2 or closeout.
+2. **Stage authorization:** **Stage 1, Stage 2A and Stage 2B are
+   operator-accepted within their recorded scopes (2026-10-22).** The resumed
+   Stage 2A run completed all 18 requests and recorded model-quality failures
+   separately from operational status. Seven lexical failures per context
+   remain failed; Qwen is retained only for user-reviewed transformations.
+   Stage 2C deployment and closeout remain unauthorized.
 3. **Deployment privacy choice:** select production `allow_cloud` and initial
    policy. Recommended shipped default is `allow_cloud: false`, `ordered`,
    automatic fallback. The example uses those defaults.
@@ -822,4 +832,7 @@ established, keep affected models disabled and report the limitation. Production
 cloud permission/policy, any restricted local operating policy and later
 deployment authorization remain explicit operator decisions. M05A closeout is
 complete. Stage 1 implementation and offline verification are operator-accepted
-PASS; do not deploy or start Stage 2 without separate authorization.
+PASS. Stage 2A is accepted with limitations; seven lexical invariant failures
+per context remain failed and generated text requires user review. Stage 2B live
+compatibility and offline integration acceptance are operator-accepted PASS.
+Stage 2C deployment and M05B closeout remain separate authorization gates.

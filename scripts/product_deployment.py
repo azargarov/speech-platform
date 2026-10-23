@@ -17,6 +17,13 @@ from urllib.parse import urlparse
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+import yaml
+
+if __package__:
+    from . import ollama_network
+else:
+    import ollama_network
+
 ROOT = Path(__file__).resolve().parents[1]
 DIGEST = "86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6"
 TTS_DIGEST = "04d6e05b69b22568030ac21f494e406ffdf2d06efeeab43cfdb4c21ba8c9bd41"
@@ -52,6 +59,9 @@ ALLOWED_ENV = {
     "TTS_PIDS_LIMIT",
     "TTS_STOP_GRACE_PERIOD",
     "SPEECH_API_URL",
+    "GATEWAY_CONFIG",
+    "OLLAMA_CONTAINER_NAME",
+    "OLLAMA_NETWORK_NAME",
 }
 
 
@@ -96,11 +106,108 @@ def load_env() -> dict[str, str]:
 def set_compose_env(values: dict[str, str], source_revision: str) -> None:
     os.environ.update(values)
     os.environ["SOURCE_REVISION"] = source_revision
+    os.environ["GATEWAY_CONFIG"] = str(gateway_config_path(values))
 
 
 def compose(values, revision, *args, capture=False):
     set_compose_env(values, revision)
-    return run([*COMPOSE, *args], capture=capture)
+    command = list(COMPOSE)
+    if gateway_uses_local_ollama(gateway_config_path(values)):
+        command.extend(["-f", str(ROOT / "deployments/compose/compose.ollama.yaml")])
+    return run([*command, *args], capture=capture)
+
+
+def gateway_config_path(values: dict[str, str]) -> Path:
+    """Resolve a tracked or private Gateway config without following symlinks."""
+    configured = Path(values.get("GATEWAY_CONFIG", "configs/gateway.yaml"))
+    source = configured if configured.is_absolute() else ROOT / configured
+    root = ROOT.resolve()
+    try:
+        resolved = source.resolve(strict=True)
+    except OSError as exc:
+        raise OperatorError("configured Gateway config file was not found") from exc
+    if not resolved.is_relative_to(root) or not resolved.is_file():
+        raise OperatorError("GATEWAY_CONFIG must identify a file inside the repository")
+
+    current = root
+    try:
+        relative = source.absolute().relative_to(root)
+    except ValueError as exc:
+        raise OperatorError("GATEWAY_CONFIG must be inside the repository") from exc
+    if ".." in relative.parts:
+        raise OperatorError("GATEWAY_CONFIG must not use parent-directory traversal")
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise OperatorError("GATEWAY_CONFIG must not traverse symlinks")
+    return resolved
+
+
+def gateway_uses_local_ollama(config_path: Path | None = None) -> bool:
+    """Select the optional Ollama network only for an enabled local model."""
+    path = config_path or gateway_config_path({})
+    try:
+        document = yaml.safe_load(path.read_text())
+    except (OSError, yaml.YAMLError) as exc:
+        raise OperatorError(f"could not read Gateway config {path}") from exc
+    if not isinstance(document, dict):
+        raise OperatorError("Gateway config must contain a YAML mapping")
+    transform = document.get("text_transform")
+    if transform is None:
+        return False
+    if not isinstance(transform, dict):
+        raise OperatorError("text_transform config must be a mapping")
+    if transform.get("enabled") is not True:
+        return False
+    providers = transform.get("providers") or []
+    models = transform.get("models") or []
+    if not isinstance(providers, list) or not isinstance(models, list):
+        raise OperatorError("text_transform providers and models must be lists")
+    provider_by_id = {
+        item.get("id"): item for item in providers if isinstance(item, dict)
+    }
+    active = False
+    for model in models:
+        if not isinstance(model, dict) or model.get("enabled") is not True:
+            continue
+        provider = provider_by_id.get(model.get("provider"))
+        if (
+            not provider
+            or provider.get("type") != "ollama"
+            or provider.get("locality") != "local"
+        ):
+            continue
+        try:
+            endpoint = urlparse(str(provider.get("endpoint", "")))
+            port = endpoint.port
+        except ValueError as exc:
+            raise OperatorError(
+                "enabled local Ollama provider endpoint is invalid"
+            ) from exc
+        if (
+            endpoint.scheme != "http"
+            or endpoint.hostname != "ollama"
+            or port != 11434
+            or endpoint.username
+            or endpoint.password
+            or endpoint.query
+            or endpoint.fragment
+        ):
+            raise OperatorError(
+                "enabled local Ollama providers must use http://ollama:11434"
+            )
+        active = True
+    return active
+
+
+def prepare_local_ollama(values: dict[str, str]) -> dict[str, str]:
+    try:
+        return ollama_network.prepare_network(
+            values.get("OLLAMA_NETWORK_NAME", ollama_network.DEFAULT_NETWORK),
+            values.get("OLLAMA_CONTAINER_NAME", ollama_network.DEFAULT_CONTAINER),
+        )
+    except ollama_network.NetworkError as exc:
+        raise OperatorError(str(exc)) from exc
 
 
 def verify_project_ownership(values):
@@ -191,8 +298,8 @@ def check_gateway_port(ip: str, port: int, values, owns_project: bool) -> None:
     raise OperatorError(f"Gateway port {ip}:{port} is already in use")
 
 
-def parse_compose_readiness(output: str) -> list[dict]:
-    expected = {"gateway", "stt", "tts"}
+def parse_compose_readiness(output: str, expected=None) -> list[dict]:
+    expected = expected or {"gateway", "stt", "tts"}
     try:
         services = json.loads(output or "[]")
     except json.JSONDecodeError:
@@ -214,6 +321,21 @@ def parse_compose_readiness(output: str) -> list[dict]:
     if len(names) != len(set(names)) or set(names) != expected:
         raise OperatorError("Compose readiness response had an unexpected service set")
     return services
+
+
+def require_existing_workers_healthy(values, revision) -> None:
+    set_compose_env(values, revision)
+    result = run([*COMPOSE, "ps", "--format", "json", "stt", "tts"], capture=True)
+    services = parse_compose_readiness(result.stdout, expected={"stt", "tts"})
+    healthy = {
+        item.get("Service")
+        for item in services
+        if item.get("State") == "running" and item.get("Health") == "healthy"
+    }
+    if healthy != {"stt", "tts"}:
+        raise OperatorError(
+            "Gateway-only install requires the existing STT and TTS services to be healthy"
+        )
 
 
 def checks(
@@ -294,6 +416,13 @@ def checks(
         <= 2147483647
     ):
         raise OperatorError("TTS_MODEL_READ_GID must be in 1..2147483647")
+    try:
+        ollama_network.validate_names(
+            values.get("OLLAMA_NETWORK_NAME", ollama_network.DEFAULT_NETWORK),
+            values.get("OLLAMA_CONTAINER_NAME", ollama_network.DEFAULT_CONTAINER),
+        )
+    except ollama_network.NetworkError as exc:
+        raise OperatorError(str(exc)) from exc
     if "SPEECH_API_URL" in values:
         parsed_api = urlparse(values["SPEECH_API_URL"])
         if (
@@ -391,7 +520,7 @@ def checks(
             "run",
             "./cmd/gateway",
             "--config",
-            "configs/gateway.yaml",
+            str(gateway_config_path(values)),
             "--check-config",
         ]
     )
@@ -548,6 +677,9 @@ def main() -> int:
     parser.add_argument(
         "command", choices=("plan", "install", "status", "logs", "test-stt")
     )
+    parser.add_argument(
+        "--service", choices=("gateway",), help="limit install to Gateway"
+    )
     parser.add_argument("--audio", type=Path)
     parser.add_argument(
         "--source-language", choices=("auto", "ru", "en", "sv"), default="auto"
@@ -570,15 +702,51 @@ def main() -> int:
                 f"Plan: project={values.get('COMPOSE_PROJECT_NAME', 'speech-platform')} API={endpoint} model={values['MODEL_STORE']}/{DIGEST}"
             )
             print(f"Selected GPU compute processes: {active_gpu_processes}")
+            if gateway_uses_local_ollama(gateway_config_path(values)):
+                print(
+                    "Local Ollama: enabled; install will prepare network "
+                    f"{values.get('OLLAMA_NETWORK_NAME', ollama_network.DEFAULT_NETWORK)} "
+                    "and attach container "
+                    f"{values.get('OLLAMA_CONTAINER_NAME', ollama_network.DEFAULT_CONTAINER)}."
+                )
+            else:
+                print("Local Ollama: disabled; no Ollama network changes are needed.")
             print("No containers were started or changed.")
         elif args.command == "install":
             values, revision, _version, _gpu, _processes = checks(
                 require_clean=True, require_idle_gpu=True
             )
-            compose(values, revision, "build", "gateway", "stt", "tts")
+            if args.service == "gateway":
+                require_existing_workers_healthy(values, revision)
+            if gateway_uses_local_ollama(gateway_config_path(values)):
+                network_result = prepare_local_ollama(values)
+                print(
+                    "Ollama network: "
+                    f"{network_result['network']} {network_result['network_name']}; "
+                    f"container {network_result['attachment']} "
+                    f"{network_result['container_name']}"
+                )
+            services = (args.service,) if args.service else ("gateway", "stt", "tts")
+            compose(values, revision, "build", *services)
             checks(require_clean=True, require_idle_gpu=True)
-            compose(values, revision, "up", "-d")
+            if args.service == "gateway":
+                compose(values, revision, "up", "-d", "--no-deps", "gateway")
+            else:
+                compose(values, revision, "up", "-d")
             wait_ready(int(values["SPEECH_PORT"]), values["SPEECH_BIND_IP"])
+            if gateway_uses_local_ollama(gateway_config_path(values)):
+                compose(
+                    values,
+                    revision,
+                    "run",
+                    "--rm",
+                    "--no-deps",
+                    "-T",
+                    "gateway",
+                    "--config",
+                    "/config/gateway.yaml",
+                    "--check-ollama",
+                )
             endpoint = values.get(
                 "SPEECH_API_URL",
                 f"http://{values['SPEECH_BIND_IP']}:{values['SPEECH_PORT']}",

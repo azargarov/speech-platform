@@ -26,6 +26,7 @@ func main() {
 func run() error {
 	path := flag.String("config", "", "required YAML config path")
 	check := flag.Bool("check-config", false, "validate configuration and exit")
+	checkOllama := flag.Bool("check-ollama", false, "verify configured local Ollama DNS, TCP and version endpoint")
 	flag.Parse()
 	c, e := config.Load(*path)
 	if e != nil {
@@ -35,6 +36,13 @@ func run() error {
 		return fmt.Errorf("configuration: %w", err)
 	}
 	if *check {
+		return nil
+	}
+	if *checkOllama {
+		if err := texttransform.CheckLocalOllama(context.Background(), c.TextTransform); err != nil {
+			return err
+		}
+		fmt.Println("PASS: local Ollama DNS, TCP and /api/version")
 		return nil
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))

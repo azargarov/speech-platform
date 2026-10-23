@@ -1,11 +1,12 @@
 # M05B operator validation plan
 
-Status: **Stage 1 implementation: PASS, operator-accepted 2026-10-22. Stage 2 and live execution remain pending and are not authorized. M05B remains IN PROGRESS.**
+Status: **Stage 1 implementation: PASS, operator-accepted 2026-10-22. Stage 2A's bounded result is accepted with limitations: local Qwen is retained only for user-reviewed transformations; seven outputs at each context failed lexical invariants and remain failed. Stage 2B technical integration qualification is operator-accepted PASS. Production deployment and M05B closeout remain unauthorized.**
 
 First review [plan.md](plan.md), [ADR 0021](../../adr/0021-configurable-text-transformation.md),
 and Stage 1 evidence. M05A formal closeout is complete and remains unchanged.
-Deployment/live validation requires its own reviewed scope, target identity,
-synthetic-data disclosure and rollback inputs. No service failure is simulated
+Deployment and live qualification beyond the bounded Stage 2A scope require
+their own reviewed scope, target identity, synthetic-data disclosure and
+rollback inputs. No service failure is simulated
 by stopping shared Ollama, revoking a real key or interrupting production Groq.
 
 ## Stage 1 — Operator acceptance (2026-10-22)
@@ -20,8 +21,12 @@ suite passed (22 tests), `go test -race ./...` passed, `git diff --check` passed
 and Gateway configuration validation passed. These outcomes are operator-reported,
 not rerun in this documentation/commit turn; see [verification.md](verification.md).
 
-This acceptance is limited to Stage 1 offline implementation. It does not
-authorize Stage 2, deployment or live inference, and it does not close M05B.
+This acceptance is limited to Stage 1 offline implementation and did not itself
+authorize deployment or live inference. A later request authorized Stage 2A; execution and its partial result are recorded below. This does not close M05B.
+
+## Stage 2A — Local Qwen qualification
+
+The operator authorized the bounded sequential 4K/8K comparison on 2026-10-22 and later accepted the harness root-cause analysis and offline regression evidence before requesting resumption. The resumed run completed all nine synthetic cases at each context, saved all 18 raw responses before validation, and recorded latency, token counts, passive GPU/residency samples, health checks, natural expiry and recovery. Seven outputs per context failed lexical quality invariants; manual review found the Swedish short output was in English and included an erroneous term, and the Russian short output had awkward ordering and omitted required details. Medium/long outputs were generally coherent, with exact date formatting causing some lexical-only flags. The text was identical between 4K and 8K for all nine cases. The operator accepts retaining local Qwen only as a candidate for user-reviewed transformations. The failed invariants remain failures; this decision is not a quality pass or a guarantee of meaning preservation or multilingual quality. See [stage-2a-qualification.md](stage-2a-qualification.md) for the complete evidence and limitations. Stage 2B is operator-accepted PASS; deployment, cloud calls, speech inference and M05B closeout remain separately gated.
 
 ## Stage 2 — Planned live setup and commands
 
@@ -116,19 +121,33 @@ actual unload observations, speech results and errors. Keep payloads/results in
 ignored private storage until operator review; remove them on the operator's
 retention decision. Verify rollback and unchanged shared service identities.
 
+## Stage 2B — Gateway integration qualification
+
+The compiled-Gateway offline acceptance and bounded live provider
+compatibility evidence are recorded in
+[stage-2b-qualification.md](stage-2b-qualification.md) and
+[verification.md](verification.md). The operator accepts the three live model
+compatibility results. The final consolidated Stage 2B qualification is ready
+for operator review. This does not authorize production deployment, shared
+GPU concurrency testing, or M05B closeout.
+
 ## Decision record
 
 - Plan/ADR reviewer and date: **PENDING**
 - M05A formal closeout decision: **COMPLETE; committed 2026-10-22**
 - Stage 1 implementation authorization: **GRANTED; PASS accepted 2026-10-22**
-- Stage 2 live qualification authorization: **PENDING / NOT GRANTED**
+- Stage 2A local Qwen qualification: **bounded result accepted with limitations 2026-10-22; retain Qwen only for user-reviewed transformations; 7/9 lexical invariant failures at each context remain failed**
+- Stage 2B offline compiled-Gateway acceptance: **PASS; completed 2026-10-22**
+- Stage 2B bounded live provider compatibility: **three model requests completed; accepted by operator 2026-10-22**
+- Stage 2B technical integration qualification: **PASS; operator-accepted 2026-10-22**
 - Cloud production permission and initial selection policy: **PENDING**
 - Deployment and synthetic cloud-validation authorization: **PENDING**
 - Shared GPU qualification / any restricted local operating policy: **PENDING**
 - Tokenizer/template bounds for all enabled models: **PENDING**
-- Runtime evidence and operator generated-text review: **PENDING**
+- Runtime deployment evidence: **PENDING**
+- User review of each generated transformation: **REQUIRED; no quality guarantee**
 - M05B explicit closeout: **PENDING**
-- Stage 1 implementation/documentation commit: **AUTHORIZED by current operator request**
+- Commit authorization: **PENDING separate operator approval under repository policy**
 # Context expansion review — Stage 1 operator acceptance recorded
 
 Review [qwen-context-comparison.md](qwen-context-comparison.md),

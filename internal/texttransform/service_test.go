@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,14 +19,16 @@ import (
 type fakeGenerator struct {
 	calls   []string
 	inputs  []string
+	options []string
 	fail    map[string]error
 	output  string
 	started chan struct{}
 }
 
-func (f *fakeGenerator) Generate(ctx context.Context, _ config.TextProvider, m config.TextModel, _, _, input, _ string) (string, error) {
+func (f *fakeGenerator) Generate(ctx context.Context, _ config.TextProvider, m config.TextModel, _, _, input, options string) (string, error) {
 	f.calls = append(f.calls, m.ID)
 	f.inputs = append(f.inputs, input)
+	f.options = append(f.options, options)
 	if f.started != nil {
 		select {
 		case f.started <- struct{}{}:
@@ -40,6 +43,77 @@ func (f *fakeGenerator) Generate(ctx context.Context, _ config.TextProvider, m c
 	}
 	return "generated", nil
 }
+
+func TestTransformationModesFormatsAndLanguagesReachFakeProvider(t *testing.T) {
+	for _, mode := range []string{"written", "polite", "diplomatic"} {
+		for _, format := range []string{"normal", "concise", "structured"} {
+			for _, language := range []string{"none", "en", "sv", "ru"} {
+				t.Run(mode+"/"+format+"/"+language, func(t *testing.T) {
+					cfg := testConfig()
+					g := &fakeGenerator{output: "synthetic fake result"}
+					s, err := New(context.Background(), &cfg, "", g)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer s.Close()
+					body, err := json.Marshal(map[string]string{
+						"text": "Synthetic meeting note; date remains November 18.",
+						"mode": mode, "format": format, "target_language": language,
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					status, response := call(t, s, string(body), false)
+					if status != http.StatusOK || len(g.calls) != 1 || g.calls[0] != "local-model" {
+						t.Fatalf("status=%d calls=%v response=%s", status, g.calls, response)
+					}
+					var options map[string]string
+					if err := json.Unmarshal([]byte(g.options[0]), &options); err != nil {
+						t.Fatal(err)
+					}
+					if options["mode"] != mode || options["format"] != format || options["target_language"] != language {
+						t.Fatalf("provider options=%v", options)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestExplicitSelectionUsesEachConfiguredModelWithoutFallback(t *testing.T) {
+	t.Setenv("GROQ_API_KEY", "offline-fake-credential")
+	cfg, err := config.Load("../../configs/gateway-text.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.TextTransform.Selection.AllowCloud = true
+	for _, id := range []string{"local-qwen", "groq-qwen", "groq-gpt-oss"} {
+		t.Run(id, func(t *testing.T) {
+			g := &fakeGenerator{output: "synthetic fake result"}
+			s, err := New(context.Background(), cfg.TextTransform, "", g)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			body, err := json.Marshal(map[string]string{"text": "Synthetic input", "mode": "written", "model": id})
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, raw := call(t, s, string(body), false)
+			if status != http.StatusOK || !reflect.DeepEqual(g.calls, []string{id}) {
+				t.Fatalf("status=%d calls=%v response=%s", status, g.calls, raw)
+			}
+			var response Response
+			if err := json.Unmarshal(raw, &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Model == nil || *response.Model != id || response.FallbackOccurred {
+				t.Fatalf("response metadata=%#v", response)
+			}
+		})
+	}
+}
+
 func testConfig() config.TextTransform {
 	trueValue := true
 	zero := 0.0
@@ -352,6 +426,30 @@ func TestShutdownCancelsActiveTextRequest(t *testing.T) {
 	}
 }
 
+func TestOllamaHTTP500ThroughGatewayUsesExistingFailureMapping(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		http.Error(w, `{"error":"synthetic runner failure"}`, http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	cfg := testConfig()
+	cfg.Models = cfg.Models[:1]
+	cfg.Providers[0].Endpoint = server.URL
+	gatewayService, err := New(context.Background(), &cfg, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gatewayService.Close()
+	status, response := call(t, gatewayService, `{"text":"synthetic input","mode":"written","model":"local-model"}`, false)
+	if status != http.StatusServiceUnavailable || !strings.Contains(string(response), `"text_transform_failed"`) {
+		t.Fatalf("status=%d response=%s", status, response)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("provider calls=%d, want one without retry", calls.Load())
+	}
+}
+
 func TestTotalDeadlineReturns504AndCallerCancellationDoesNotFallback(t *testing.T) {
 	cfg := testConfig()
 	cfg.Models = cfg.Models[:1]
@@ -383,6 +481,45 @@ func TestTotalDeadlineReturns504AndCallerCancellationDoesNotFallback(t *testing.
 	}
 	if !reflect.DeepEqual(g.calls, []string{"local-model"}) {
 		t.Fatalf("caller cancellation dispatched fallback: %v", g.calls)
+	}
+}
+
+func TestProviderTimeoutCanFallbackWithinTotalRequestDeadline(t *testing.T) {
+	var localCalls, cloudCalls atomic.Int32
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		localCalls.Add(1)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(200 * time.Millisecond):
+		}
+	}))
+	defer local.Close()
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cloudCalls.Add(1)
+		_, _ = w.Write([]byte(`{"choices":[{"finish_reason":"stop","message":{"content":"offline fallback"}}]}`))
+	}))
+	defer cloud.Close()
+
+	cfg := testConfig()
+	cfg.Providers[0].Endpoint = local.URL
+	cfg.Providers[0].Timeout = "30ms"
+	cfg.Providers[1].Endpoint = cloud.URL
+	s, err := New(context.Background(), &cfg, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	started := time.Now()
+	status, body := call(t, s, `{"text":"synthetic timeout case","mode":"written"}`, false)
+	if status != http.StatusOK || time.Since(started) > time.Second || localCalls.Load() != 1 || cloudCalls.Load() != 1 {
+		t.Fatalf("status=%d elapsed=%s local=%d cloud=%d body=%s", status, time.Since(started), localCalls.Load(), cloudCalls.Load(), body)
+	}
+	var response Response
+	if err := json.Unmarshal(body, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Model == nil || *response.Model != "cloud-model" || !response.FallbackOccurred {
+		t.Fatalf("response metadata=%#v", response)
 	}
 }
 
@@ -421,6 +558,24 @@ func TestHTTPGeneratorOllamaSerialization(t *testing.T) {
 	if got["keep_alive"] != float64(0) || got["stream"] != false || got["system"] != systemPrompt || strings.Contains(got["prompt"].(string), "hello") == false {
 		t.Fatalf("payload %#v", got)
 	}
+	if think, ok := got["think"].(bool); !ok || think {
+		t.Fatalf("top-level think must be explicitly false, got %#v", got["think"])
+	}
+	options, ok := got["options"].(map[string]any)
+	if !ok {
+		t.Fatalf("options has unexpected type %T", got["options"])
+	}
+	if _, exists := options["think"]; exists {
+		t.Fatalf("think must not be nested in options: %#v", options)
+	}
+	for key, want := range map[string]float64{
+		"num_ctx": 4096, "num_predict": 1024, "num_batch": 128,
+		"num_thread": 4, "temperature": 0, "top_p": 1, "seed": 1,
+	} {
+		if gotValue, ok := options[key].(float64); !ok || gotValue != want {
+			t.Errorf("options[%q]=%#v, want %v", key, options[key], want)
+		}
+	}
 }
 func TestHTTPGeneratorRejectsIncompleteAndClassifiesProviderFailures(t *testing.T) {
 	for _, tc := range []struct {
@@ -444,6 +599,83 @@ func TestHTTPGeneratorRejectsIncompleteAndClassifiesProviderFailures(t *testing.
 		}
 	}
 }
+
+func TestOllamaCompletionValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		maxBytes    int
+		want        string
+		wantInvalid bool
+	}{
+		{
+			name: "completed stop",
+			body: `{"response":"final text","done":true,"done_reason":"stop"}`,
+			want: "final text",
+		},
+		{
+			name:        "token limit completion is rejected",
+			body:        `{"response":"bounded text","done":true,"done_reason":"length"}`,
+			wantInvalid: true,
+		},
+		{
+			name:        "missing final text",
+			body:        `{"done":true,"done_reason":"stop"}`,
+			wantInvalid: true,
+		},
+		{
+			name:        "empty final text",
+			body:        `{"response":" \n ","done":true,"done_reason":"stop"}`,
+			wantInvalid: true,
+		},
+		{
+			name: "separate thinking field is ignored",
+			body: `{"response":"public final","thinking":"private reasoning","done":true,"done_reason":"stop"}`,
+			want: "public final",
+		},
+		{
+			name:        "malformed JSON",
+			body:        `{"response":"unfinished"`,
+			wantInvalid: true,
+		},
+		{
+			name:        "oversized response",
+			body:        `{"response":"` + strings.Repeat("x", 256) + `","done":true,"done_reason":"stop"}`,
+			maxBytes:    128,
+			wantInvalid: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			cfg := testConfig()
+			provider := cfg.Providers[0]
+			provider.Endpoint = server.URL
+			generator := HTTPGenerator{MaxResponseBytes: tc.maxBytes}
+			got, err := generator.Generate(context.Background(), provider, cfg.Models[0], "", systemPrompt, "synthetic", "{}")
+			if tc.wantInvalid {
+				var providerErr *ProviderError
+				if !errors.As(err, &providerErr) || providerErr.Kind != FailureInvalidResponse {
+					t.Fatalf("error=%#v, want invalid provider response", err)
+				}
+				if got != "" {
+					t.Fatalf("returned text %q on invalid response", got)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("text=%q error=%#v, want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestHTTPGeneratorOpenAIWireAndStructuredRefusal(t *testing.T) {
 	var got map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -475,6 +707,51 @@ func TestHTTPGeneratorOpenAIWireAndStructuredRefusal(t *testing.T) {
 	var pe *ProviderError
 	if !errors.As(err, &pe) || pe.Kind != FailureRefused {
 		t.Fatalf("refusal error=%v", err)
+	}
+}
+
+func TestAcceptedGroqModelsSerializeConfiguredReasoningOptions(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer offline-test-credential" {
+			t.Error("fake provider did not receive configured test credential")
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode provider request: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"finish_reason":"stop","message":{"content":"synthetic fake result"}}]}`))
+	}))
+	defer server.Close()
+
+	cfg, err := config.Load("../../configs/gateway-text.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		id, upstream, reasoning string
+	}{{"groq-qwen", "qwen/qwen3.8-27b", "none"}, {"groq-gpt-oss", "openai/gpt-oss-120b", "low"}} {
+		t.Run(tc.id, func(t *testing.T) {
+			var provider config.TextProvider
+			var model config.TextModel
+			for _, p := range cfg.TextTransform.Providers {
+				if p.ID == "groq" {
+					provider = p
+				}
+			}
+			for _, m := range cfg.TextTransform.Models {
+				if m.ID == tc.id {
+					model = m
+				}
+			}
+			provider.Endpoint = server.URL
+			_, err := (HTTPGenerator{}).Generate(context.Background(), provider, model, "offline-test-credential", systemPrompt, "Synthetic test sentence.", `{"mode":"written"}`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got["model"] != tc.upstream || got["stream"] != false || got["reasoning_effort"] != tc.reasoning || got["include_reasoning"] != false || got["max_completion_tokens"] != float64(1024) || got["max_tokens"] != nil {
+				t.Fatalf("serialized request=%#v", got)
+			}
+		})
 	}
 }
 func TestRateLimitScopeUsesBroaderConflictingSignal(t *testing.T) {

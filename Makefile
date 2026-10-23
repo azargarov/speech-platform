@@ -94,6 +94,7 @@ config:
 compose-check:
 	$(COMPOSE) config --quiet
 	docker compose --env-file .env.example -f compose.yaml config --quiet
+	docker compose --env-file .env.example -f compose.yaml -f deployments/compose/compose.ollama.yaml config --format json | $(PYTHON) -c 'import json,sys; c=json.load(sys.stdin); g=c["services"]["gateway"]; n=c["networks"]["ollama_private"]; assert set(g["networks"]) == {"publish", "stt_private", "tts_private", "ollama_private"}; assert set(c["services"]["stt"]["networks"]) == {"stt_private"}; assert set(c["services"]["tts"]["networks"]) == {"tts_private"}; assert n["external"] is True and n["name"] == "speech-platform_ollama_private"; assert g["ports"][0]["host_ip"] == "127.0.0.1"; print("PASS: optional Ollama network Compose overlay")'
 	$(COMPOSE) config --format json | $(PYTHON) scripts/check_compose.py
 	STT_CPU_LOCK_SHA256=$$(sha256sum services/requirements-stt-cpu.lock | cut -d' ' -f1) STT_APPLICATION_CONFIG=$(CURDIR)/configs/stt-application-cpu.example.yaml STT_DEPLOYMENT_CONFIG=$(CURDIR)/configs/stt-deployment-cpu.example.yaml STT_MODEL_ROOT=/models docker compose -f deployments/compose/compose.yaml -f deployments/compose/compose.stt-cpu.yaml config --format json | $(PYTHON) scripts/check_compose.py
 	SOURCE_REVISION=$$(git rev-parse HEAD) STT_CUDA_LOCK_SHA256=$$(sha256sum services/requirements-stt-cuda.lock | cut -d' ' -f1) STT_APPLICATION_CONFIG=$(CURDIR)/configs/stt-application-cpu.example.yaml STT_DEPLOYMENT_CONFIG=$(CURDIR)/configs/stt-deployment-cpu.example.yaml STT_MODEL_ROOT=/models docker compose -f deployments/compose/compose.yaml -f deployments/compose/compose.stt-cuda-build.yaml config --quiet
@@ -130,7 +131,7 @@ tts-state:
 plan:
 	$(PYTHON) scripts/product_deployment.py plan
 install:
-	$(PYTHON) scripts/product_deployment.py install
+	$(PYTHON) scripts/product_deployment.py install $(if $(SERVICE),--service "$(SERVICE)")
 status:
 	$(PYTHON) scripts/product_deployment.py status
 logs:

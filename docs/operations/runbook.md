@@ -37,3 +37,82 @@ pulls that exact digest to verify `linux/amd64`, source revision, service,
 variant and role labels. No model artifacts, private configuration,
 credentials or local audio fixtures are release inputs. A version tag does not
 authorize installation: deployment is a separate milestone and operator action.
+
+## Optional local Ollama networking
+
+The root Compose stack remains the canonical SpeechPlatform deployment. The
+private `.env` may set `GATEWAY_CONFIG` to a deployment-specific file inside
+the repository; the default is `configs/gateway.yaml`. The installer rejects
+paths outside the repository and symlink traversal, validates the selected
+Gateway configuration and mounts it read-only. When that selected config
+enables an active local Ollama-backed model, `make plan`
+reports the external Ollama network requirement and `make install`
+prepares it before building or starting SpeechPlatform services. The installer
+creates `speech-platform_ollama_private` as a Docker-managed internal user
+bridge when it is missing, validates `driver=bridge` and `internal=true` when
+it exists, and attaches the existing running Ollama container with the network
+alias `ollama`. It preserves Ollama's other network attachments and published
+ports. It never installs, starts, restarts or removes Ollama or its models.
+
+The optional settings in the private `.env` are:
+
+```dotenv
+OLLAMA_CONTAINER_NAME=ollama
+OLLAMA_NETWORK_NAME=speech-platform_ollama_private
+```
+
+Set `OLLAMA_CONTAINER_NAME` to the existing Docker container name when it is
+not `ollama`. The Gateway provider endpoint must use
+`http://ollama:11434/api/generate`; the configured Docker alias remains
+`ollama`. The network name may be customized in `.env`. The installer fails
+before deploying SpeechPlatform if the Ollama container is absent or stopped,
+the network has conflicting driver/internal settings, or the existing network
+attachment lacks the required alias. It does not silently repair a conflicting
+network or detach/reconnect an attached Ollama container.
+
+If local Ollama is disabled or no enabled local Ollama model is configured,
+the optional network is not prepared or included in Compose. Legacy STT/TTS-only
+installations remain unchanged. Fresh installation requires an operator-managed
+running Ollama container and installed model; this workflow does not install
+Ollama, fetch models, or enable cloud inference. `allow_cloud` remains an
+explicit Gateway configuration choice and is false in the M05B candidate.
+
+After deployment, the installer runs the Gateway binary as a temporary
+Compose task using `--check-ollama`. That command checks Docker DNS resolution,
+TCP port 11434 and read-only `GET /api/version`; it does not invoke an
+inference endpoint. A connectivity failure stops the install command and leaves
+all existing shared Ollama resources intact. The canonical worker health checks
+still determine whether Gateway, STT and TTS are ready.
+
+For a Gateway-only update over healthy existing STT/TTS workers, use
+`make install SERVICE=gateway`. It prepares/reuses the Ollama path as needed,
+builds only Gateway and runs Compose with `--no-deps`; existing STT/TTS
+containers are not intentionally recreated. A fresh full installation uses
+`make install` without `SERVICE`.
+
+Gateway rollback and Ollama-network cleanup are separate operations. Rolling
+back Gateway with the known-good Compose/config does not disconnect or restart
+Ollama. Removing the SpeechPlatform project through Compose does not remove the
+external network. Do not remove the network as part of normal rollback. If an
+operator explicitly decides to retire the network, first deploy Gateway
+without the Ollama overlay, then inspect membership and the Ollama attachments:
+
+```sh
+docker network inspect "${OLLAMA_NETWORK_NAME:-speech-platform_ollama_private}" \
+  --format '{{json .Containers}}'
+docker inspect "${OLLAMA_CONTAINER_NAME:-ollama}" \
+  --format '{{json .NetworkSettings.Networks}}'
+```
+
+Stop if the network contains any unexpected member. Only after confirming the
+Gateway has detached and the operator has reviewed remaining users may the
+operator explicitly disconnect Ollama and remove the now-empty network:
+
+```sh
+docker network disconnect "${OLLAMA_NETWORK_NAME:-speech-platform_ollama_private}" \
+  "${OLLAMA_CONTAINER_NAME:-ollama}"
+docker network rm "${OLLAMA_NETWORK_NAME:-speech-platform_ollama_private}"
+```
+
+The deployment tooling never runs these cleanup commands. It does not run
+whole-host prune or delete externally managed networks.

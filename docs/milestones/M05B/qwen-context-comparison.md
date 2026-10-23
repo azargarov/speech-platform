@@ -1,9 +1,12 @@
 # M05B Qwen context comparison — Stage 2 execution protocol
 
-Status: **prepared offline; live inference is not authorized by this record.**
-Do not execute until a separate Stage 2 authorization identifies the host and
-window. No shared Ollama settings, production Gateway, STT/TTS deployment or
-prior M05A evidence is changed by this protocol.
+Status: **The resumed sequential 4K/8K comparison completed on 2026-10-22;
+all 18 responses and passive telemetry were recorded. Both contexts completed
+the nine-case corpus, naturally expired and recovered GPU memory. Seven cases
+at each context failed lexical quality invariants; operator review is pending.
+See [stage-2a-qualification.md](stage-2a-qualification.md). Stage 2B and
+deployment remain unauthorized.** No shared Ollama settings, production
+Gateway, STT/TTS deployment or prior M05A evidence was changed.
 
 ## Offline budget result
 
@@ -23,50 +26,43 @@ rejected at 4K and accepted at 8K before provider dispatch. This validates the
 configured arithmetic only; it does not establish model tokenizer/template
 fit.
 
-## Controlled live comparison to run only after authorization
+## Controlled live comparison — Stage 2A only
 
-Use the existing `scripts/m05a_eval.py` sequential runner with the same exact
-installed model digest, prompt, corpus, host, runtime, seed, batch/thread
-settings and one-request-at-a-time behavior. Run 4K first, then 8K, and repeat
-in reverse order only if the authorization permits the additional runs. Keep
-each run in a new private directory; never overwrite or edit existing
-`private/m05a` evidence. Keep all outputs and transcripts private.
+Use a Stage 2A harness that sends bounded requests with
+`keep_alive: "60s"` and never sends an unload request. Do not use the existing
+`scripts/m05a_eval.py` live path because it explicitly unloads after a run.
+Keep the same exact installed model digest, prompt v2, private synthetic
+corpus, host, runtime, seed and batch/thread settings. Stage 2A is
+bounded to one 4K run followed by one 8K run; do not repeat or reverse order.
+Each context uses the same nine short/medium/long English, Swedish and Russian
+samples. Keep each run in a new private directory; never overwrite or edit
+existing `private/m05a` evidence. Keep all outputs and transcripts private.
 
-Example commands (not executed; execute only after Stage 2 authorization):
+The case file remains `private/m05a/stage2a-cases.jsonl`; preserve its existing
+offline validation. The exact request envelope and abort rules are in
+`stage-2a-qualification.md`; this protocol is not separate authorization.
 
-```sh
-python scripts/m05a_eval.py --validate
-python scripts/m05a_eval.py --model qwen3.5:9b-q4_K_M --num-ctx 4096 \
-  --prompt docs/milestones/M05A/prompts/v2.md --prompt-version v2 \
-  --run-dir private/m05a/qwen-context-4k-<run-id>
-python scripts/m05a_eval.py --model qwen3.5:9b-q4_K_M --num-ctx 8192 \
-  --prompt docs/milestones/M05A/prompts/v2.md --prompt-version v2 \
-  --run-dir private/m05a/qwen-context-8k-<run-id>
-```
+Capture successful completion and Ollama prompt token counts for actual
+context acceptance; a preflight fit alone is insufficient. The nine prepared
+cases are the complete Stage 2A request budget; do not add separate long-input
+requests or retry failed cases.
 
-Use the same representative long dictated request for each setting. Include
-the offline synthetic request described in
-`TestEightKContextAcceptsLongDictationRejectedAtFourK` in a private one-case
-case file conforming to the M05A case schema, and run it as a separate
-`--case-id` run at both settings. The normal corpus remains the quality and
-latency comparison. Capture successful completion and Ollama prompt token
-counts for actual context acceptance; a preflight fit alone is insufficient.
-
-Before and after each setting, record GPU baseline and check STT readiness and
-TTS health. Use the existing one-second `nvidia-smi`, Ollama container and host
-memory sampling. Record per-request load duration, total latency, time to first
-fragment, prompt evaluation, output evaluation, peak GPU memory, model
-placement/VRAM from `/api/ps`, and `/api/ps` after the runner's explicit unload.
-Also record Ollama version, model digest, driver, initial GPU residency and
-unload/recovery observations. Do not run concurrent STT/TTS/LLM workloads or
-infer coexistence from sequential health checks. Stop on unexpected service
-degradation, unrelated model residency, failed unload, or memory pressure; do
-not kill shared Ollama or issue an unscoped unload.
+Before each setting, capture GPU and all model residency, then sample GPU,
+`/api/ps`, service health and Ollama request logs once per second. Capture the
+same measures immediately afterward and through a 120-second natural-idle
+observation window. Record inference success, post-inference residency,
+natural idle expiration and confirmed GPU memory recovery as separate results.
+Mark measurements contaminated if another client request/model load is
+observed. Abort if requests or GPU use cannot be attributed safely. Do not run
+simultaneous STT/TTS/LLM workloads or infer coexistence from sequential health
+checks. Cold-start and forced-unload behavior are not measured by this
+non-destructive protocol.
 
 ## Qualification decision criteria
 
-Stage 2 must review the measured 4K/8K memory delta, cold-load and warm latency,
-long-request acceptance/completion, unload/recovery, and the qualified
+Stage 2A must record baseline/peak/post-run memory and residency, latency,
+long-request acceptance/completion, natural idle expiration and confirmed
+memory recovery, and the qualified
 tokenizer/template bound. 8K is a candidate for Stage 2 qualification, not
 approved for production based on this offline work. A context larger than 8K
 should be investigated only if representative dictated inputs still fail the
@@ -81,6 +77,10 @@ are not established.
   establish the local serialized-byte budget and pre-dispatch behavior.
 - **INTERPRETATION:** 8K provides materially more accepted input budget while
   retaining all configured overhead and output reservation.
-- **NOT ESTABLISHED:** GPU memory, cold/warm latency, load/unload behavior,
-  actual tokenizer/template context acceptance, long-request output quality,
-  STT/TTS coexistence, and whether a context larger than 8K is worthwhile.
+- **OBSERVED:** the partial 4K attempt recorded one successful API completion,
+  452 prompt tokens, a 0.568-second backend generation phase, 8,508 MiB sampled
+  peak GPU use, natural expiry and memory recovery. The output itself was not
+  saved, so no quality claim is established.
+- **NOT ESTABLISHED:** a comparable nine-case 4K/8K result, 8K corpus memory
+  and latency, full output quality, tokenizer/template bounds, STT/TTS
+  coexistence, or whether a context larger than 8K is worthwhile.
