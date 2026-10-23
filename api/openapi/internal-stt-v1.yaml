@@ -152,6 +152,45 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /internal/v1/warmup:
+    post:
+      operationId: warmupSTT
+      summary: Load the configured STT model without transcribing audio
+      parameters:
+      - in: header
+        name: X-Request-Timeout-Ms
+        required: true
+        schema:
+          type: integer
+          minimum: 1
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              maxProperties: 0
+              additionalProperties: false
+      responses:
+        '200':
+          description: Model initialized and ready
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [model_state]
+                properties:
+                  model_state:
+                    type: string
+                    enum: [ready]
+        '401':
+          description: Missing or invalid internal bearer token
+        '429':
+          description: Worker admission capacity is full
+        '503':
+          description: Model could not be loaded or worker is unavailable
+        '504':
+          description: Caller wait deadline exceeded; shared loading may continue
 components:
   schemas:
     Error:

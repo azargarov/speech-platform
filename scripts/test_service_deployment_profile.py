@@ -91,6 +91,7 @@ class ServiceDeploymentProfileTests(unittest.TestCase):
         config = load_gateway_config("configs/gateway.yaml")
         self.assertEqual(config["listen_host"], "0.0.0.0")
         self.assertEqual(config["listen_port"], 8080)
+        self.assertEqual(config["warmup_timeout"], "180s")
 
     def test_gateway_config_rejects_unknown_fields_and_non_container_bind(self):
         path = Path(self.temporary.name) / "gateway.yaml"
@@ -107,6 +108,19 @@ class ServiceDeploymentProfileTests(unittest.TestCase):
         )
         path.write_text(body + "unknown: true\n", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "unsupported unknown"):
+            load_gateway_config(path)
+
+    def test_gateway_warmup_timeout_is_bounded_by_write_timeout(self):
+        path = Path(self.temporary.name) / "gateway-warmup.yaml"
+        body = (
+            "listen_host: 0.0.0.0\nlisten_port: 8080\nmax_header_bytes: 1024\n"
+            "max_request_bytes: 2048\nread_timeout: 1s\nwrite_timeout: 180s\n"
+            "idle_timeout: 1s\nshutdown_timeout: 1s\nwarmup_timeout: 120s\n"
+        )
+        path.write_text(body, encoding="utf-8")
+        self.assertEqual(load_gateway_config(path)["warmup_timeout"], "120s")
+        path.write_text(body.replace("120s", "3m"), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "warmup_timeout"):
             load_gateway_config(path)
 
 

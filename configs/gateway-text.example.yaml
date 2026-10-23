@@ -4,6 +4,7 @@ stt_url: http://127.0.0.1:8081
 stt_timeout: 180s
 tts_url: http://127.0.0.1:8082
 tts_timeout: 600s
+warmup_timeout: 180s
 max_header_bytes: 1048576
 max_request_bytes: 26214400
 read_timeout: 30s
@@ -13,6 +14,7 @@ shutdown_timeout: 10s
 text_transform:
   enabled: true
   request_timeout: 240s
+  warmup_keep_alive: 60s
   max_request_bytes: 65536
   max_input_bytes: 10000
   max_output_characters: 20000

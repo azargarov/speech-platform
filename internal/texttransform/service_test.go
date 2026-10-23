@@ -770,4 +770,184 @@ func TestRateLimitScopeUsesBroaderConflictingSignal(t *testing.T) {
 		}
 	}
 }
+
+func TestWarmupUsesEmptyLocalOllamaRequestAndFiniteResidency(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if r.Method != http.MethodPost || r.URL.Path != "/api/generate" || json.NewDecoder(r.Body).Decode(&body) != nil {
+			t.Errorf("invalid warmup HTTP request: %s %s", r.Method, r.URL.Path)
+		}
+		if body["model"] != "local:tag" || body["stream"] != false || body["think"] != false || body["keep_alive"] != "60s" {
+			t.Errorf("unexpected warmup payload: %#v", body)
+		}
+		for _, key := range []string{"prompt", "system", "options"} {
+			if _, ok := body[key]; ok {
+				t.Errorf("warmup included forbidden field %q", key)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"response":"discarded synthetic output","done":true}`))
+	}))
+	defer server.Close()
+	cfg := testConfig()
+	cfg.WarmupKeepAlive = "60s"
+	cfg.Providers[0].Endpoint = server.URL + "/api/generate"
+	s, err := New(context.Background(), &cfg, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	status, code := s.Warmup(context.Background())
+	if status != "ready" || code != "" {
+		t.Fatalf("status=%s code=%s", status, code)
+	}
+}
+
+func TestWarmupNeverSelectsCloudAndHonorsCancellation(t *testing.T) {
+	cfg := testConfig()
+	cfg.Models[0].Enabled = ptr(false)
+	s, err := New(context.Background(), &cfg, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	status, code := s.Warmup(context.Background())
+	if status != "unavailable" || code != "no_eligible_local_model" {
+		t.Fatalf("status=%s code=%s", status, code)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	status, code = s.warmOllama(ctx, cfg.Providers[0], cfg.Models[0])
+	if status != "timed_out" && status != "unavailable" {
+		t.Fatalf("canceled status=%s code=%s", status, code)
+	}
+}
+
+func TestOllamaWarmupMapsProviderFailureAndTimeout(t *testing.T) {
+	failure := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("private provider details"))
+	}))
+	cfg := testConfig()
+	cfg.WarmupKeepAlive = "60s"
+	cfg.Providers[0].Endpoint = failure.URL
+	s, err := New(context.Background(), &cfg, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, code := s.Warmup(context.Background()); status != "resource_unavailable" || code != "provider_unavailable" {
+		t.Fatalf("failure status=%s code=%s", status, code)
+	}
+	s.Close()
+	failure.Close()
+
+	release := make(chan struct{})
+	blocked := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer func() { close(release); blocked.Close() }()
+	cfg.Providers[0].Endpoint = blocked.URL
+	cfg.Providers[0].Timeout = "20ms"
+	s, err = New(context.Background(), &cfg, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if status, code := s.Warmup(context.Background()); status != "timed_out" || code != "deadline_exceeded" {
+		t.Fatalf("timeout status=%s code=%s", status, code)
+	}
+}
+
+func TestOllamaWarmupRequiresCompleteSuccessfulJSONResponse(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		bodyLimit  int
+		wantStatus string
+		wantCode   string
+	}{
+		{name: "empty", status: http.StatusOK, body: "", wantStatus: "unavailable", wantCode: "invalid_provider_response"},
+		{name: "malformed", status: http.StatusOK, body: "not json", wantStatus: "unavailable", wantCode: "invalid_provider_response"},
+		{name: "truncated", status: http.StatusOK, body: `{"done":true`, wantStatus: "unavailable", wantCode: "invalid_provider_response"},
+		{name: "missing done", status: http.StatusOK, body: `{"response":"discarded"}`, wantStatus: "unavailable", wantCode: "invalid_provider_response"},
+		{name: "not complete", status: http.StatusOK, body: `{"done":false}`, wantStatus: "unavailable", wantCode: "invalid_provider_response"},
+		{name: "provider error", status: http.StatusOK, body: `{"error":"private provider detail","done":true}`, wantStatus: "resource_unavailable", wantCode: "provider_unavailable"},
+		{name: "oversized", status: http.StatusOK, body: `{"done":true,"padding":"abcdefghijklmnopqrstuvwxyz"}`, bodyLimit: 32, wantStatus: "unavailable", wantCode: "invalid_provider_response"},
+		{name: "non-2xx", status: http.StatusBadRequest, body: `{"error":"private provider detail"}`, wantStatus: "unavailable", wantCode: "provider_rejected"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			cfg := testConfig()
+			cfg.WarmupKeepAlive = "60s"
+			cfg.Providers[0].Endpoint = server.URL
+			if tc.bodyLimit > 0 {
+				cfg.MaxResponseBytes = tc.bodyLimit
+			}
+			s, err := New(context.Background(), &cfg, "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			status, code := s.Warmup(context.Background())
+			if status != tc.wantStatus || code != tc.wantCode {
+				t.Fatalf("status=%q code=%q, want %q/%q", status, code, tc.wantStatus, tc.wantCode)
+			}
+			if strings.Contains(code, "private provider detail") {
+				t.Fatalf("provider detail leaked in code: %q", code)
+			}
+		})
+	}
+}
+
+func TestOllamaWarmupCancellationRemainsSanitized(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(entered)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer func() {
+		close(release)
+		server.Close()
+	}()
+	cfg := testConfig()
+	cfg.WarmupKeepAlive = "60s"
+	cfg.Providers[0].Endpoint = server.URL
+	s, err := New(context.Background(), &cfg, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct {
+		status string
+		code   string
+	}, 1)
+	go func() {
+		status, code := s.Warmup(ctx)
+		done <- struct {
+			status string
+			code   string
+		}{status, code}
+	}()
+	<-entered
+	cancel()
+	result := <-done
+	if result.status != "unavailable" || result.code != "provider_unavailable" {
+		t.Fatalf("cancellation result=%+v", result)
+	}
+}
+
 func ptr[T any](v T) *T { return &v }

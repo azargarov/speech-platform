@@ -135,9 +135,28 @@ paths:
   /internal/v1/warmup:
     post:
       operationId: warmup
+      summary: Load the configured TTS model without synthesizing speech
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              maxProperties: 0
+              additionalProperties: false
       responses:
         '200':
-          description: Model loaded and warm-up completed
+          description: Warmup completed; response reports worker model state. No audio is synthesized.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [model_state, inference_active]
+                properties:
+                  model_state:
+                    type: string
+                  inference_active:
+                    type: boolean
         '429':
           description: Inference slot is busy
         '503':

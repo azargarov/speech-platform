@@ -1,8 +1,8 @@
 # M06 implementation record
 
-Status: **M06B offline implementation and verification ACCEPTED 2026-10-23. M06 remains in progress; M06C is the next separately gated development stage.**
+Status: **M06B offline implementation and verification ACCEPTED 2026-10-23. M06C offline implementation and verification ACCEPTED 2026-10-23. M06 remains in progress; M06D is next.**
 
-M06A finalized the architecture and contracts. This M06B change implements STT lazy loading, an internal warmup route, idle unloading/reload, and the approved worker readiness behavior. It does not implement the public Gateway API, TTS/Ollama changes, readiness-aware routing, deployment, or live GPU qualification.
+M06A finalized the architecture and contracts. M06B implements STT lazy loading, an internal warmup route, idle unloading/reload, and approved worker readiness. M06C adds the public Gateway warmup endpoint and integrates existing STT/TTS warmup capabilities with local Ollama warmup. It does not change STT lifecycle, TTS lifecycle, provider routing, deployment, or live GPU qualification.
 
 ## M06B changes
 
@@ -40,4 +40,16 @@ The independent lifecycle review findings were addressed in the existing applica
 
 ## Not included
 
-M06C owns the public Gateway warmup contract, TTS reuse and Ollama warmup and is the next development stage, subject to separate implementation authorization. M06D owns full offline integration/regression verification. M06E live qualification and deployment require separate explicit operator authorization. M06B acceptance covers only its implementation and offline verification; it is not an overall M06 closeout.
+## M06C implementation (offline stage accepted 2026-10-23)
+
+- Added `POST /v1/models/warmup` with the ADR 0022 request and response contract: strict JSON, a 4 KiB body cap, one to three unique operation IDs in request order, per-operation results, and `complete` only when every result is `ready`.
+- Public authentication follows existing configured bearer-token behavior. Errors are sanitized and do not include worker/provider bodies, endpoints, model names or credentials. Warmup accepts no user content and returns no generated text or audio.
+- STT calls the M06B internal endpoint with an empty body, bearer token where configured, and remaining `X-Request-Timeout-Ms`; it validates the safe `model_state: ready` response. TTS calls its existing internal warmup route without a timeout header (the worker contract does not use one), validates its `model_state: ready` response, and maps HTTP 429 to `overloaded`.
+- Text transformation uses a dedicated native Ollama empty `/api/generate` request for the first enabled local Ollama model in existing configured order. It includes model, `stream:false`, top-level `think:false`, and separate finite `warmup_keep_alive`; it sends no prompt/system/options, bounds and discards response text, and reports ready only for valid complete JSON with explicit `done:true` and no provider error. Provider response bodies and error strings are not exposed. It never invokes cloud providers. Ordinary inference's existing `keep_alive` configuration is unchanged.
+- Added validated Gateway `warmup_timeout` (default 180s, range 1s..10m and constrained by HTTP write timeout) and text `warmup_keep_alive` (default 60s, finite range 1s..24h). Existing configurations omitting these fields receive defaults.
+- Same-operation calls share one coordinator-owned in-flight Gateway operation. Its context is bounded by the configured warmup timeout and tied to Gateway shutdown; each HTTP caller independently waits with its own request deadline/cancellation. A caller leaving does not cancel the shared attempt. If all callers leave, the operation may finish or reach its deadline without persistent job state. The coordinator retains the operation and process-local serial slot until the upstream call actually returns. Different warmup operations remain serialized; this does not reserve VRAM, block normal inference admission, or coordinate other Ollama clients. Operations in a request remain sequential. A caller deadline while a started attempt remains active returns `warming`; timeout/cancellation does not claim underlying model loading stopped. Upstream adapters use context-aware HTTP calls; no mechanism forcibly terminates non-cooperative native/provider work.
+- `api/openapi/public-v1.yaml` and the existing STT/TTS internal API descriptions document the operation. No readiness-aware routing, cloud fallback, service, job store, scheduler, deployment change or client implementation was added.
+
+M06C files changed: `internal/gateway/warmup.go`, `internal/gateway/warmup_test.go`, `internal/gateway/handler.go`, `internal/texttransform/service.go`, `internal/texttransform/service_test.go`, `internal/config/config.go`, `internal/config/config_test.go`, `internal/config/texttransform.go`, `cmd/gateway/main.go`, `configs/gateway.yaml`, `configs/gateway-text.example.yaml`, `scripts/service_deployment_profile.py`, `scripts/test_service_deployment_profile.py`, `api/openapi/public-v1.yaml`, `api/openapi/internal-stt-v1.yaml`, `api/openapi/internal-tts-v1.yaml`, `PLANS.md`, and the M06 plan, implementation, verification, user-validation and result records.
+
+The operator accepted M06C offline implementation and verification on 2026-10-23, including documented limitations concerning shared GPU resources, native model-loading cancellation, and unqualified installed Ollama behavior. M06D owns full offline integration/regression qualification and is the next stage. Installed Ollama behavior and target GPU interactions remain unestablished pending separately authorized M06E qualification; deployment also requires separate explicit authorization.

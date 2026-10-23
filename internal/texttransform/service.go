@@ -1,6 +1,7 @@
 package texttransform
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -165,6 +166,95 @@ func (s *Service) Metrics() string {
 	}
 	return fmt.Sprintf("# HELP text_transform_requests_total Text transformation requests.\n# TYPE text_transform_requests_total counter\ntext_transform_requests_total %d\n# HELP text_transform_attempts_total Provider attempts.\n# TYPE text_transform_attempts_total counter\ntext_transform_attempts_total %d\n# HELP text_transform_failures_total Failed provider attempts.\n# TYPE text_transform_failures_total counter\ntext_transform_failures_total %d\n# HELP text_transform_generated_total Generated responses.\n# TYPE text_transform_generated_total counter\ntext_transform_generated_total %d\n# HELP text_transform_passthrough_total Exact raw passthrough responses.\n# TYPE text_transform_passthrough_total counter\ntext_transform_passthrough_total %d\n# HELP text_transform_fallbacks_total Responses that used a later provider model.\n# TYPE text_transform_fallbacks_total counter\ntext_transform_fallbacks_total %d\n# HELP text_transform_overloaded_total Requests rejected by text admission.\n# TYPE text_transform_overloaded_total counter\ntext_transform_overloaded_total %d\n", s.requests.Load(), s.attempts.Load(), s.failures.Load(), s.generated.Load(), s.passthrough.Load(), s.fallbacks.Load(), s.overloaded.Load())
 }
+
+// Warmup prepares the first enabled local Ollama model without invoking transformation.
+func (s *Service) Warmup(ctx context.Context) (string, string) {
+	if s == nil || s.stopped.Load() || s.root == nil || s.root.Err() != nil || s.cfg.Enabled == nil || !*s.cfg.Enabled {
+		return "unavailable", "not_configured"
+	}
+	providers := make(map[string]config.TextProvider, len(s.cfg.Providers))
+	for _, provider := range s.cfg.Providers {
+		providers[provider.ID] = provider
+	}
+	for _, model := range s.cfg.Models {
+		provider := providers[model.Provider]
+		if model.Enabled == nil || !*model.Enabled || provider.Locality != "local" || provider.Type != "ollama" {
+			continue
+		}
+		return s.warmOllama(ctx, provider, model)
+	}
+	return "unavailable", "no_eligible_local_model"
+}
+
+func (s *Service) warmOllama(ctx context.Context, provider config.TextProvider, model config.TextModel) (string, string) {
+	if provider.APIKeyEnv != "" && s.creds[provider.ID] == "" {
+		return "unavailable", "provider_unavailable"
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, duration(provider.Timeout))
+	defer cancel()
+	keepAlive := s.cfg.WarmupKeepAlive
+	if keepAlive == "" {
+		keepAlive = "60s"
+	}
+	payload, err := json.Marshal(struct {
+		Model     string `json:"model"`
+		Stream    bool   `json:"stream"`
+		Think     bool   `json:"think"`
+		KeepAlive string `json:"keep_alive"`
+	}{model.Model, false, false, keepAlive})
+	if err != nil {
+		return "unavailable", "provider_unavailable"
+	}
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, provider.Endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return "unavailable", "provider_unavailable"
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if credential := s.creds[provider.ID]; credential != "" {
+		request.Header.Set("Authorization", "Bearer "+credential)
+	}
+	response, err := s.client.Do(request)
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
+			return "timed_out", "deadline_exceeded"
+		}
+		return "unavailable", "provider_unavailable"
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, int64(s.cfg.MaxResponseBytes)+1))
+	if err != nil || len(body) > s.cfg.MaxResponseBytes {
+		return "unavailable", "invalid_provider_response"
+	}
+	if response.StatusCode == http.StatusTooManyRequests {
+		return "overloaded", "provider_busy"
+	}
+	if response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusGatewayTimeout {
+		return "timed_out", "deadline_exceeded"
+	}
+	if response.StatusCode == http.StatusServiceUnavailable || response.StatusCode >= 500 {
+		return "resource_unavailable", "provider_unavailable"
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "unavailable", "provider_rejected"
+	}
+	var result struct {
+		Done  *bool  `json:"done"`
+		Error string `json:"error"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if err := decoder.Decode(&result); err != nil {
+		return "unavailable", "invalid_provider_response"
+	}
+	var extra any
+	if decoder.Decode(&extra) != io.EOF || result.Done == nil || !*result.Done {
+		return "unavailable", "invalid_provider_response"
+	}
+	if result.Error != "" {
+		return "resource_unavailable", "provider_unavailable"
+	}
+	return "ready", ""
+}
+
 func duration(v string) time.Duration { d, _ := time.ParseDuration(v); return d }
 func (s *Service) Close() {
 	if s == nil {

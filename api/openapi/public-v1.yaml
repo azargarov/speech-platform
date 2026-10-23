@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Speech Platform public API
   version: 1.0.0
-  description: STT transcription and complete WAV TTS routes are implemented. Optional bearer authentication is enforced when configured; non-loopback host exposure requires a secret token. STT request limit is 25 MiB; TTS JSON request limit is 64 KiB. Plain-text input is limited to 10000 characters; SSML has a 49152-byte document limit and a configured speech-character limit. Default STT deadline is 180 seconds and TTS deadline is 600 seconds; upload read deadline is 30 seconds. Client disconnect cancels the Gateway request and stops response delivery; active native TTS inference may finish asynchronously, and no result is returned to a disconnected client. Deadline exhaustion returns 504 where the connection remains writable.
+  description: STT transcription, complete WAV TTS, optional text transformation and bounded predictive model warmup routes are implemented. Optional bearer authentication is enforced when configured; non-loopback host exposure requires a secret token. STT request limit is 25 MiB; TTS JSON request limit is 64 KiB; model warmup request limit is 4 KiB. Warmup is synchronous, bounded by warmup_timeout, and can be called asynchronously by clients. It accepts operation names only and never accepts user content. A ready result confirms the warmup operation completed, not future model residency. Default STT deadline is 180 seconds and TTS deadline is 600 seconds; upload read deadline is 30 seconds. Client disconnect cancels the Gateway wait where possible; it does not prove model loading stopped. Deadline exhaustion returns bounded timeout outcomes where the connection remains writable.
     Streaming is reserved, not implemented; capability flags remain false until supported.
     Timestamps are optional; unsupported requests return 400. Errors never contain
     audio or transcript payloads. Text transformation is available only when an
@@ -262,12 +262,89 @@ paths:
                 $ref: '#/components/schemas/Error'
         '503': *id010
         '504': *id011
+  /v1/models/warmup:
+    post:
+      operationId: warmupModels
+      summary: Prepare configured local inference operations without user content
+      x-maxRequestSizeBytes: 4096
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelWarmupRequest'
+      responses:
+        '200':
+          description: All requested operations were attempted; individual failures are reported in results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelWarmupResponse'
+        '400': *id001
+        '401': *id002
+        '405':
+          description: POST is required
+        '413': *id005
+        '415': *id006
+        '408':
+          description: Bounded request body did not complete before the warmup deadline
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Gateway cannot attempt any requested operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
   schemas:
+    ModelWarmupRequest:
+      type: object
+      additionalProperties: false
+      required: [operations]
+      properties:
+        operations:
+          type: array
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items:
+            type: string
+            enum: [stt, tts, text_transform]
+    ModelWarmupResult:
+      type: object
+      additionalProperties: false
+      required: [operation, status]
+      properties:
+        operation:
+          type: string
+          enum: [stt, tts, text_transform]
+        status:
+          type: string
+          enum: [ready, warming, unavailable, resource_unavailable, overloaded, timed_out, not_attempted]
+        code:
+          type: string
+          maxLength: 64
+    ModelWarmupResponse:
+      type: object
+      additionalProperties: false
+      required: [results, complete]
+      properties:
+        results:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items:
+            $ref: '#/components/schemas/ModelWarmupResult'
+        complete:
+          type: boolean
+      description: Results preserve request order. complete is true only when every status is ready. Warming does not guarantee residency after completion.
     TextTransformRequest:
       type: object
       additionalProperties: false

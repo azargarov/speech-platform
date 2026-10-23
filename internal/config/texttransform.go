@@ -12,6 +12,7 @@ import (
 type TextTransform struct {
 	Enabled               *bool          `yaml:"enabled"`
 	RequestTimeout        string         `yaml:"request_timeout"`
+	WarmupKeepAlive       string         `yaml:"warmup_keep_alive"`
 	MaxRequestBytes       int            `yaml:"max_request_bytes"`
 	MaxInputBytes         int            `yaml:"max_input_bytes"`
 	MaxOutputCharacters   int            `yaml:"max_output_characters"`
@@ -79,6 +80,9 @@ func (t *TextTransform) Validate(writeTimeout string) error {
 	if t == nil {
 		return nil
 	}
+	if t.WarmupKeepAlive == "" {
+		t.WarmupKeepAlive = "60s"
+	}
 	bad := func(s string) error { return fmt.Errorf("text_transform: %s", s) }
 	if t.Enabled == nil {
 		return bad("enabled is required")
@@ -86,6 +90,10 @@ func (t *TextTransform) Validate(writeTimeout string) error {
 	requestTimeout, err := boundedDuration(t.RequestTimeout, 10*time.Minute)
 	if err != nil {
 		return bad("invalid request_timeout")
+	}
+	warmupKeepAlive, err := boundedDuration(t.WarmupKeepAlive, 24*time.Hour)
+	if err != nil || warmupKeepAlive < time.Second {
+		return bad("warmup_keep_alive must be from 1s to 24h")
 	}
 	connect, err := boundedDuration(t.Transport.ConnectTimeout, 30*time.Second)
 	if err != nil {

@@ -12,7 +12,15 @@ func TestConfig(t *testing.T) {
 		t.Fatal(e)
 	}
 	t.Setenv("SPEECH_LISTEN_PORT", "")
-	for name, body := range map[string]string{"valid": string(raw), "unknown": string(raw) + "unknown: true\n", "missing": "listen_port: 80\n", "port_low": strings.Replace(string(raw), "8080", "0", 1), "port_high": strings.Replace(string(raw), "8080", "65536", 1), "limit": strings.Replace(string(raw), "26214400", "0", 1), "limit_above_contract": strings.Replace(string(raw), "26214400", "26214401", 1), "header_limit": strings.Replace(string(raw), "1048576", "0", 1), "timeout": strings.Replace(string(raw), "30s", "0s", 1), "stt_timeout_zero": strings.Replace(string(raw), "180s", "0s", 1), "stt_timeout_too_long": strings.Replace(string(raw), "180s", "11m", 1), "malformed_stt_url": strings.Replace(string(raw), "http://stt:8081", "https://user:secret@outside", 1), "multiple": string(raw) + "---\n{}\n", "duplicate": string(raw) + "listen_port: 4\n", "malformed_host": strings.Replace(string(raw), "0.0.0.0", "http://localhost", 1), "host_whitespace": strings.Replace(string(raw), "0.0.0.0", "bad host", 1), "malformed_ipv4": strings.Replace(string(raw), "0.0.0.0", "256.0.0.1", 1)} {
+	withoutWarmup := strings.Replace(string(raw), "warmup_timeout: 180s\n", "", 1)
+	pathWithoutWarmup := t.TempDir() + "/gateway.yaml"
+	if err := os.WriteFile(pathWithoutWarmup, []byte(withoutWarmup), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, err := Load(pathWithoutWarmup); err != nil || loaded.WarmupTimeout != "180s" {
+		t.Fatalf("backward-compatible warmup default=%q err=%v", loaded.WarmupTimeout, err)
+	}
+	for name, body := range map[string]string{"valid": string(raw), "unknown": string(raw) + "unknown: true\n", "missing": "listen_port: 80\n", "port_low": strings.Replace(string(raw), "8080", "0", 1), "port_high": strings.Replace(string(raw), "8080", "65536", 1), "limit": strings.Replace(string(raw), "26214400", "0", 1), "limit_above_contract": strings.Replace(string(raw), "26214400", "26214401", 1), "header_limit": strings.Replace(string(raw), "1048576", "0", 1), "timeout": strings.Replace(string(raw), "30s", "0s", 1), "stt_timeout_zero": strings.Replace(string(raw), "stt_timeout: 180s", "stt_timeout: 0s", 1), "stt_timeout_too_long": strings.Replace(string(raw), "stt_timeout: 180s", "stt_timeout: 11m", 1), "warmup_timeout_zero": strings.Replace(string(raw), "warmup_timeout: 180s", "warmup_timeout: 0s", 1), "warmup_timeout_too_long": strings.Replace(string(raw), "warmup_timeout: 180s", "warmup_timeout: 11m", 1), "warmup_exceeds_write_timeout": strings.Replace(string(raw), "write_timeout: 610s", "write_timeout: 100s", 1), "malformed_stt_url": strings.Replace(string(raw), "http://stt:8081", "https://user:secret@outside", 1), "multiple": string(raw) + "---\n{}\n", "duplicate": string(raw) + "listen_port: 4\n", "malformed_host": strings.Replace(string(raw), "0.0.0.0", "http://localhost", 1), "host_whitespace": strings.Replace(string(raw), "0.0.0.0", "bad host", 1), "malformed_ipv4": strings.Replace(string(raw), "0.0.0.0", "256.0.0.1", 1)} {
 		t.Run(name, func(t *testing.T) {
 			p := t.TempDir() + "/config.yaml"
 			if e := os.WriteFile(p, []byte(body), 0600); e != nil {
@@ -82,14 +90,24 @@ func TestTextTransformExampleAndStrictNestedConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	valid := string(raw)
+	withoutWarmupKeepAlive := strings.Replace(valid, "  warmup_keep_alive: 60s\n", "", 1)
+	defaultPath := t.TempDir() + "/gateway-default.yaml"
+	if err := os.WriteFile(defaultPath, []byte(withoutWarmupKeepAlive), 0600); err != nil {
+		t.Fatal(err)
+	}
+	defaultConfig, err := Load(defaultPath)
+	if err != nil || defaultConfig.TextTransform.WarmupKeepAlive != "60s" {
+		t.Fatalf("backward-compatible warmup keep-alive=%v err=%v", defaultConfig.TextTransform, err)
+	}
 	for name, body := range map[string]string{
-		"valid":                   valid,
-		"unknown nested field":    strings.Replace(valid, "      enabled: true", "      enabled: true\n      surprise: true", 1),
-		"duplicate nested key":    strings.Replace(valid, "  enabled: true", "  enabled: true\n  enabled: true", 1),
-		"required enabled":        strings.Replace(valid, "  enabled: true\n", "", 1),
-		"cloud requires https":    strings.Replace(valid, "https://api.groq.com", "http://api.groq.com", 1),
-		"invalid output budget":   strings.Replace(valid, "num_predict: 1024", "num_predict: 8192", 1),
-		"unknown parameter block": strings.Replace(valid, "        ollama:", "        unknown:", 1),
+		"valid":                     valid,
+		"unknown nested field":      strings.Replace(valid, "      enabled: true", "      enabled: true\n      surprise: true", 1),
+		"duplicate nested key":      strings.Replace(valid, "  enabled: true", "  enabled: true\n  enabled: true", 1),
+		"required enabled":          strings.Replace(valid, "  enabled: true\n", "", 1),
+		"cloud requires https":      strings.Replace(valid, "https://api.groq.com", "http://api.groq.com", 1),
+		"invalid output budget":     strings.Replace(valid, "num_predict: 1024", "num_predict: 8192", 1),
+		"invalid warmup keep alive": strings.Replace(valid, "warmup_keep_alive: 60s", "warmup_keep_alive: 0s", 1),
+		"unknown parameter block":   strings.Replace(valid, "        ollama:", "        unknown:", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := t.TempDir() + "/config.yaml"

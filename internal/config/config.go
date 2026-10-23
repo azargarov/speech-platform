@@ -26,6 +26,7 @@ type Config struct {
 	STTTimeout      string         `yaml:"stt_timeout"`
 	TTSURL          string         `yaml:"tts_url"`
 	TTSTimeout      string         `yaml:"tts_timeout"`
+	WarmupTimeout   string         `yaml:"warmup_timeout"`
 	TextTransform   *TextTransform `yaml:"text_transform"`
 }
 
@@ -46,6 +47,9 @@ func Load(path string) (Config, error) {
 	var extra any
 	if e = d.Decode(&extra); e != io.EOF {
 		return c, fmt.Errorf("expected exactly one YAML document")
+	}
+	if c.WarmupTimeout == "" {
+		c.WarmupTimeout = "180s"
 	}
 	if value, ok := os.LookupEnv("SPEECH_LISTEN_PORT"); ok && value != "" {
 		port, err := strconv.Atoi(value)
@@ -68,6 +72,11 @@ func (c Config) Validate() error {
 		if e != nil || d <= 0 {
 			return fmt.Errorf("all timeouts must be positive durations")
 		}
+	}
+	warmup, err := time.ParseDuration(c.WarmupTimeout)
+	writeTimeout, _ := time.ParseDuration(c.WriteTimeout)
+	if err != nil || warmup < time.Second || warmup > 10*time.Minute || warmup+5*time.Second > writeTimeout {
+		return fmt.Errorf("warmup_timeout must be from 1s to 10m and fit write_timeout")
 	}
 	for name, raw := range map[string]string{"stt_url": c.STTURL, "tts_url": c.TTSURL} {
 		workerURL, err := url.Parse(raw)

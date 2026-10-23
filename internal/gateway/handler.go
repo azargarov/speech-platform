@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -116,7 +117,19 @@ func HandlerWithWorkers(state Readiness, maxBytes int64, stt *STTProxy, tts *TTS
 }
 
 func HandlerWithWorkersAndText(state Readiness, maxBytes int64, stt *STTProxy, tts *TTSProxy, text http.Handler) http.Handler {
+	return HandlerWithWarmupContext(state, maxBytes, stt, tts, text, 180*time.Second, context.Background())
+}
+
+func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tts *TTSProxy, text http.Handler, timeout time.Duration, warmupRoot context.Context) http.Handler {
 	mux := http.NewServeMux()
+	warmup := newWarmupCoordinator()
+	warmupSlots := make(chan struct{}, 4)
+	if timeout <= 0 {
+		timeout = 180 * time.Second
+	}
+	if warmupRoot == nil {
+		warmupRoot = context.Background()
+	}
 	requestSlots := make(chan struct{}, 4)
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
@@ -138,6 +151,16 @@ func HandlerWithWorkersAndText(state Readiness, maxBytes int64, stt *STTProxy, t
 			return
 		}
 		transport.JSON(w, 200, map[string]string{"status": "ready"})
+	})
+	mux.HandleFunc("/v1/models/warmup", func(w http.ResponseWriter, r *http.Request) {
+		token := ""
+		if stt != nil {
+			token = stt.Token
+		}
+		if token == "" && tts != nil {
+			token = tts.Token
+		}
+		serveWarmup(w, r, token, warmup, warmupSlots, stt, tts, text, timeout, warmupRoot)
 	})
 	if text == nil {
 		mux.HandleFunc("/v1/text/transformations", func(w http.ResponseWriter, r *http.Request) {

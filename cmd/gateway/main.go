@@ -62,7 +62,7 @@ func run() error {
 		defer textService.Close()
 	}
 	ready := gateway.NewWorkersReadiness(stt, tts)
-	srv := &http.Server{Addr: net.JoinHostPort(c.ListenHost, fmt.Sprint(c.ListenPort)), Handler: gateway.HandlerWithWorkersAndText(ready, c.MaxRequestBytes, stt, tts, textService), ReadTimeout: duration(c.ReadTimeout), ReadHeaderTimeout: duration(c.ReadTimeout), WriteTimeout: duration(c.WriteTimeout), IdleTimeout: duration(c.IdleTimeout), MaxHeaderBytes: c.MaxHeaderBytes}
+	srv := &http.Server{Addr: net.JoinHostPort(c.ListenHost, fmt.Sprint(c.ListenPort)), Handler: gateway.HandlerWithWarmupContext(ready, c.MaxRequestBytes, stt, tts, textService, duration(c.WarmupTimeout), ctx), ReadTimeout: duration(c.ReadTimeout), ReadHeaderTimeout: duration(c.ReadTimeout), WriteTimeout: duration(c.WriteTimeout), IdleTimeout: duration(c.IdleTimeout), MaxHeaderBytes: c.MaxHeaderBytes}
 	errs := make(chan error, 1)
 	go func() { logger.Info("gateway starting"); errs <- srv.ListenAndServe() }()
 	select {

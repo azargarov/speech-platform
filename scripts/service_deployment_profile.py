@@ -34,7 +34,13 @@ GATEWAY_FIELDS = {
     "idle_timeout",
     "shutdown_timeout",
 }
-GATEWAY_OPTIONAL_FIELDS = {"stt_url", "stt_timeout", "tts_url", "tts_timeout"}
+GATEWAY_OPTIONAL_FIELDS = {
+    "stt_url",
+    "stt_timeout",
+    "tts_url",
+    "tts_timeout",
+    "warmup_timeout",
+}
 
 
 def _fields(value, expected: set[str], label: str) -> None:
@@ -162,6 +168,17 @@ def load_gateway_config(path: str | Path) -> dict:
             raise ValueError(f"Gateway {key} must be a positive Go duration")
         if _duration_seconds(value) <= 0:
             raise ValueError(f"Gateway {key} must be a positive Go duration")
+    if "warmup_timeout" in config:
+        value = config["warmup_timeout"]
+        if (
+            not isinstance(value, str)
+            or not GO_DURATION_PATTERN.fullmatch(value)
+            or not 1 <= _duration_seconds(value) <= 600
+            or _duration_seconds(value) + 5 > _duration_seconds(config["write_timeout"])
+        ):
+            raise ValueError(
+                "Gateway warmup_timeout must be from 1s to 10m and fit write_timeout"
+            )
     if "stt_url" in config:
         worker = urlparse(
             config["stt_url"] if isinstance(config["stt_url"], str) else ""
