@@ -116,3 +116,32 @@ docker network rm "${OLLAMA_NETWORK_NAME:-speech-platform_ollama_private}"
 
 The deployment tooling never runs these cleanup commands. It does not run
 whole-host prune or delete externally managed networks.
+
+### Reusing an approved local Gateway image
+
+The canonical installer defaults to its normal build path. For a specifically
+approved prebuilt Gateway, the private `.env` may pin both the full expected
+local image ID and its full source revision, then an operator may request the
+narrow no-build path:
+
+```dotenv
+GATEWAY_EXPECTED_IMAGE_ID=sha256:5b07af8af964262e44d9961b39e2b1b346deef90d100ffb4cb39c45d2ef97159
+GATEWAY_EXPECTED_SOURCE_REVISION=c3f0079227af573f7715640afa5b229a22c46ab6
+```
+
+After separately approved implementation/commit and deployment authorization,
+run `sudo -v`, then `make plan SERVICE=gateway NO_BUILD=1` and
+`make install SERVICE=gateway NO_BUILD=1`. This mode is Gateway-only. It checks
+that the source revision is an ancestor of the clean checkout, verifies the
+Gateway build inputs have not changed since that revision, and inspects the
+local tag for the exact image ID, revision/service/role/runtime labels and
+`linux/amd64` platform. It rechecks immediately before recreation and uses
+Compose `--no-build --pull never --no-deps`; it cannot pull or rebuild. Missing
+or mismatched identity aborts the operation. Existing installer preflight,
+Ollama network preparation, readiness and read-only connectivity checks remain
+active. It does not alter model-store permissions or bypass the `sudo -v`
+requirement. The six M06 files and local documentation must be preserved using
+the private same-checkout backup procedure documented in the M05B Stage 2C
+readiness record so the clean-worktree gate remains effective. Rollback remains
+a separately authorized Gateway-only action and does not detach/restart
+Ollama or remove its external network.

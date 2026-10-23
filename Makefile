@@ -24,6 +24,19 @@ TTS_MODEL_OWNER_UID ?= 0
 SOURCE_REVISION ?= $(shell git rev-parse HEAD)
 LOCK_ROOT ?= $(SPEECH_PLATFORM_LOCK_ROOT)
 PROFILE ?= regular
+NO_BUILD_ARGS :=
+ifneq ($(strip $(NO_BUILD)),)
+ifneq ($(NO_BUILD),1)
+$(error NO_BUILD must be 1 when supplied)
+endif
+ifneq ($(filter plan install,$(MAKECMDGOALS)), $(MAKECMDGOALS))
+$(error NO_BUILD is supported only for make plan or make install)
+endif
+ifneq ($(SERVICE),gateway)
+$(error NO_BUILD=1 requires SERVICE=gateway)
+endif
+NO_BUILD_ARGS := --no-build
+endif
 ifneq ($(filter legacy-plan legacy-install,$(MAKECMDGOALS)),)
 ifeq ($(PROFILE),regular)
 STT_DEPLOYMENT_DIR := private/deployment/stt-cuda
@@ -129,9 +142,9 @@ tts-warmup:
 tts-state:
 	docker compose --env-file .env -f compose.yaml exec -T tts python -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8082/internal/v1/state", timeout=3).read().decode())'
 plan:
-	$(PYTHON) scripts/product_deployment.py plan
+	$(PYTHON) scripts/product_deployment.py plan $(if $(NO_BUILD),--service "$(SERVICE)") $(NO_BUILD_ARGS)
 install:
-	$(PYTHON) scripts/product_deployment.py install $(if $(SERVICE),--service "$(SERVICE)")
+	$(PYTHON) scripts/product_deployment.py install $(if $(SERVICE),--service "$(SERVICE)") $(NO_BUILD_ARGS)
 status:
 	$(PYTHON) scripts/product_deployment.py status
 logs:

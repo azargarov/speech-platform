@@ -27,6 +27,9 @@ else:
 ROOT = Path(__file__).resolve().parents[1]
 DIGEST = "86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6"
 TTS_DIGEST = "04d6e05b69b22568030ac21f494e406ffdf2d06efeeab43cfdb4c21ba8c9bd41"
+IMAGE_ID_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+SOURCE_REVISION_PATTERN = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+GATEWAY_RUNTIME_VARIANT = "foundation"
 COMPOSE = [
     "docker",
     "compose",
@@ -60,6 +63,8 @@ ALLOWED_ENV = {
     "TTS_STOP_GRACE_PERIOD",
     "SPEECH_API_URL",
     "GATEWAY_CONFIG",
+    "GATEWAY_EXPECTED_IMAGE_ID",
+    "GATEWAY_EXPECTED_SOURCE_REVISION",
     "OLLAMA_CONTAINER_NAME",
     "OLLAMA_NETWORK_NAME",
 }
@@ -103,18 +108,191 @@ def load_env() -> dict[str, str]:
     return values
 
 
-def set_compose_env(values: dict[str, str], source_revision: str) -> None:
+def set_compose_env(
+    values: dict[str, str], source_revision: str, gateway_image: str | None = None
+) -> None:
     os.environ.update(values)
     os.environ["SOURCE_REVISION"] = source_revision
     os.environ["GATEWAY_CONFIG"] = str(gateway_config_path(values))
+    os.environ.pop("GATEWAY_IMAGE", None)
+    if gateway_image is not None:
+        os.environ["GATEWAY_IMAGE"] = gateway_image
 
 
-def compose(values, revision, *args, capture=False):
-    set_compose_env(values, revision)
+def compose(values, revision, *args, capture=False, gateway_image=None):
+    set_compose_env(values, revision, gateway_image=gateway_image)
     command = list(COMPOSE)
     if gateway_uses_local_ollama(gateway_config_path(values)):
         command.extend(["-f", str(ROOT / "deployments/compose/compose.ollama.yaml")])
     return run([*command, *args], capture=capture)
+
+
+def validate_no_build_options(
+    command: str,
+    service: str | None,
+    no_build: bool,
+    expected_image_id: str | None,
+    configured_image_id: str | None,
+    expected_source_revision: str | None,
+    configured_source_revision: str | None,
+) -> tuple[str, str] | None:
+    if (
+        expected_image_id is not None or expected_source_revision is not None
+    ) and not no_build:
+        raise OperatorError("expected image/source identity requires --no-build")
+    if not no_build:
+        return None
+    if command not in {"plan", "install"}:
+        raise OperatorError("--no-build is supported only for plan/install")
+    if service != "gateway":
+        raise OperatorError("--no-build is supported only with --service gateway")
+    for cli_value, configured_value, flag, setting in (
+        (
+            expected_image_id,
+            configured_image_id,
+            "--expected-image-id",
+            "GATEWAY_EXPECTED_IMAGE_ID",
+        ),
+        (
+            expected_source_revision,
+            configured_source_revision,
+            "--expected-source-revision",
+            "GATEWAY_EXPECTED_SOURCE_REVISION",
+        ),
+    ):
+        if (
+            cli_value is not None
+            and configured_value is not None
+            and cli_value != configured_value
+        ):
+            raise OperatorError(f"{flag} conflicts with {setting}")
+    image_id = expected_image_id or configured_image_id
+    if image_id is None:
+        raise OperatorError(
+            "--no-build requires GATEWAY_EXPECTED_IMAGE_ID or --expected-image-id"
+        )
+    if not IMAGE_ID_PATTERN.fullmatch(image_id):
+        raise OperatorError("--expected-image-id must be a full sha256 image ID")
+    source_revision = expected_source_revision or configured_source_revision
+    if source_revision is None:
+        raise OperatorError(
+            "--no-build requires GATEWAY_EXPECTED_SOURCE_REVISION or --expected-source-revision"
+        )
+    if not SOURCE_REVISION_PATTERN.fullmatch(source_revision):
+        raise OperatorError("expected source revision must be a full Git revision")
+    return image_id, source_revision
+
+
+def verify_gateway_image(
+    values: dict,
+    revision: str,
+    expected_image_id: str,
+    expected_source_revision: str,
+) -> dict:
+    """Validate the configured local Gateway tag without pulling or building."""
+    if not SOURCE_REVISION_PATTERN.fullmatch(expected_source_revision):
+        raise OperatorError("expected source revision must be a full Git revision")
+    clean = run(["git", "status", "--porcelain"], check=False, capture=True)
+    if clean.returncode or clean.stdout.strip():
+        raise OperatorError("no-build mode requires a clean Git checkout")
+    ancestor = run(
+        ["git", "merge-base", "--is-ancestor", expected_source_revision, revision],
+        check=False,
+        capture=True,
+    )
+    if ancestor.returncode:
+        raise OperatorError("expected image source revision is not an ancestor of HEAD")
+    build_inputs = (
+        ".dockerignore",
+        "go.mod",
+        "go.sum",
+        "cmd",
+        "internal",
+        "deployments/compose/gateway.Dockerfile",
+    )
+    source_diff = run(
+        [
+            "git",
+            "diff",
+            "--quiet",
+            expected_source_revision,
+            revision,
+            "--",
+            *build_inputs,
+        ],
+        check=False,
+        capture=True,
+    )
+    if source_diff.returncode:
+        raise OperatorError(
+            "Gateway build inputs differ from the image source revision"
+        )
+
+    expected_reference = f"speech-platform-gateway:{expected_source_revision}"
+    rendered = compose(
+        values,
+        revision,
+        "config",
+        "--format",
+        "json",
+        capture=True,
+        gateway_image=expected_reference,
+    )
+    try:
+        config = json.loads(rendered.stdout)
+        image_reference = config["services"]["gateway"]["image"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise OperatorError("could not resolve the configured Gateway image") from exc
+    if not isinstance(image_reference, str) or not image_reference:
+        raise OperatorError("configured Gateway image reference is missing")
+    if image_reference != expected_reference:
+        raise OperatorError(
+            "configured Gateway image tag does not match source revision"
+        )
+
+    result = run(
+        ["docker", "image", "inspect", image_reference],
+        check=False,
+        capture=True,
+    )
+    if result.returncode:
+        raise OperatorError(
+            f"configured Gateway image is not available locally: {image_reference}"
+        )
+    try:
+        images = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise OperatorError("Gateway image inspection returned invalid JSON") from exc
+    if (
+        not isinstance(images, list)
+        or len(images) != 1
+        or not isinstance(images[0], dict)
+    ):
+        raise OperatorError("Gateway image reference is missing or ambiguous")
+    image = images[0]
+    if image.get("Id") != expected_image_id:
+        raise OperatorError("Gateway image ID does not match --expected-image-id")
+
+    labels = (image.get("Config") or {}).get("Labels")
+    expected_labels = {
+        "org.opencontainers.image.revision": expected_source_revision,
+        "com.speech-platform.service": "gateway",
+        "com.speech-platform.service-role": "gateway",
+        "com.speech-platform.runtime-variant": GATEWAY_RUNTIME_VARIANT,
+    }
+    if not isinstance(labels, dict):
+        raise OperatorError("Gateway image is missing required OCI labels")
+    for name, value in expected_labels.items():
+        if labels.get(name) != value:
+            raise OperatorError(f"Gateway image label mismatch: {name}")
+    if image.get("Os") != "linux" or image.get("Architecture") != "amd64":
+        raise OperatorError("Gateway image platform must be linux/amd64")
+    return {
+        "reference": image_reference,
+        "image_id": image["Id"],
+        "revision": expected_source_revision,
+        "runtime_variant": GATEWAY_RUNTIME_VARIANT,
+    }
 
 
 def gateway_config_path(values: dict[str, str]) -> Path:
@@ -680,6 +858,19 @@ def main() -> int:
     parser.add_argument(
         "--service", choices=("gateway",), help="limit install to Gateway"
     )
+    parser.add_argument(
+        "--no-build",
+        action="store_true",
+        help="use an already local, identity-verified Gateway image (Gateway only)",
+    )
+    parser.add_argument(
+        "--expected-image-id",
+        help="required full sha256 image ID for --no-build",
+    )
+    parser.add_argument(
+        "--expected-source-revision",
+        help="full Git source revision for the approved image in --no-build mode",
+    )
     parser.add_argument("--audio", type=Path)
     parser.add_argument(
         "--source-language", choices=("auto", "ru", "en", "sv"), default="auto"
@@ -689,8 +880,28 @@ def main() -> int:
     )
     args = parser.parse_args()
     try:
+        values = load_env()
+        no_build_identity = validate_no_build_options(
+            args.command,
+            args.service,
+            args.no_build,
+            args.expected_image_id,
+            values.get("GATEWAY_EXPECTED_IMAGE_ID"),
+            args.expected_source_revision,
+            values.get("GATEWAY_EXPECTED_SOURCE_REVISION"),
+        )
+        expected_image_id, expected_source_revision = (
+            no_build_identity if no_build_identity is not None else (None, None)
+        )
         if args.command == "plan":
             values, revision, compose_version, gpu, active_gpu_processes = checks()
+            verified_image = (
+                verify_gateway_image(
+                    values, revision, expected_image_id, expected_source_revision
+                )
+                if args.no_build
+                else None
+            )
             print(
                 f"PASS: Docker Compose {compose_version}; source {revision}; GPU {gpu}; model release v0.1.2; manifest {DIGEST}"
             )
@@ -702,6 +913,15 @@ def main() -> int:
                 f"Plan: project={values.get('COMPOSE_PROJECT_NAME', 'speech-platform')} API={endpoint} model={values['MODEL_STORE']}/{DIGEST}"
             )
             print(f"Selected GPU compute processes: {active_gpu_processes}")
+            if verified_image:
+                print(
+                    "No-build mode: enabled; local Gateway image "
+                    f"{verified_image['reference']} ID {verified_image['image_id']} "
+                    f"revision {verified_image['revision']} variant "
+                    f"{verified_image['runtime_variant']}"
+                )
+            else:
+                print("No-build mode: disabled; Gateway image build remains selected.")
             if gateway_uses_local_ollama(gateway_config_path(values)):
                 print(
                     "Local Ollama: enabled; install will prepare network "
@@ -716,6 +936,17 @@ def main() -> int:
             values, revision, _version, _gpu, _processes = checks(
                 require_clean=True, require_idle_gpu=True
             )
+            if args.no_build:
+                verified_image = verify_gateway_image(
+                    values,
+                    revision,
+                    expected_image_id,
+                    expected_source_revision,
+                )
+                print(
+                    "No-build mode: enabled; validated local Gateway image "
+                    f"{verified_image['reference']} ID {verified_image['image_id']}"
+                )
             if args.service == "gateway":
                 require_existing_workers_healthy(values, revision)
             if gateway_uses_local_ollama(gateway_config_path(values)):
@@ -727,10 +958,33 @@ def main() -> int:
                     f"{network_result['container_name']}"
                 )
             services = (args.service,) if args.service else ("gateway", "stt", "tts")
-            compose(values, revision, "build", *services)
+            if not args.no_build:
+                compose(values, revision, "build", *services)
             checks(require_clean=True, require_idle_gpu=True)
             if args.service == "gateway":
-                compose(values, revision, "up", "-d", "--no-deps", "gateway")
+                if args.no_build:
+                    # Recheck after all preflight/network work and directly before
+                    # Compose can recreate the container.
+                    verified_image = verify_gateway_image(
+                        values,
+                        revision,
+                        expected_image_id,
+                        expected_source_revision,
+                    )
+                    compose(
+                        values,
+                        revision,
+                        "up",
+                        "--no-build",
+                        "--pull",
+                        "never",
+                        "-d",
+                        "--no-deps",
+                        "gateway",
+                        gateway_image=verified_image["reference"],
+                    )
+                else:
+                    compose(values, revision, "up", "-d", "--no-deps", "gateway")
             else:
                 compose(values, revision, "up", "-d")
             wait_ready(int(values["SPEECH_PORT"]), values["SPEECH_BIND_IP"])
@@ -742,10 +996,14 @@ def main() -> int:
                     "--rm",
                     "--no-deps",
                     "-T",
+                    *(["--pull", "never"] if args.no_build else []),
                     "gateway",
                     "--config",
                     "/config/gateway.yaml",
                     "--check-ollama",
+                    gateway_image=(
+                        verified_image["reference"] if args.no_build else None
+                    ),
                 )
             endpoint = values.get(
                 "SPEECH_API_URL",

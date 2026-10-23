@@ -1,6 +1,6 @@
 # M05B verification
 
-Status: **Stage 1 offline verification and Stage 2A/2B qualification are operator-accepted. Stage 2A completed 18 requests with natural expiry and GPU recovery; 7/9 outputs at each context failed lexical invariants and remain failed. Local Qwen is retained only for user-reviewed transformations, with no quality guarantee. Stage 2B live compatibility and offline compiled-Gateway API acceptance passed. Stage 2C deployment tooling is offline-verified; no production deployment or M05B closeout is authorized.**
+Status: **Stage 1 offline verification and Stage 2A/2B qualification are operator-accepted. Stage 2A completed 18 requests with natural expiry and GPU recovery; 7/9 outputs at each context failed lexical invariants and remain failed. Local Qwen is retained only for user-reviewed transformations, with no quality guarantee. Stage 2B live compatibility and offline compiled-Gateway API acceptance passed. The approved Stage 2C image was built and offline-verified. An explicitly authorized deployment attempt stopped at preflight because the root-owned model integrity check required sudo authorization; no production container was changed. M05B remains open.**
 
 ## Stage 2A preflight and safety gate — 2026-10-22
 
@@ -1482,3 +1482,161 @@ deployment review. The exact proposed Gateway-only rollout and rollback are in
 runtime connectivity, live post-deployment behavior, or deployment readiness.
 No commit, production rollout or M05B closeout is authorized by this
 verification.
+
+## Stage 2C approved release image and controlled deployment preflight — 2026-10-23
+
+**OBSERVED — source and image:** HEAD was the approved commit
+`c3f0079227af573f7715640afa5b229a22c46ab6`; tracked files and index were
+clean, with six M06 planning files untracked and preserved. The image was
+built with
+`SOURCE_REVISION=c3f0079227af573f7715640afa5b229a22c46ab6 docker compose
+--env-file .env.example -f compose.yaml build gateway`. The tag is
+`speech-platform-gateway:c3f0079227af573f7715640afa5b229a22c46ab6`, image ID
+and RepoDigest
+`sha256:5b07af8af964262e44d9961b39e2b1b346deef90d100ffb4cb39c45d2ef97159`,
+platform `linux/amd64`, created `2026-10-23T05:28:13.060921951Z`. OCI
+revision/service labels matched the approved source. Docker client/server
+29.1.3 and Compose v5.6.0 were observed.
+
+**OBSERVED — candidate offline checks:** image `--check-config` passed with
+the private candidate config and `--network none`; config SHA-256 was
+`0c5e22b499187dd413a9b47103db833b91e6869809dddf113cc8afc45c165c95`. The
+config selected local Ollama, 8192 context and 5s keep-alive with cloud
+disabled. Base and candidate Compose rendering passed: Gateway remained
+loopback-bound and attached to the expected networks, while rendered STT/TTS
+definitions were unchanged.
+
+**OBSERVED — live preflight:** at 2026-10-23 05:35 UTC, Gateway, STT and TTS
+were running and healthy with restart count 0. Their IDs/start times were
+unchanged from the prior deployment baseline; Gateway `/healthz` and
+`/readyz` returned HTTP 200. Gateway still used M03B image ID
+`sha256:d4cfd90de08651cc79e97632ab6ea904a2c0951f1e9e7ff562c923e1242241b9`
+and loopback port 8080. Ollama was running with restart count 0, retained its
+original `bridge` and private network attachments, and had no model resident.
+Host `GET /api/version` returned HTTP 200. The private network was internal
+and contained only Ollama before Gateway deployment. GPU baseline was 2,216
+MiB used / 12,694 MiB free of 15,360 MiB. The M03B rollback tag was present
+and resolved to the exact currently running Gateway image ID; its Compose
+overlay rendered a Gateway-only rollback without the Ollama network.
+
+**OBSERVED — deployment gate:** `.env` initially had no `GATEWAY_CONFIG`.
+The candidate path was added temporarily with mode 0600 preserved. Running
+`make plan PYTHON=.venv/bin/python` returned exit 2 during read-only model
+integrity verification: the configured model store is root-owned and the
+installer reported that `sudo -v` is required. No model files or Docker
+resources were changed. The temporary `.env` setting was removed, restoring
+the prior file contents and mode. `make install SERVICE=gateway` and all
+post-deployment checks were not run. The installer also requires a clean Git
+worktree; the six untracked M06 planning files were not hidden or removed.
+
+Private sanitized evidence is in
+`private/m05b/stage2c/deployment-preflight-20261023T053556Z/report.json`
+(mode 0600). **INTERPRETATION:** artifact, config and rollback identities
+matched; canonical preflight could not complete without sudo authorization.
+The production Gateway remains on M03B. **NOT ESTABLISHED:** candidate runtime
+health, production-namespace Ollama connectivity, live transformation,
+post-inference GPU recovery, or natural model expiry through the deployed
+Gateway. Resume only after model-integrity authorization and a clean-source
+install path are available; preserve all M06 files and recheck candidate
+identities before `make install`.
+
+## Stage 2C deployment preflight blocker investigation — 2026-10-23
+
+**OBSERVED — deployment-tooling review:** `scripts.product_deployment.checks`
+unconditionally runs release model verification and the TTS model verifier
+for both `plan` and `install`, including `SERVICE=gateway`. The read-only
+check loads repository-pinned manifests, traverses the content-addressed
+STT/TTS artifact directories, validates file sets and sizes, and hashes all
+payload bytes. The store root is owned by `root:stt-model-reader`, mode 2710;
+the current `master` process is not in GID 988 and cannot traverse the digest
+directories. No artifact files, permissions or ownership were modified.
+Historical M01E checks are not accepted by the current helper as current
+payload attestations. The supported minimum authorization is interactive
+`sudo -v`; the helper then invokes only its existing read-only checker
+commands as root via `sudo -n`. The preflight check is not needed to mutate a
+Gateway-only container, but it is a current mandatory deployment gate and was
+not bypassed.
+
+**OBSERVED — worktree/install semantics:** only the current checkout appears
+in `git worktree list`. The installer checks `git status --porcelain` for a
+clean source tree. It also checks that the running `speech-platform` Compose
+project's recorded config path equals the resolved `compose.yaml` under its
+own `ROOT`. Docker records `/home/master/speech-platform/compose.yaml`; a
+detached worktree at another path will fail project-ownership validation (or
+be a different project and collide with host port 8080). The six M06 files
+and two modified Stage 2C docs therefore cannot be left in the current tree
+while running the installer, and no alternate existing release checkout is
+available. The readiness record now describes a private backup/restore
+procedure at the original canonical path; it does not alter source checks or
+commit the documentation.
+
+**OBSERVED — image behavior:** `install` unconditionally invokes Compose
+`build gateway` before `up`; there is no no-build or expected-image-ID option.
+The approved image/tag remains locally present, but exact identity after an
+installer rebuild is not established and the helper does not assert the
+expected ID between build and `up`. Direct `compose up --no-build` was not
+used because it bypasses installer checks and the post-start read-only
+Ollama probe. No application/deployment tooling change was made. A validated
+no-build/image-ID option would need focused regression tests and separate
+implementation/commit approval if exact artifact reuse is required.
+
+**OBSERVED — offline verification:**
+
+| Command/check | Result |
+| --- | --- |
+| `.venv/bin/python -m unittest scripts.test_ollama_network scripts.test_product_deployment -v` | PASS, 24 tests. |
+| Candidate image `--check-config` with private config, `--network none`, read-only filesystem and dropped capabilities | PASS, exit 0. |
+| `make config PYTHON=.venv/bin/python` | PASS; Gateway, STT, TTS and product configuration validators. |
+| `make compose-check PYTHON=.venv/bin/python` | PASS; base/optional Ollama and supported CPU/CUDA Compose rendering checks. |
+| `make release-check PYTHON=.venv/bin/python` | PASS; v0.1.2 descriptor validation. |
+| Candidate Gateway Compose render assertion | PASS after correcting the assertion to the rendered network-map shape; render retained loopback binding, external Ollama network and isolated worker network sets. The first ad-hoc assertion expected arrays and failed without affecting infrastructure. |
+| `make governance-check PYTHON=.venv/bin/python` | PASS; structural/reference checks and 2 governance tests. |
+| `git diff --check` | PASS. |
+
+No `make install`, container lifecycle operation, Docker network mutation,
+model-store access with privilege, inference, or cloud request was run in this
+investigation. **INTERPRETATION:** the model permission issue can be resolved
+without data changes by using the existing privileged read-only fallback;
+the local workspace can be made clean temporarily with a private backup and
+restoration at the same Compose path. Exact reuse of the approved image is
+still unsupported by the installer and needs a separate decision. **NOT
+ESTABLISHED:** a successful privileged model check, post-check deployment
+plan, installer build identity, candidate deployment, or runtime behavior.
+
+## Verified no-build installer implementation — 2026-10-23
+
+**OBSERVED — focused regression checks:**
+
+| Command | Result |
+| --- | --- |
+| `.venv/bin/python -m py_compile scripts/product_deployment.py scripts/test_product_deployment.py` | PASS. |
+| `.venv/bin/python -m ruff format scripts/product_deployment.py scripts/test_product_deployment.py` | PASS; formatted 2 files. |
+| `.venv/bin/python -m ruff check scripts/product_deployment.py scripts/test_product_deployment.py` | PASS. |
+| `.venv/bin/python -m ruff format --check scripts/product_deployment.py scripts/test_product_deployment.py` | PASS. |
+| `.venv/bin/python -m unittest scripts.test_product_deployment scripts.test_ollama_network -v` | PASS; 32 tests. |
+| `make -n plan SERVICE=gateway NO_BUILD=1 PYTHON=.venv/bin/python` | PASS; expands to Gateway-only `plan --no-build`. |
+| `make -n install SERVICE=gateway NO_BUILD=1 PYTHON=.venv/bin/python` | PASS; expands to Gateway-only `install --no-build`. |
+| `make -n install SERVICE=stt NO_BUILD=1 PYTHON=.venv/bin/python` | Expected rejection: no-build requires `SERVICE=gateway`. |
+| `make -n status SERVICE=gateway NO_BUILD=1 PYTHON=.venv/bin/python` | Expected rejection: no-build is limited to plan/install. |
+| `make compose-check PYTHON=.venv/bin/python` | PASS; base, optional Ollama and supported worker Compose renders. |
+| `make config PYTHON=.venv/bin/python` | PASS; Gateway, STT and TTS configuration validation. |
+| `go run ./cmd/gateway --config private/m05b/stage2c/gateway.yaml --check-config` | PASS; private local-only candidate config. |
+| `make verify PYTHON=.venv/bin/python` | PASS; race-enabled Go tests, 523 repository script tests, 64 STT tests, build, lint/format, config, Compose, governance and dependency-lock checks. |
+| `git diff --check` | PASS. |
+
+The focused installer coverage verifies exact image ID, local tag availability,
+revision/service/role/runtime labels and platform; missing, malformed,
+ambiguous and mismatched image identities; no-build scope validation; normal
+build-path preservation; plan identity reporting; and Gateway-only install
+without build/pull while retaining worker-health, Ollama-network preparation,
+readiness and read-only provider checks. No provider inference, production
+container operation, Docker network mutation, model-store check, deployment or
+commit occurred.
+
+**INTERPRETATION:** the implementation is ready for a separate commit review.
+It is not yet available to a clean release checkout until reviewed changes are
+committed. Deployment still requires explicit operator authorization, the
+interactive `sudo -v` preflight, clean canonical worktree preparation described
+in the readiness record, and a successful installer plan. **NOT ESTABLISHED:**
+actual no-build image inspection against the live Docker daemon through this
+new code path, successful privileged preflight, deployment, or runtime behavior.

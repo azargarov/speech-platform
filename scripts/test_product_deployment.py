@@ -12,6 +12,479 @@ from scripts import product_deployment
 
 
 class ProductDeploymentTests(unittest.TestCase):
+    IMAGE_ID = (
+        "sha256:" + "5b07af8af964262e44d9961b39e2b1b346deef90d100ffb4cb39c45d2ef97159"
+    )
+    REVISION = "c3f0079227af573f7715640afa5b229a22c46ab6"
+
+    def _valid_gateway_image(self, **overrides):
+        image = {
+            "Id": self.IMAGE_ID,
+            "Os": "linux",
+            "Architecture": "amd64",
+            "Config": {
+                "Labels": {
+                    "org.opencontainers.image.revision": self.REVISION,
+                    "com.speech-platform.service": "gateway",
+                    "com.speech-platform.service-role": "gateway",
+                    "com.speech-platform.runtime-variant": "foundation",
+                }
+            },
+        }
+        image.update(overrides)
+        return image
+
+    def _verification_run(self, image_result):
+        def run(args, **_kwargs):
+            if args[:3] == ["git", "status", "--porcelain"]:
+                return SimpleNamespace(returncode=0, stdout="")
+            if args[:3] == ["git", "merge-base", "--is-ancestor"]:
+                return SimpleNamespace(returncode=0, stdout="")
+            if args[:3] == ["git", "diff", "--quiet"]:
+                return SimpleNamespace(returncode=0, stdout="")
+            if args[:3] == ["docker", "image", "inspect"]:
+                return image_result
+            raise AssertionError(f"unexpected command: {args}")
+
+        return run
+
+    def test_no_build_verifies_exact_configured_local_image(self):
+        rendered = json.dumps(
+            {
+                "services": {
+                    "gateway": {"image": f"speech-platform-gateway:{self.REVISION}"}
+                }
+            }
+        )
+        with (
+            patch.object(
+                product_deployment,
+                "compose",
+                return_value=SimpleNamespace(stdout=rendered),
+            ),
+            patch.object(
+                product_deployment,
+                "run",
+                side_effect=self._verification_run(
+                    SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps([self._valid_gateway_image()]),
+                    )
+                ),
+            ) as run,
+        ):
+            result = product_deployment.verify_gateway_image(
+                {}, self.REVISION, self.IMAGE_ID, self.REVISION
+            )
+        self.assertEqual(
+            result["reference"], f"speech-platform-gateway:{self.REVISION}"
+        )
+        self.assertEqual(result["image_id"], self.IMAGE_ID)
+        self.assertEqual(result["revision"], self.REVISION)
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "docker",
+                "image",
+                "inspect",
+                f"speech-platform-gateway:{self.REVISION}",
+            ],
+        )
+
+    def test_no_build_rejects_missing_or_ambiguous_image_tag(self):
+        rendered = json.dumps(
+            {
+                "services": {
+                    "gateway": {"image": f"speech-platform-gateway:{self.REVISION}"}
+                }
+            }
+        )
+        for result, message in (
+            (SimpleNamespace(returncode=1, stdout=""), "not available locally"),
+            (SimpleNamespace(returncode=0, stdout="[]"), "missing or ambiguous"),
+            (
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps(
+                        [self._valid_gateway_image(), self._valid_gateway_image()]
+                    ),
+                ),
+                "missing or ambiguous",
+            ),
+        ):
+            with (
+                self.subTest(message=message),
+                patch.object(
+                    product_deployment,
+                    "compose",
+                    return_value=SimpleNamespace(stdout=rendered),
+                ),
+                patch.object(
+                    product_deployment,
+                    "run",
+                    side_effect=self._verification_run(result),
+                ),
+                self.assertRaisesRegex(product_deployment.OperatorError, message),
+            ):
+                product_deployment.verify_gateway_image(
+                    {}, self.REVISION, self.IMAGE_ID, self.REVISION
+                )
+
+    def test_no_build_rejects_image_id_mismatch_and_invalid_inspection(self):
+        rendered = json.dumps(
+            {
+                "services": {
+                    "gateway": {"image": f"speech-platform-gateway:{self.REVISION}"}
+                }
+            }
+        )
+        cases = (
+            (self._valid_gateway_image(Id="sha256:" + "0" * 64), "image ID"),
+            ({"Id": self.IMAGE_ID}, "required OCI labels"),
+        )
+        for image, message in cases:
+            with (
+                self.subTest(message=message),
+                patch.object(
+                    product_deployment,
+                    "compose",
+                    return_value=SimpleNamespace(stdout=rendered),
+                ),
+                patch.object(
+                    product_deployment,
+                    "run",
+                    side_effect=self._verification_run(
+                        SimpleNamespace(returncode=0, stdout=json.dumps([image]))
+                    ),
+                ),
+                self.assertRaisesRegex(product_deployment.OperatorError, message),
+            ):
+                product_deployment.verify_gateway_image(
+                    {}, self.REVISION, self.IMAGE_ID, self.REVISION
+                )
+
+    def test_no_build_rejects_revision_role_service_and_variant_mismatches(self):
+        rendered = json.dumps(
+            {
+                "services": {
+                    "gateway": {"image": f"speech-platform-gateway:{self.REVISION}"}
+                }
+            }
+        )
+        mutations = (
+            ("org.opencontainers.image.revision", "0" * 40, "revision"),
+            ("com.speech-platform.service-role", "stt", "service-role"),
+            ("com.speech-platform.service", "tts", "service"),
+            ("com.speech-platform.runtime-variant", "other", "runtime-variant"),
+        )
+        for label, value, message in mutations:
+            with self.subTest(label=label):
+                image = self._valid_gateway_image()
+                image["Config"]["Labels"][label] = value
+                with (
+                    patch.object(
+                        product_deployment,
+                        "compose",
+                        return_value=SimpleNamespace(stdout=rendered),
+                    ),
+                    patch.object(
+                        product_deployment,
+                        "run",
+                        side_effect=self._verification_run(
+                            SimpleNamespace(returncode=0, stdout=json.dumps([image]))
+                        ),
+                    ),
+                    self.assertRaisesRegex(product_deployment.OperatorError, message),
+                ):
+                    product_deployment.verify_gateway_image(
+                        {}, self.REVISION, self.IMAGE_ID, self.REVISION
+                    )
+
+    def test_no_build_options_require_gateway_and_full_expected_id(self):
+        cases = (
+            (
+                "install",
+                None,
+                True,
+                self.IMAGE_ID,
+                None,
+                self.REVISION,
+                None,
+                "--service gateway",
+            ),
+            (
+                "install",
+                "stt",
+                True,
+                self.IMAGE_ID,
+                None,
+                self.REVISION,
+                None,
+                "--service gateway",
+            ),
+            (
+                "status",
+                "gateway",
+                True,
+                self.IMAGE_ID,
+                None,
+                self.REVISION,
+                None,
+                "plan/install",
+            ),
+            (
+                "install",
+                "gateway",
+                True,
+                None,
+                None,
+                self.REVISION,
+                None,
+                "requires GATEWAY_EXPECTED_IMAGE_ID",
+            ),
+            (
+                "install",
+                "gateway",
+                True,
+                "sha256:abcd",
+                None,
+                self.REVISION,
+                None,
+                "full sha256 image ID",
+            ),
+            (
+                "install",
+                "gateway",
+                True,
+                self.IMAGE_ID,
+                "sha256:" + "0" * 64,
+                self.REVISION,
+                None,
+                "conflicts",
+            ),
+            (
+                "install",
+                "gateway",
+                True,
+                self.IMAGE_ID,
+                None,
+                "c3f0079",
+                None,
+                "full Git revision",
+            ),
+            (
+                "install",
+                "gateway",
+                False,
+                self.IMAGE_ID,
+                None,
+                self.REVISION,
+                None,
+                "requires --no-build",
+            ),
+        )
+        for (
+            command,
+            service,
+            no_build,
+            expected,
+            configured,
+            expected_revision,
+            configured_revision,
+            message,
+        ) in cases:
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(product_deployment.OperatorError, message),
+            ):
+                product_deployment.validate_no_build_options(
+                    command,
+                    service,
+                    no_build,
+                    expected,
+                    configured,
+                    expected_revision,
+                    configured_revision,
+                )
+
+    def test_no_build_plan_reports_verified_image(self):
+        values = {
+            "COMPOSE_PROJECT_NAME": "speech-platform",
+            "SPEECH_BIND_IP": "127.0.0.1",
+            "SPEECH_PORT": "8080",
+            "MODEL_STORE": "/models",
+        }
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "product_deployment.py",
+                    "plan",
+                    "--service",
+                    "gateway",
+                    "--no-build",
+                    "--expected-image-id",
+                    self.IMAGE_ID,
+                    "--expected-source-revision",
+                    self.REVISION,
+                ],
+            ),
+            patch.object(product_deployment, "load_env", return_value=values),
+            patch.object(
+                product_deployment,
+                "checks",
+                return_value=(values, self.REVISION, "compose", "gpu", 0),
+            ),
+            patch.object(
+                product_deployment,
+                "verify_gateway_image",
+                return_value={
+                    "reference": f"speech-platform-gateway:{self.REVISION}",
+                    "image_id": self.IMAGE_ID,
+                    "revision": self.REVISION,
+                    "runtime_variant": "foundation",
+                },
+            ),
+            patch.object(
+                product_deployment, "gateway_uses_local_ollama", return_value=False
+            ),
+            patch("builtins.print") as output,
+        ):
+            self.assertEqual(product_deployment.main(), 0)
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("No-build mode: enabled", rendered)
+        self.assertIn(self.IMAGE_ID, rendered)
+        self.assertIn(self.REVISION, rendered)
+
+    def test_no_build_install_skips_build_never_pulls_and_preserves_gateway_checks(
+        self,
+    ):
+        values = {"SPEECH_BIND_IP": "127.0.0.1", "SPEECH_PORT": "8080"}
+        events = []
+
+        def compose(_values, _revision, *args, **_kwargs):
+            events.append(("compose", args))
+            return SimpleNamespace(stdout="")
+
+        def verify(*_args):
+            events.append(("image-verify", None))
+            return {
+                "reference": "speech-platform-gateway:test",
+                "image_id": self.IMAGE_ID,
+            }
+
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "product_deployment.py",
+                    "install",
+                    "--service",
+                    "gateway",
+                    "--no-build",
+                    "--expected-image-id",
+                    self.IMAGE_ID,
+                    "--expected-source-revision",
+                    self.REVISION,
+                ],
+            ),
+            patch.object(product_deployment, "load_env", return_value=values),
+            patch.object(
+                product_deployment,
+                "checks",
+                return_value=(values, self.REVISION, "compose", "gpu", 0),
+            ) as checks,
+            patch.object(
+                product_deployment,
+                "require_existing_workers_healthy",
+                side_effect=lambda *_args: events.append(("workers", None)),
+            ),
+            patch.object(
+                product_deployment, "gateway_uses_local_ollama", return_value=True
+            ),
+            patch.object(
+                product_deployment,
+                "prepare_local_ollama",
+                side_effect=lambda *_args: events.append(("network", None))
+                or {
+                    "network": "reused",
+                    "network_name": "private",
+                    "attachment": "reused",
+                    "container_name": "ollama",
+                },
+            ),
+            patch.object(
+                product_deployment, "verify_gateway_image", side_effect=verify
+            ),
+            patch.object(product_deployment, "compose", side_effect=compose),
+            patch.object(
+                product_deployment,
+                "wait_ready",
+                side_effect=lambda *_args: events.append(("ready", None)),
+            ),
+            patch("builtins.print"),
+        ):
+            self.assertEqual(product_deployment.main(), 0)
+
+        self.assertEqual(checks.call_count, 2)
+        labels = [event[0] for event in events]
+        self.assertEqual(labels.count("image-verify"), 2)
+        self.assertLess(labels.index("image-verify"), labels.index("network"))
+        up = next(
+            args for kind, args in events if kind == "compose" and args[0] == "up"
+        )
+        self.assertIn("--no-build", up)
+        self.assertIn("--pull", up)
+        self.assertIn("never", up)
+        self.assertIn("--no-deps", up)
+        self.assertEqual(up[-1], "gateway")
+        provider_check = next(
+            args for kind, args in events if kind == "compose" and args[0] == "run"
+        )
+        self.assertIn("--pull", provider_check)
+        self.assertIn("never", provider_check)
+        self.assertIn("--check-ollama", provider_check)
+        self.assertFalse(
+            any("build" in args for kind, args in events if kind == "compose")
+        )
+
+    def test_normal_gateway_install_retains_existing_build_path(self):
+        values = {"SPEECH_BIND_IP": "127.0.0.1", "SPEECH_PORT": "8080"}
+        compose_calls = []
+        with (
+            patch.object(
+                sys,
+                "argv",
+                ["product_deployment.py", "install", "--service", "gateway"],
+            ),
+            patch.object(product_deployment, "load_env", return_value=values),
+            patch.object(
+                product_deployment,
+                "checks",
+                return_value=(values, self.REVISION, "compose", "gpu", 0),
+            ),
+            patch.object(product_deployment, "require_existing_workers_healthy"),
+            patch.object(
+                product_deployment, "gateway_uses_local_ollama", return_value=False
+            ),
+            patch.object(
+                product_deployment,
+                "compose",
+                side_effect=lambda _values,
+                _revision,
+                *args,
+                **_kwargs: compose_calls.append(args) or SimpleNamespace(stdout=""),
+            ),
+            patch.object(product_deployment, "wait_ready"),
+            patch("builtins.print"),
+        ):
+            self.assertEqual(product_deployment.main(), 0)
+        self.assertIn(("build", "gateway"), compose_calls)
+        up = next(args for args in compose_calls if args[0] == "up")
+        self.assertEqual(up, ("up", "-d", "--no-deps", "gateway"))
+
     def test_plan_reports_local_ollama_requirement_from_selected_config(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = Path(temporary) / "gateway.yaml"
@@ -39,6 +512,7 @@ class ProductDeploymentTests(unittest.TestCase):
                     "checks",
                     return_value=(values, "revision", "compose", "gpu", 0),
                 ),
+                patch.object(product_deployment, "load_env", return_value=values),
                 patch.object(
                     product_deployment, "gateway_config_path", return_value=config
                 ),

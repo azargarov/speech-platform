@@ -1,10 +1,9 @@
 # M05B Stage 2C — Deployment Readiness Review
 
-Status: **Gateway-to-Ollama network path qualified; production Gateway deployment is not authorized or ready.**
+Status: **Gateway-to-Ollama network path qualified; approved candidate built and offline-verified. A separately authorized deployment attempt stopped at preflight because the root-owned model integrity check could not obtain sudo authorization. No production service was changed.**
 The original read-only diagnosis was followed by the specifically authorized
-additive Ollama network attachment documented below. No production Gateway,
-STT or TTS container was changed or restarted; no Ollama setting or model was
-changed, and no inference was run.
+additive Ollama network attachment documented below. The 2026-10-23 deployment
+attempt did not recreate Gateway, STT, TTS or Ollama; no inference was run.
 
 ## 1. Observed deployment baseline
 
@@ -571,3 +570,228 @@ network overlay; it does not disconnect or restart shared Ollama. Verify
 Gateway/STT/TTS health and confirm STT/TTS IDs, start times and restart counts
 remain unchanged. Inspect the prior private rollback overlay and baseline image
 before execution. Network retirement is a distinct operator-reviewed action.
+
+## 13. Approved release build and controlled deployment preflight — 2026-10-23
+
+**OBSERVED — artifact:** from approved source commit
+`c3f0079227af573f7715640afa5b229a22c46ab6`, the Gateway image was built using
+`SOURCE_REVISION=c3f0079227af573f7715640afa5b229a22c46ab6 docker compose
+--env-file .env.example -f compose.yaml build gateway`. The resulting tag is
+`speech-platform-gateway:c3f0079227af573f7715640afa5b229a22c46ab6`; image ID
+and local RepoDigest are
+`sha256:5b07af8af964262e44d9961b39e2b1b346deef90d100ffb4cb39c45d2ef97159`.
+The `org.opencontainers.image.revision` label equals the approved commit;
+service labels identify the foundation Gateway. Platform is `linux/amd64`.
+The private candidate config SHA-256 is
+`0c5e22b499187dd413a9b47103db833b91e6869809dddf113cc8afc45c165c95`; observed
+settings are `allow_cloud: false`, Ollama endpoint
+`http://ollama:11434/api/generate`, 8192 context and `keep_alive: 5s`.
+Candidate `--check-config` passed in a network-disabled container. Compose
+rendering retained loopback-only publication, the three existing Gateway
+networks plus the external Ollama network, and unchanged STT/TTS service
+definitions.
+
+**OBSERVED — live preflight, 2026-10-23 05:35 UTC:** production Gateway
+`03df6c803d3fee76c29919a19b19f02cb6eaf89f9e381d356277451cee536665` was
+healthy on rollback image ID
+`sha256:d4cfd90de08651cc79e97632ab6ea904a2c0951f1e9e7ff562c923e1242241b9`,
+started `2026-10-22T10:24:54.29065455Z`, restart count 0, published only at
+`127.0.0.1:8080`, and attached to `publish`, `stt_private`, and `tts_private`.
+`/healthz` and `/readyz` both returned HTTP 200. STT
+`02110b11d58c6d842316a29f29295383cab47a0865284cb69485165a17c79e23` and TTS
+`cbda986a4e9ace938023a8ccdb571d4169b2855814970ccab7dd49c82cd19569` were
+healthy with restart counts 0 and their recorded start times unchanged.
+Ollama `72d0ee33e0e6ff0adeb04a6a53c6d35dde5325ed3ac1b632967ba035a764a1ba`
+was running with restart count 0, attached to its original `bridge` and
+`speech-platform_ollama_private` networks; the private network remained an
+internal bridge with Ollama as its only container. Host `GET /api/version`
+returned HTTP 200 and `ollama ps` showed no resident model. The GPU baseline
+was 2,216 MiB used and 12,694 MiB free out of 15,360 MiB. The recorded M03B
+rollback tag existed and resolved to the exact image ID of the running
+Gateway; its rollback Compose render selected only the prior Gateway image
+and omitted the Ollama network overlay.
+
+The private `.env` initially lacked `GATEWAY_CONFIG`. The candidate config
+path was added temporarily and `.env` remained mode 0600. The required
+`make plan PYTHON=.venv/bin/python` returned exit 2 before producing a plan:
+the model store is root-owned and its read-only integrity check requires sudo
+authorization (`sudo -v`). No model data was changed. Because the same
+preflight is mandatory for install, `make install SERVICE=gateway` was not
+run. The temporary `GATEWAY_CONFIG` line was removed, restoring `.env` to its
+preflight contents and mode. Six untracked M06 planning files were preserved.
+
+**INTERPRETATION:** the image, private config, running baseline and rollback
+artifact match the approved identities. The deployment did not proceed
+because canonical preflight could not complete the read-only model integrity
+check. The Gateway remains on M03B; no runtime checks or transformation were
+performed against the candidate.
+
+**NOT ESTABLISHED:** successful canonical install, candidate Gateway health
+and Ollama connectivity in the production network namespace, post-deployment
+STT/TTS preservation, local transformation quality, post-request GPU recovery,
+or natural model expiry under the deployed Gateway.
+
+Private preflight evidence: `private/m05b/stage2c/deployment-preflight-20261023T053556Z/report.json` (mode 0600). The initial continuation suggestion to use a detached worktree is superseded by the ownership-path investigation in Section 14: the running Compose project is bound to this checkout's canonical path. This record does not close M05B.
+
+## 14. Deployment-preflight blocker diagnosis — 2026-10-23
+
+**OBSERVED — model-store validation:** `make plan` calls the shared `checks()`
+path with `model=True`. That path verifies the release descriptor and pinned
+manifests, then runs both `scripts.provision_models check` (all required
+release artifacts, including STT) and `scripts.tts_model check`. The checker
+reads each on-disk manifest, walks the artifact directories, validates the
+regular-file set and sizes, and hashes every payload file. The `check` actions
+are read-only; no model data, permissions or manifests are changed. This is
+performed for `plan` and `install`, including `SERVICE=gateway`; the current
+installer has no service-scoped check option. **INTERPRETATION:** model hashes
+are not intrinsically needed to replace only Gateway while healthy STT/TTS
+containers and their mounts remain untouched, but the current canonical
+deployment policy requires complete model integrity before every plan/install.
+No integrity check was bypassed.
+
+The current shell is UID/GID `1000:1000` and lacks `stt-model-reader` GID 988.
+The store root `/srv/speech-platform/models` is `root:stt-model-reader`, mode
+`2710`; current `stat` confirmed the digest directories are inaccessible to
+this shell. Older M01E evidence records a successful check at an earlier point
+and metadata-fingerprint observations, but the current installer does not
+accept a timestamped attestation in place of re-hashing current payloads.
+Minimum privilege under the existing helper is to run `sudo -v` interactively
+as the operator, then run the plan/install as the normal `master` user. Its
+existing fallback uses `sudo -n` only for the two read-only artifact-check
+commands. Do not change store ownership or modes.
+
+**OBSERVED — source cleanliness and project ownership:** current `git status`
+contains only the two uncommitted M05B Stage 2C documentation files and the
+six untracked M06 planning files; the index is clean and HEAD remains
+`c3f0079227af573f7715640afa5b229a22c46ab6`. `git worktree list` reports only
+the original checkout. `verify_project_ownership()` checks the running
+`speech-platform` project's Compose config file path against the current
+checkout's resolved `compose.yaml`. Docker reports the running project was
+created from `/home/master/speech-platform/compose.yaml` plus its rollback
+overlay. A detached worktree at another path is therefore not a supported
+drop-in: it fails that ownership check (or, under another project name,
+collides with the occupied loopback port). No source-cleanliness check was
+weakened.
+
+For a later approved install with no code changes, preserve changes at the
+same canonical checkout path by parking them in the ignored private tree:
+
+```sh
+set -eu
+backup="private/m05b/stage2c/deploy-preserve-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -m 0700 "$backup"
+git diff --binary -- docs/milestones/M05B/stage-2c-deployment-readiness.md docs/milestones/M05B/verification.md > "$backup/m05b-docs.patch"
+chmod 0600 "$backup/m05b-docs.patch"
+git diff --cached --quiet
+mv docs/adr/0022-model-lifecycle-predictive-warmup.md "$backup/adr-0022-model-lifecycle-predictive-warmup.md"
+mv docs/milestones/M06 "$backup/M06"
+git restore --worktree -- docs/milestones/M05B/stage-2c-deployment-readiness.md docs/milestones/M05B/verification.md
+git status --short
+```
+
+Before continuing, confirm the remaining worktree is clean and HEAD is still
+the approved commit. Keep the private backup until after deployment/rollback
+assessment, then restore the two records with `git apply --binary
+"$backup/m05b-docs.patch"` and move the two M06 paths back. Verify their saved
+hashes and the final `git status`; remove the private backup only after
+successful restoration. The `.env` remains ignored/private and must select
+`private/m05b/stage2c/gateway.yaml` in mode 0600 for plan/install.
+
+**OBSERVED — artifact reuse:** the approved image is still present under
+`speech-platform-gateway:c3f0079227af573f7715640afa5b229a22c46ab6` with the
+expected image ID. However, `make install SERVICE=gateway` unconditionally
+runs `docker compose build gateway`; it has no no-build or expected-image-ID
+option. The existing helper does not verify the exact candidate ID between
+build and `up`. A rebuild from the same source may reuse BuildKit cache, but
+identity preservation is **NOT ESTABLISHED**. Therefore the exact approved
+image cannot currently be guaranteed through the canonical installer. Do not
+use direct `compose up --no-build` as a workaround because it bypasses the
+installer's preflight, network preparation and post-start probe.
+
+**INTERPRETATION / decision gate:** no code changes are required to resolve
+the model permission and dirty-worktree conditions; use the supported
+read-only sudo fallback and temporarily preserve/restore local-only changes at
+the original Compose path. A focused installer enhancement is required if
+deployment must reuse this exact image: provide an explicit no-build mode that
+requires an expected local image ID and validates its revision/service labels
+before any lifecycle operation. That change needs offline regression tests,
+separate implementation/commit authorization, and a fresh release review. The
+alternative is to authorize a new build and approve its resulting image ID
+before deployment; the current installer cannot pause after build for this
+review. No change or deployment was made in this diagnostic task.
+
+## Verified no-build Gateway deployment preparation — 2026-10-23
+
+This section supersedes Section 14's observation that the canonical installer
+cannot reuse the approved image. The installer now has an explicit no-build
+mode, limited to `plan` and `install` with `SERVICE=gateway`. Normal installs
+continue to build as before. No deployment was executed for this tooling
+change.
+
+The only approved target remains:
+
+| Identity | Approved value |
+| --- | --- |
+| Source revision | `c3f0079227af573f7715640afa5b229a22c46ab6` |
+| Local tag | `speech-platform-gateway:c3f0079227af573f7715640afa5b229a22c46ab6` |
+| Image ID | `sha256:5b07af8af964262e44d9961b39e2b1b346deef90d100ffb4cb39c45d2ef97159` |
+
+After the installer change is separately reviewed and committed, prepare the
+existing canonical checkout at `/home/master/speech-platform` using the private
+backup/restore procedure in Section 14. Preserve its original Compose path,
+the two modified M05B records and all six M06 files; do not weaken the clean
+worktree check. Keep `.env` mode 0600 and set these private values:
+
+```dotenv
+GATEWAY_CONFIG=private/m05b/stage2c/gateway.yaml
+GATEWAY_EXPECTED_IMAGE_ID=sha256:5b07af8af964262e44d9961b39e2b1b346deef90d100ffb4cb39c45d2ef97159
+GATEWAY_EXPECTED_SOURCE_REVISION=c3f0079227af573f7715640afa5b229a22c46ab6
+```
+
+The expected identity can instead be supplied using the script's explicit
+`--expected-image-id` and `--expected-source-revision` options. Do not put
+credentials or private config contents on the command line.
+
+The plan/install preflight still verifies Git cleanliness and provenance,
+Compose project ownership, model-store integrity, credentials, worker health,
+and (when selected config enables local Ollama) network preparation/readiness.
+Run the operator's interactive `sudo -v` first; the existing helper uses
+non-interactive sudo only for its two read-only model artifact checks. It does
+not change model-store data or permissions. The no-build image gate additionally
+requires a full image ID and full source revision, verifies the approved
+revision is an ancestor of HEAD, checks that Gateway build inputs have not
+changed since that revision, and inspects the local tag's image ID, source,
+service, role, runtime-variant and platform labels. It never pulls or builds.
+The identity is inspected again immediately before Compose recreation.
+
+Proposed commands, after a separate deployment authorization:
+
+```sh
+cd /home/master/speech-platform
+sudo -v
+make plan SERVICE=gateway NO_BUILD=1 PYTHON=.venv/bin/python
+make install SERVICE=gateway NO_BUILD=1 PYTHON=.venv/bin/python
+```
+
+The install uses the canonical Compose project, prepares/reuses the approved
+Ollama network if required, retains Gateway-only `--no-deps`, and invokes
+Compose `up --no-build --pull never`. It then performs the existing readiness
+and read-only Ollama API checks. Abort on any missing/mismatched image, label,
+revision, dirty worktree, failed preflight, unexpected Compose scope, or failed
+post-deployment health/readiness/connectivity check. No cloud access is enabled.
+
+If rollback is separately authorized, restore only Gateway with the previously
+validated overlay and current known-good configuration:
+
+```sh
+GATEWAY_CONFIG="$PWD/configs/gateway.yaml" docker compose --env-file .env \
+  -p speech-platform -f compose.yaml \
+  -f private/m04/live-20261022/rollback.compose.yaml \
+  up -d --no-deps gateway
+```
+
+Then verify the restored image ID, `/healthz`, `/readyz`, and unchanged STT/TTS
+container identities and health. Gateway rollback does not disconnect or
+restart Ollama and does not remove the external network. Do not automatically
+run network cleanup. The commands above are a proposal only; neither plan nor
+install was run during this implementation task.
