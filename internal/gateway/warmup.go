@@ -357,9 +357,20 @@ func workerWarmup(ctx context.Context, baseURL, token string, client *http.Clien
 		return warmupResult{Operation: operation, Status: "unavailable", Code: "worker_rejected"}
 	}
 	var state struct {
-		ModelState string `json:"model_state"`
+		ModelState      string `json:"model_state"`
+		InferenceActive *bool  `json:"inference_active"`
 	}
-	if json.Unmarshal(body, &state) != nil || state.ModelState != "ready" {
+	if json.Unmarshal(body, &state) != nil {
+		return warmupResult{Operation: operation, Status: "unavailable", Code: "invalid_worker_response"}
+	}
+	expectedState := "ready"
+	if operation == "tts" {
+		expectedState = "loaded"
+		if state.InferenceActive == nil || *state.InferenceActive {
+			return warmupResult{Operation: operation, Status: "unavailable", Code: "invalid_worker_response"}
+		}
+	}
+	if state.ModelState != expectedState {
 		return warmupResult{Operation: operation, Status: "unavailable", Code: "invalid_worker_response"}
 	}
 	return warmupResult{Operation: operation, Status: "ready"}

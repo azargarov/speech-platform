@@ -64,7 +64,7 @@ func TestM06WarmupAndInferenceIntegrationAcrossAllBackends(t *testing.T) {
 				t.Errorf("invalid TTS warmup control request: length=%d timeout=%q", r.ContentLength, r.Header.Get("X-Request-Timeout-Ms"))
 			}
 			appendEvent("warmup:tts")
-			_, _ = io.WriteString(w, `{"model_state":"ready","inference_active":false}`)
+			_, _ = io.WriteString(w, `{"model_state":"loaded","inference_active":false}`)
 		case "/internal/v1/speech":
 			var request map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request["text"] != "synthetic speech input" {

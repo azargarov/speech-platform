@@ -330,13 +330,19 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 			transport.JSON(w, 503, transport.Error{Code: "not_ready", Message: "TTS worker is unavailable"})
 			return
 		}
+		// Older supported TTS images treat the omitted field as plain text and
+		// reject unknown fields. Forward only the non-default SSML selector.
+		forwardedInputFormat := inputFormat
+		if inputFormat == "text" {
+			forwardedInputFormat = ""
+		}
 		encoded, err := json.Marshal(struct {
 			Text        string `json:"text"`
 			Voice       string `json:"voice,omitempty"`
 			Language    string `json:"language"`
 			Mode        string `json:"mode"`
-			InputFormat string `json:"input_format"`
-		}{request.Text, request.Voice, request.Language, request.Mode, inputFormat})
+			InputFormat string `json:"input_format,omitempty"`
+		}{request.Text, request.Voice, request.Language, request.Mode, forwardedInputFormat})
 		if err != nil {
 			transport.JSON(w, 400, transport.Error{Code: "invalid_request", Message: "request could not be forwarded"})
 			return

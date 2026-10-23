@@ -1,6 +1,6 @@
 # M06 verification plan and evidence
 
-Status: **M06B offline implementation verification ACCEPTED 2026-10-23. M06C offline implementation and verification ACCEPTED 2026-10-23. M06D offline integration and regression qualification ACCEPTED 2026-10-23. M06E live qualification and production deployment remain separately gated pending explicit authorization.**
+Status: **M06B offline implementation verification ACCEPTED 2026-10-23. M06C offline implementation and verification ACCEPTED 2026-10-23. M06D offline integration and regression qualification ACCEPTED 2026-10-23. M06E live deployment/qualification authorized and underway, pending operator acceptance; Gateway/TTS integration remains incomplete.**
 
 ## Evidence scope
 
@@ -150,4 +150,42 @@ The accepted M06B/M06C suites plus M06D integration checks cover:
 
 ## Separate M06E live qualification
 
-Live qualification is **NOT AUTHORIZED** by M06A. After M06D evidence, obtain explicit approval for target identity, shared Ollama ownership/eviction acceptance, operation order, resource envelope, timeouts, monitoring, recovery and rollback. Record model state, load/warm latency, natural idle expiry, sampled GPU use/free memory, worker health and Ollama running-model observations. Do not stop or reconfigure Ollama, force unload, assume perfect isolation, or deploy without the separate deployment authorization.
+Live qualification and scoped deployment were explicitly authorized by the operator on 2026-10-23. The evidence below is partial; M06E remains pending operator acceptance.
+
+## M06E deployment and live qualification (OBSERVED 2026-10-23; incomplete)
+
+**Initial state:** branch `main`, clean at accepted HEAD `73cd0ccd185be48e634134263db4b90547a83d28`. Existing Gateway/STT/TTS and separate Ollama identities were inspected before replacement. No unrelated container/network/volume changes were made; Ollama stayed running and cloud remained disabled.
+
+**Deployment:** `make verify PYTHON=.venv/bin/python` passed before deployment. Active root Compose rendered with the absolute private Gateway config, and Gateway/STT config validators passed. `make plan PYTHON=.venv/bin/python` first could not read the root-owned model store under the current login; the read-only plan passed using the existing `stt-model-reader` group (`sg stt-model-reader -c ...`). Candidate Gateway and STT images were built from accepted HEAD. STT was recreated service-scoped, and Gateway was recreated through `make install SERVICE=gateway`; TTS was retained. Gateway-only install used canonical readiness/revision checks and preserved the existing Ollama network attachment.
+
+- Gateway container `f153da3718f8c857f61be21c7538f6336e4e17d961e7a00ecb29a299929bff71`; image `sha256:8d4317c229849d40582042a93858ae4dc906de74932cc7fdc1f79b597ddbcfb7`; revision `73cd0ccd185be48e634134263db4b90547a83d28`.
+- STT container `e35f5df729c84295e44bf9777ceb761e5fdcf7d0668c3f6df92e20987858e7db`; image `sha256:506a7bc42906ab2d12845f88e399059a2b08e32000b8b339149435dc1a047381`; revision `73cd0ccd185be48e634134263db4b90547a83d28`.
+- TTS remained container `cbda986a4e9ace938023a8ccdb571d4169b2855814970ccab7dd49c82cd19569`; image `sha256:0e39b7bfba33cc2a8ba6bbb459fad3fbd2c827fa51e9b2d774787517678e4c2d`; tag `m03b-high-quality-20261022`.
+- Ollama container was not changed. Final Gateway `/healthz` and `/readyz`, STT `/healthz` and `/readyz`, and TTS `/healthz` returned HTTP 200. Gateway/STT/TTS restart counts were zero after qualification.
+
+**STT live observations:**
+
+- Initial GPU baseline: 2,216 MiB used, 12,694 MiB free; RTX 5000, 15,360 MiB.
+- STT started unloaded while health and readiness were available. Internal warmup returned `{"model_state":"ready"}` in 3.655 s. Resident sample was 2,074 MiB used / 12,836 MiB free.
+- Public warmup while resident returned ready in 72 ms. Synthetic speech transcription succeeded twice: first 0.841 s and repeat 0.265 s. GPU sample during use reached 2,280 MiB used / 12,630 MiB free.
+- After at least 60 seconds idle, logs showed `ready → unloading → unloaded`; supervised child exited 0 and was absent from the process list. GPU fell to 4 MiB used / 14,906 MiB free. Readiness remained HTTP 200.
+- Inference without preceding warmup then cold-reloaded and succeeded in 4.048 s; repeat took 0.282 s. STT was again idle-unloaded before final baseline sampling.
+
+**TTS live observations and compatibility issue:**
+
+- Existing worker uses the prior `m03b-high-quality-20261022` image and `/config/tts.yaml` from `private/m04/live-20261022/rollback-tts.yaml`. Its state endpoint reported unloaded, its existing internal warmup returned loaded after 68.21 s, and GPU reached about 5,264 MiB used / 10,096 MiB free. The model later unloaded after its idle period.
+- Deployed Gateway public TTS warmup called the worker but returned `unavailable/invalid_worker_response`: TTS responds with `model_state:"loaded"` and `inference_active:false`, unlike STT's `ready`. The worktree correction validates this TTS response and maps it to public `ready`; focused race tests pass, but corrected code is not in the running image.
+- Public TTS synthesis against the retained image returned HTTP 400 because the worker rejects Gateway's default `input_format:"text"`. A synthetic direct-worker request omitting that field succeeded with HTTP 200 `audio/wav` (353,324 bytes). The current worktree correction omits the default text selector while preserving explicit SSML, and a regression test checks it. This correction is not deployed, so public Gateway TTS warmup/synthesis are **not qualified**; explicit SSML support in the retained image is also not established.
+- Current source TTS config validation rejects the deployed legacy config because it lacks fields required by the current schema; no TTS config or image was changed. Updating TTS requires a compatible config/image path and is not silently assumed.
+
+**Ollama and contention:**
+
+- Installed Ollama 0.33.1 accepted public empty-prompt `text_transform` warmup with HTTP 200/ready in 8.759 s. `ollama ps` showed `qwen3.5:9b-q4_K_M`, 100% GPU, 6.1 GB, with about 60 seconds residency remaining. A synthetic normal transformation returned HTTP 200, provider `host-ollama`, model `local-qwen`, `fallback_occurred:false`, in 10.260 s. Public warmup followed by normal local transformation worked on the installed version.
+- Combined public STT+text-transform warmup completed in 16.425 s. GPU reached 9,102 MiB used / 5,808 MiB free. With STT and Qwen resident, TTS warmup returned per-operation `resource_unavailable` in 0.298 s; TTS stayed unloaded and GPU use did not increase. No model was forcibly evicted.
+- Ollama naturally expired its model: `ollama ps` became empty and GPU use returned from 9,102 MiB to 174 MiB (14,736 MiB free). STT readiness remained HTTP 200; TTS remained unloaded. Final sample: 174 MiB used, 14,736 MiB free, 0% utilization, 37 C.
+
+**Confirmed corrections and deployment blocker:** `internal/gateway/warmup.go` accepts the worker-specific TTS state and validates `inference_active:false`; `internal/gateway/warmup_test.go` and `internal/gateway/m06_integration_test.go` cover it. `internal/gateway/handler.go` omits the default text `input_format` for old-worker compatibility while retaining explicit SSML, covered by `internal/gateway/handler_test.go`. `go test -race ./internal/gateway` and the full `make verify PYTHON=.venv/bin/python` passed after both corrections. Redeployment via `sg stt-model-reader -c 'make install SERVICE=gateway PYTHON=.venv/bin/python'` was safely refused because the canonical installer requires a clean Git checkout. The task forbids committing, and bypassing installer revision safeguards was not authorized. Running Gateway remains pre-correction.
+
+**Final offline verification:** `make verify PYTHON=.venv/bin/python` — PASS, exit 0 after the Gateway correction; included Go vet, Ruff lint/format, config/Compose checks, race-enabled Go suites, 89 STT tests, Go build, Python AST compilation, governance and lock checks. `git diff --check` — rerun after the final documentation update.
+
+**NOT ESTABLISHED / remaining:** public TTS warmup and text synthesis through corrected Gateway; retained TTS image's explicit SSML support; updated TTS image/config compatibility if SSML qualification is required; exact production TTS process-reap/GPU release timing; repeated multi-client load; arbitrary native cancellation; GPU coexistence beyond measured sequences; effects on external Ollama clients. M06E remains pending operator acceptance. Resolve reproducible deployment of the reviewed Gateway correction, then repeat public TTS warmup and text synthesis. M06 is not complete.

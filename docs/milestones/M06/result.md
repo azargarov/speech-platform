@@ -1,6 +1,6 @@
 # M06 interim implementation result
 
-Status: **M06B offline implementation and verification ACCEPTED 2026-10-23. M06C offline implementation and verification ACCEPTED 2026-10-23. M06D offline integration and regression qualification ACCEPTED 2026-10-23. M06E live qualification and production deployment remain separately gated.**
+Status: **M06B offline implementation and verification ACCEPTED 2026-10-23. M06C offline implementation and verification ACCEPTED 2026-10-23. M06D offline integration and regression qualification ACCEPTED 2026-10-23. M06E deployment/live qualification authorized and underway, pending operator acceptance; public Gateway TTS integration remains unresolved.**
 
 M06B makes STT model ownership on demand while preserving the existing supervised child process, bounded admission, request contracts and cleanup boundary. The STT HTTP worker starts ready with no model child, initializes the child for inference or internal warmup, and reaps it after the configured idle interval when no admitted or active work requires it. The preflight ownership handoff is mutually exclusive, and shutdown now reports uncertain cleanup rather than racing an active inference owner or waiting indefinitely for its supervisor lock.
 
@@ -15,6 +15,6 @@ M06D offline integration adds real Gateway handler tests against fake STT/TTS/Ol
 Remaining milestone scope:
 
 - **M06D:** offline integration and regression qualification accepted 2026-10-23.
-- **M06E (next):** live GPU qualification requires separate explicit authorization. Production deployment requires separate explicit authorization and rollback approval.
+- **M06E (in progress):** live qualification/deployment were explicitly authorized on 2026-10-23. STT lifecycle and Ollama warmup/residency passed observed checks. TTS worker warmup/synthesis passed directly; Gateway corrections for its response and legacy default text field are offline-verified but undeployed because the canonical installer requires a clean checkout. Public Gateway TTS remains unqualified. M06E acceptance and overall M06 closeout remain pending.
 
-See [implementation](implementation.md), [plan](plan.md), and [operator validation](user-validation.md). M06A through M06D acceptance is limited to the scope recorded in each stage. M06E live GPU qualification and production deployment remain separately gated. Overall M06 closeout remains pending.
+See [implementation](implementation.md), [plan](plan.md), [operator validation](user-validation.md), and [verification](verification.md). M06A through M06D acceptance is limited to the scope recorded in each stage. M06E is authorized and in progress but not accepted; public Gateway/TTS compatibility and reproducible redeployment of the correction remain unresolved. Overall M06 closeout remains pending.

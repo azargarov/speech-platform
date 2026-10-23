@@ -184,14 +184,11 @@ func TestTTSProxyValidationForwardingAndAudioResponse(t *testing.T) {
 		if body["language"] != "auto" || body["voice"] != "default" {
 			t.Errorf("unexpected defaults: %#v", body)
 		}
-		if body["input_format"] == nil {
-			t.Errorf("input_format default was not forwarded: %#v", body)
-		}
 		if body["text"] == "hello" && body["mode"] != "quality" {
 			t.Errorf("mode default=%v, want quality", body["mode"])
 		}
-		if body["text"] == "hello" && body["input_format"] != "text" {
-			t.Errorf("input_format default=%v, want text", body["input_format"])
+		if body["text"] == "hello" && body["input_format"] != nil {
+			t.Errorf("default text input_format=%v, want omitted for worker compatibility", body["input_format"])
 		}
 		if body["text"] == "hello ssml" && body["input_format"] != "ssml" {
 			t.Errorf("input_format=%v, want ssml", body["input_format"])

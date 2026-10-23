@@ -196,13 +196,27 @@ func TestTTSWarmupSuccessUnavailableAndTimeout(t *testing.T) {
 		if r.URL.Path != "/internal/v1/warmup" || r.ContentLength != 0 || r.Header.Get("X-Request-Timeout-Ms") != "" {
 			t.Errorf("unexpected TTS warmup request: %#v", r)
 		}
-		_, _ = w.Write([]byte(`{"model_state":"ready","inference_active":false}`))
+		_, _ = w.Write([]byte(`{"model_state":"loaded","inference_active":false}`))
 	}))
 	tts := NewTTSProxy(success.URL, "", time.Second)
 	if result := tts.warmup(context.Background()); result.Status != "ready" {
 		t.Fatalf("successful TTS warmup=%+v", result)
 	}
 	success.Close()
+	for _, body := range []string{
+		`{"model_state":"ready","inference_active":false}`,
+		`{"model_state":"loaded"}`,
+		`{"model_state":"loaded","inference_active":true}`,
+	} {
+		worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, body)
+		}))
+		proxy := NewTTSProxy(worker.URL, "", time.Second)
+		if result := proxy.warmup(context.Background()); result.Status != "unavailable" || result.Code != "invalid_worker_response" {
+			t.Errorf("invalid TTS response %s: %+v", body, result)
+		}
+		worker.Close()
+	}
 	if result := tts.warmup(context.Background()); result.Status != "unavailable" {
 		t.Fatalf("unavailable TTS warmup=%+v", result)
 	}
