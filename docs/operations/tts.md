@@ -107,6 +107,9 @@ full SSML 1.1 support.
 
 `quality` uses 10 diffusion steps and is the default. `auto` selects the same
 configuration. `fast` uses eight steps and `high_quality` uses 16 steps.
+`extra_high_quality` selects 32 steps. It is opt-in and does not change the
+default. Higher step counts are not assumed to sound better without listening
+comparison.
 The operator accepted the tested eight-step samples and selected 16 steps as
 an additional quality option after listening to the 10-, 12- and 16-step
 comparison. In the single seeded experiment, mean generation latency and
@@ -118,6 +121,18 @@ inputs on the RTX 5000, not latency guarantees. Full provenance is recorded in
 may take longer than the audio duration. The default Gateway deadline is ten
 minutes; timeout/disconnect drops the response but does not kill active native
 inference. The model unloads after 60 idle seconds to return GPU memory to STT.
+
+The optional public `audio_processing` request field accepts `none` (default)
+or `gentle`. `gentle` runs a fixed FFmpeg chain on the completed WAV: conservative
+whole-program EBU R128 normalization toward -18 LUFS, 1.5:1 compression with
+20 ms attack and 250 ms release, and peak protection. The two-pass FFmpeg work
+has a 30-second total deadline and uses the configured WAV byte limit. Silence
+and near-silent output bypass processing; digital silence in SSML is preserved.
+Because the complete programme is processed as one unit, this does not perform
+independent phrase-level level matching. It retains phrase-to-phrase loudness
+differences while avoiding one FFmpeg process per SSML segment. FFmpeg failures
+return structured errors; temporary WAV files are removed on success, failure
+or timeout. The default `none` path does not invoke FFmpeg.
 
 The Gateway accepts four concurrent API requests; the TTS worker admits one
 inference at a time and returns 429 when occupied. Requests are not queued.

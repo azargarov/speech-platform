@@ -264,11 +264,12 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 			return
 		}
 		var request struct {
-			Text        string          `json:"text"`
-			Voice       string          `json:"voice,omitempty"`
-			Language    string          `json:"language"`
-			Mode        string          `json:"mode"`
-			InputFormat json.RawMessage `json:"input_format"`
+			Text            string          `json:"text"`
+			Voice           string          `json:"voice,omitempty"`
+			Language        string          `json:"language"`
+			Mode            string          `json:"mode"`
+			InputFormat     json.RawMessage `json:"input_format"`
+			AudioProcessing string          `json:"audio_processing"`
 		}
 		decoder := json.NewDecoder(bytes.NewReader(body))
 		decoder.DisallowUnknownFields()
@@ -322,8 +323,15 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 		if request.Mode == "" {
 			request.Mode = "quality"
 		}
-		if request.Mode != "quality" && request.Mode != "fast" && request.Mode != "auto" && request.Mode != "high_quality" {
-			transport.JSON(w, 400, transport.Error{Code: "invalid_mode", Message: "mode must be quality, fast, auto, or high_quality"})
+		if request.Mode != "quality" && request.Mode != "fast" && request.Mode != "auto" && request.Mode != "high_quality" && request.Mode != "extra_high_quality" {
+			transport.JSON(w, 400, transport.Error{Code: "invalid_mode", Message: "mode must be quality, fast, auto, high_quality, or extra_high_quality"})
+			return
+		}
+		if request.AudioProcessing == "" {
+			request.AudioProcessing = "none"
+		}
+		if request.AudioProcessing != "none" && request.AudioProcessing != "gentle" {
+			transport.JSON(w, 400, transport.Error{Code: "invalid_audio_processing", Message: "audio_processing must be none or gentle"})
 			return
 		}
 		if tts == nil {
@@ -336,13 +344,18 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 		if inputFormat == "text" {
 			forwardedInputFormat = ""
 		}
+		forwardedAudioProcessing := request.AudioProcessing
+		if forwardedAudioProcessing == "none" {
+			forwardedAudioProcessing = ""
+		}
 		encoded, err := json.Marshal(struct {
-			Text        string `json:"text"`
-			Voice       string `json:"voice,omitempty"`
-			Language    string `json:"language"`
-			Mode        string `json:"mode"`
-			InputFormat string `json:"input_format,omitempty"`
-		}{request.Text, request.Voice, request.Language, request.Mode, forwardedInputFormat})
+			Text            string `json:"text"`
+			Voice           string `json:"voice,omitempty"`
+			Language        string `json:"language"`
+			Mode            string `json:"mode"`
+			InputFormat     string `json:"input_format,omitempty"`
+			AudioProcessing string `json:"audio_processing,omitempty"`
+		}{request.Text, request.Voice, request.Language, request.Mode, forwardedInputFormat, forwardedAudioProcessing})
 		if err != nil {
 			transport.JSON(w, 400, transport.Error{Code: "invalid_request", Message: "request could not be forwarded"})
 			return

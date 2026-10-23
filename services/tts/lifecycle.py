@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 from services.tts.audio import InvalidAudio, compose_wav, pcm16_frames
+from services.tts.audio_processing import AudioProcessingError, process_gently
 from services.tts.ssml import (
     SSMLValidationError,
     SilenceSegment,
@@ -54,30 +55,54 @@ class ModelLifecycle:
         self._with_model(lambda model: None)
 
     def synthesize(
-        self, text: str, language: str, mode: str, input_format: str = "text"
+        self,
+        text: str,
+        language: str,
+        mode: str,
+        input_format: str = "text",
+        audio_processing: str = "none",
     ) -> tuple[bytes, str]:
-        if mode not in {"quality", "fast", "auto", "high_quality"}:
+        if audio_processing not in {"none", "gentle"}:
+            raise TTSFailure(
+                "invalid_audio_processing",
+                "audio_processing must be none or gentle",
+                400,
+            )
+        if mode not in {
+            "quality",
+            "fast",
+            "auto",
+            "high_quality",
+            "extra_high_quality",
+        }:
             raise TTSFailure(
                 "invalid_mode",
-                "mode must be quality, fast, auto, or high_quality",
+                "mode must be quality, fast, auto, high_quality, or extra_high_quality",
                 400,
             )
         steps = mode_timesteps(mode)
         if input_format == "text":
-            return self._with_model(
+            result = self._with_model(
                 lambda model: self._generate(model, text, language, steps)
             )
-        if input_format != "ssml":
+        elif input_format == "ssml":
+            try:
+                segments = parse_ssml(text, self.config)
+            except SSMLValidationError as error:
+                raise TTSFailure("invalid_ssml", str(error), 400) from error
+            result = self._with_model(
+                lambda model: self._generate_ssml(model, segments, steps)
+            )
+        else:
             raise TTSFailure(
                 "invalid_input_format", "input_format must be text or ssml", 400
             )
-        try:
-            segments = parse_ssml(text, self.config)
-        except SSMLValidationError as error:
-            raise TTSFailure("invalid_ssml", str(error), 400) from error
-        return self._with_model(
-            lambda model: self._generate_ssml(model, segments, steps)
-        )
+        if audio_processing == "gentle":
+            try:
+                return process_gently(result[0], self.config), result[1]
+            except AudioProcessingError as error:
+                raise TTSFailure(error.code, error.message, error.status) from error
+        return result
 
     def _generate_ssml(self, model, segments, steps: int) -> tuple[bytes, str]:
         pieces = []
@@ -145,6 +170,7 @@ class ModelLifecycle:
         try:
             import io
             import soundfile as sf
+            import numpy as np
 
             import torch
 
@@ -155,6 +181,8 @@ class ModelLifecycle:
                     normalize=False,
                     inference_timesteps=steps,
                 )
+            if audio.size == 0 or not np.isfinite(audio).all():
+                raise TTSFailure("inference_failed", "generated audio is invalid", 500)
             output = io.BytesIO()
             sf.write(
                 output,
@@ -289,10 +317,14 @@ def mode_timesteps(mode: str) -> int:
         return 8
     if mode == "high_quality":
         return 16
+    if mode == "extra_high_quality":
+        return 32
     if mode in {"quality", "auto"}:
         return 10
     raise TTSFailure(
-        "invalid_mode", "mode must be quality, fast, auto, or high_quality", 400
+        "invalid_mode",
+        "mode must be quality, fast, auto, high_quality, or extra_high_quality",
+        400,
     )
 
 

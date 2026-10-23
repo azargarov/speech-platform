@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+import math
 import socket
+import struct
 import threading
 import time
 import unittest
+import shutil
+import tempfile
+from unittest import mock
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -16,6 +21,7 @@ from services.tts.lifecycle import (
     mode_timesteps,
 )
 from services.tts.audio import InvalidAudio, compose_wav, pcm16_frames
+from services.tts.audio_processing import AudioProcessingError, process_gently
 from services.tts.ssml import (
     SSMLValidationError,
     SilenceSegment,
@@ -45,6 +51,10 @@ class ConfigTests(unittest.TestCase):
             "negative_idle": source.replace(
                 "idle_unload_seconds: 60", "idle_unload_seconds: -1"
             ),
+            "bad_processing_timeout": source.replace(
+                "audio_processing_timeout_seconds: 30",
+                "audio_processing_timeout_seconds: 61",
+            ),
             "too_many_segments": source.replace(
                 "max_ssml_segments: 64", "max_ssml_segments: 0"
             ),
@@ -64,10 +74,19 @@ class ConfigTests(unittest.TestCase):
 
 class ModeAndLanguageTests(unittest.TestCase):
     def test_mode_selection(self):
-        self.assertEqual(mode_timesteps("quality"), 10)
-        self.assertEqual(mode_timesteps("auto"), 10)
-        self.assertEqual(mode_timesteps("fast"), 8)
-        self.assertEqual(mode_timesteps("high_quality"), 16)
+        self.assertEqual(
+            [
+                mode_timesteps(mode)
+                for mode in (
+                    "quality",
+                    "fast",
+                    "auto",
+                    "high_quality",
+                    "extra_high_quality",
+                )
+            ],
+            [10, 8, 10, 16, 32],
+        )
         with self.assertRaises(TTSFailure):
             mode_timesteps("turbo")
 
@@ -206,6 +225,92 @@ def wav_segment(frames: bytes) -> bytes:
     return output.getvalue()
 
 
+def tone_with_silence_wav() -> tuple[bytes, int, int]:
+    import io
+    import wave
+
+    rate = 48000
+    tone_frames = rate
+    silence_frames = rate // 2
+    values = bytearray()
+    for i in range(tone_frames):
+        value = int(0.2 * 32767 * math.sin(2 * math.pi * 440 * i / rate))
+        values.extend(struct.pack("<h", value))
+    silence_start = len(values) // 2
+    values.extend(b"\x00\x00" * silence_frames)
+    for i in range(tone_frames):
+        value = int(0.2 * 32767 * math.sin(2 * math.pi * 660 * i / rate))
+        values.extend(struct.pack("<h", value))
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        wav.writeframes(bytes(values))
+    return output.getvalue(), silence_start, silence_frames
+
+
+class AudioProcessingTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is not installed")
+    def test_gentle_master_preserves_wav_duration_and_digital_silence(self):
+        payload, silence_start, silence_frames = tone_with_silence_wav()
+        config = test_config()
+        with tempfile.TemporaryDirectory() as temp:
+            with mock.patch("services.tts.audio_processing.tempfile.tempdir", temp):
+                result = process_gently(payload, config)
+            self.assertEqual(list(Path(temp).iterdir()), [])
+        frames = pcm16_frames(result)
+        self.assertLessEqual(abs(len(frames) - len(pcm16_frames(payload))), 480)
+        silence = frames[silence_start * 2 : (silence_start + silence_frames) * 2]
+        self.assertEqual(len(silence), silence_frames * 2)
+        self.assertFalse(any(silence))
+        self.assertGreater(max(abs(v[0]) for v in struct.iter_unpack("<h", frames)), 0)
+
+    def test_silence_and_near_silence_are_not_boosted(self):
+        silent = wav_segment(b"\x00\x00" * 480)
+        quiet = wav_segment(b"\x01\x00" * 480)
+        config = test_config()
+        self.assertEqual(process_gently(silent, config), silent)
+        self.assertEqual(process_gently(quiet, config), quiet)
+        config["max_output_audio_bytes"] = len(silent) - 1
+        with self.assertRaises(AudioProcessingError) as caught:
+            process_gently(silent, config)
+        self.assertEqual(caught.exception.code, "output_too_large")
+
+    def test_processing_errors_are_sanitized_and_timeout_is_bounded(self):
+        payload, _start, _length = tone_with_silence_wav()
+        config = test_config()
+        with tempfile.TemporaryDirectory() as directory:
+            failing = Path(directory) / "ffmpeg-fails"
+            failing.write_text(
+                f"#!{__import__('sys').executable}\n"
+                "import sys\nsys.stderr.write('private synthetic detail')\nsys.exit(7)\n"
+            )
+            failing.chmod(0o700)
+            with mock.patch(
+                "services.tts.audio_processing.shutil.which", return_value=str(failing)
+            ):
+                with self.assertRaises(AudioProcessingError) as caught:
+                    process_gently(payload, config)
+            self.assertEqual(caught.exception.code, "audio_processing_failed")
+            self.assertNotIn("private", caught.exception.message)
+
+            slow = Path(directory) / "ffmpeg-sleeps"
+            slow.write_text(
+                f"#!{__import__('sys').executable}\nimport time\ntime.sleep(3)\n"
+            )
+            slow.chmod(0o700)
+            config["audio_processing_timeout_seconds"] = 1
+            started = time.monotonic()
+            with mock.patch(
+                "services.tts.audio_processing.shutil.which", return_value=str(slow)
+            ):
+                with self.assertRaises(AudioProcessingError) as caught:
+                    process_gently(payload, config)
+            self.assertEqual(caught.exception.code, "audio_processing_timeout")
+            self.assertLess(time.monotonic() - started, 2.5)
+
+
 class AudioCompositionTests(unittest.TestCase):
     def test_composes_exact_silence_and_one_mono_pcm16_48khz_wav(self):
         first = b"\x01\x00" * 100
@@ -243,9 +348,59 @@ class LifecycleTests(unittest.TestCase):
             "audio/wav",
         )
         try:
-            for mode in ("quality", "fast", "auto", "high_quality"):
+            for mode in (
+                "quality",
+                "fast",
+                "auto",
+                "high_quality",
+                "extra_high_quality",
+            ):
                 lifecycle.synthesize("hello", "auto", mode)
-            self.assertEqual(observed, [10, 8, 10, 16])
+            self.assertEqual(observed, [10, 8, 10, 16, 32])
+        finally:
+            lifecycle.stop(1)
+
+    def test_processing_defaults_to_none_and_gentle_wraps_completed_audio(self):
+        lifecycle = ModelLifecycle(ssml_config(idle_unload_seconds=0), object)
+        source = wav_segment(b"\x01\x00" * 480)
+        calls = []
+        lifecycle._generate = lambda *_args: (source, "audio/wav")
+
+        def process(audio, config):
+            calls.append((audio, config))
+            return b"processed-wav"
+
+        try:
+            with mock.patch(
+                "services.tts.lifecycle.process_gently", side_effect=process
+            ):
+                self.assertEqual(
+                    lifecycle.synthesize("hello", "auto", "quality"),
+                    (source, "audio/wav"),
+                )
+                self.assertEqual(
+                    lifecycle.synthesize(
+                        "hello", "auto", "quality", audio_processing="gentle"
+                    ),
+                    (b"processed-wav", "audio/wav"),
+                )
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], source)
+        finally:
+            lifecycle.stop(1)
+
+    def test_invalid_processing_does_not_load_model(self):
+        calls = []
+        lifecycle = ModelLifecycle(
+            {"idle_unload_seconds": 0}, lambda: calls.append(True) or object()
+        )
+        try:
+            with self.assertRaises(TTSFailure) as caught:
+                lifecycle.synthesize(
+                    "hello", "auto", "quality", audio_processing="unknown"
+                )
+            self.assertEqual(caught.exception.code, "invalid_audio_processing")
+            self.assertEqual(calls, [])
         finally:
             lifecycle.stop(1)
 
@@ -411,8 +566,12 @@ class WorkerHTTPTests(unittest.TestCase):
             def warmup(self):
                 self.warmups += 1
 
-            def synthesize(self, text, language, mode, input_format="text"):
-                self.requests.append((text, language, mode, input_format))
+            def synthesize(
+                self, text, language, mode, input_format="text", audio_processing="none"
+            ):
+                self.requests.append(
+                    (text, language, mode, input_format, audio_processing)
+                )
                 self.started.set()
                 self.release.wait(2)
                 self.finished.set()
@@ -572,12 +731,18 @@ class WorkerHTTPTests(unittest.TestCase):
         audio = response.read()
         self.assert_valid_wav(audio)
         self.assertEqual(
-            self.lifecycle.requests[-1], ("hello", "auto", "quality", "text")
+            self.lifecycle.requests[-1],
+            ("hello", "auto", "quality", "text", "none"),
         )
         for payload, status, code in (
             (b'{"text":"hi","language":"zh"}', 400, "invalid_language"),
             (b'{"text":"hi","extra":1}', 400, "invalid_request"),
             (b'{"text":"hi","mode":"turbo"}', 400, "invalid_mode"),
+            (
+                b'{"text":"hi","audio_processing":"loud"}',
+                400,
+                "invalid_audio_processing",
+            ),
             (b'{"text":"hi","input_format":"guess"}', 400, "invalid_input_format"),
             (
                 b'{"text":"hi","input_format":"ssml","language":"en"}',
@@ -592,7 +757,13 @@ class WorkerHTTPTests(unittest.TestCase):
 
     def test_supported_modes_return_wav_with_audio_metadata(self):
         self.lifecycle.release.set()
-        for mode in ("quality", "fast", "auto", "high_quality"):
+        for mode in (
+            "quality",
+            "fast",
+            "auto",
+            "high_quality",
+            "extra_high_quality",
+        ):
             with self.subTest(mode=mode):
                 response = self._request(
                     json.dumps({"text": "hello", "mode": mode}).encode()
@@ -602,6 +773,15 @@ class WorkerHTTPTests(unittest.TestCase):
                 audio = response.read()
                 self.assert_valid_wav(audio)
                 self.assertEqual(self.lifecycle.requests[-1][2], mode)
+
+    def test_audio_processing_defaults_and_forwards_gentle(self):
+        self.lifecycle.release.set()
+        response = self._request(b'{"text":"hello"}')
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.lifecycle.requests[-1][-1], "none")
+        response = self._request(b'{"text":"hello","audio_processing":"gentle"}')
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.lifecycle.requests[-1][-1], "gentle")
 
     def test_explicit_ssml_input_format_is_forwarded(self):
         self.lifecycle.release.set()
@@ -621,7 +801,8 @@ class WorkerHTTPTests(unittest.TestCase):
         response = self._request(b'{"text":"hello","input_format":"text"}')
         self.assertEqual(response.status, 200)
         self.assertEqual(
-            self.lifecycle.requests[-1], ("hello", "auto", "quality", "text")
+            self.lifecycle.requests[-1],
+            ("hello", "auto", "quality", "text", "none"),
         )
 
     def test_worker_admission_is_single_slot(self):
@@ -664,7 +845,7 @@ class WorkerHTTPTests(unittest.TestCase):
         client.close()
         self.lifecycle.release.set()
         self.assertTrue(self.lifecycle.finished.wait(1))
-        self.assertEqual(self.lifecycle.requests[-1][2:], ("quality", "ssml"))
+        self.assertEqual(self.lifecycle.requests[-1][2:], ("quality", "ssml", "none"))
 
 
 if __name__ == "__main__":

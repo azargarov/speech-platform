@@ -141,6 +141,7 @@ def handler(config: dict, lifecycle: ModelLifecycle):
                 "language",
                 "mode",
                 "input_format",
+                "audio_processing",
             }:
                 self.reply(
                     400,
@@ -155,6 +156,7 @@ def handler(config: dict, lifecycle: ModelLifecycle):
             language = body.get("language", "auto")
             mode = body.get("mode", "quality")
             input_format = body.get("input_format", "text")
+            audio_processing = body.get("audio_processing", "none")
             if not isinstance(input_format, str) or input_format not in {
                 "text",
                 "ssml",
@@ -213,12 +215,25 @@ def handler(config: dict, lifecycle: ModelLifecycle):
                 "fast",
                 "auto",
                 "high_quality",
+                "extra_high_quality",
             }:
                 self.reply(
                     400,
                     {
                         "code": "invalid_mode",
-                        "message": "mode must be quality, fast, auto, or high_quality",
+                        "message": "mode must be quality, fast, auto, high_quality, or extra_high_quality",
+                    },
+                )
+                return
+            if not isinstance(audio_processing, str) or audio_processing not in {
+                "none",
+                "gentle",
+            }:
+                self.reply(
+                    400,
+                    {
+                        "code": "invalid_audio_processing",
+                        "message": "audio_processing must be none or gentle",
                     },
                 )
                 return
@@ -230,7 +245,7 @@ def handler(config: dict, lifecycle: ModelLifecycle):
                 return
             try:
                 audio, content_type = lifecycle.synthesize(
-                    text, language, mode, input_format
+                    text, language, mode, input_format, audio_processing
                 )
             except TTSFailure as error:
                 self.reply(error.status, {"code": error.code, "message": error.message})

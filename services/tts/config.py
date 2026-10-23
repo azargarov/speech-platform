@@ -17,6 +17,7 @@ def load_config(path: str | Path) -> dict:
         "listen_host",
         "listen_port",
         "socket_timeout_seconds",
+        "audio_processing_timeout_seconds",
         "poll_interval_seconds",
         "model_path",
         "model_revision",
@@ -48,6 +49,7 @@ def load_config(path: str | Path) -> dict:
     for name, low, high in (
         ("listen_port", 1, 65535),
         ("socket_timeout_seconds", 1, 86400),
+        ("audio_processing_timeout_seconds", 1, 60),
         ("max_text_characters", 1, 10000),
         ("max_request_bytes", 1, 26214400),
         ("max_ssml_bytes", 1, 49152),

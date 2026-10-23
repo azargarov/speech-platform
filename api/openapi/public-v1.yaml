@@ -170,14 +170,19 @@ paths:
                   description: For text input, auto sends text without language metadata and explicit codes are model hints. For SSML, use xml:lang attributes and set this field to auto. No detected language code is returned.
                 mode:
                   type: string
-                  enum: [quality, fast, auto, high_quality]
+                  enum: [quality, fast, auto, high_quality, extra_high_quality]
                   default: quality
-                  description: quality uses 10 diffusion steps; fast uses 8 diffusion steps; high_quality uses 16 diffusion steps; auto selects quality.
+                  description: quality uses 10 diffusion steps; fast uses 8 diffusion steps; high_quality uses 16 diffusion steps; extra_high_quality uses 32 diffusion steps; auto selects quality.
                 input_format:
                   type: string
                   enum: [text, ssml]
                   default: text
                   description: Explicitly selects plain text or the documented bounded SSML 1.1 subset. XML is never inferred from text content.
+                audio_processing:
+                  type: string
+                  enum: [none, gentle]
+                  default: none
+                  description: Optional bounded FFmpeg mastering. gentle applies conservative whole-program loudness adjustment, compression and peak protection; it does not select or stabilize a speaker.
       responses:
         '200':
           description: Complete WAV PCM16 audio. Sample rate is encoded in the WAV header.

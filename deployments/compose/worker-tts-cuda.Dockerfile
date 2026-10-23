@@ -5,7 +5,7 @@ ARG TTS_SOURCE_REVISION=cce58a5b59303c9bd63d12f23afe6a49a4a80c59
 ARG TTS_LOCK_SHA256
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates git libsndfile1 python3.12 python3.12-venv \
+      ca-certificates ffmpeg git libsndfile1 python3.12 python3.12-venv \
     && rm -rf /var/lib/apt/lists/* \
     && python3.12 -m venv /opt/tts-venv
 ENV PATH=/opt/tts-venv/bin:$PATH \

@@ -39,14 +39,19 @@ paths:
                   description: For text input, auto has no metadata and explicit values are hints. For SSML, use xml:lang attributes and set this field to auto.
                 mode:
                   type: string
-                  enum: [quality, fast, auto, high_quality]
+                  enum: [quality, fast, auto, high_quality, extra_high_quality]
                   default: quality
-                  description: quality uses 10 diffusion steps; fast uses 8 diffusion steps; high_quality uses 16 diffusion steps; auto selects quality.
+                  description: quality uses 10 diffusion steps; fast uses 8 diffusion steps; high_quality uses 16 diffusion steps; extra_high_quality uses 32 diffusion steps; auto selects quality.
                 input_format:
                   type: string
                   enum: [text, ssml]
                   default: text
                   description: Explicit input parser selection; default text preserves existing behavior.
+                audio_processing:
+                  type: string
+                  enum: [none, gentle]
+                  default: none
+                  description: gentle runs bounded whole-program FFmpeg loudness adjustment, compression and peak protection; omitted or none preserves unprocessed audio.
       responses:
         '200':
           description: Complete WAV PCM16 audio.
@@ -104,7 +109,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '504':
-          description: Request deadline exceeded
+          description: Request deadline or bounded audio-processing deadline exceeded
           content:
             application/json:
               schema:

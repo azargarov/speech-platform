@@ -199,6 +199,15 @@ func TestTTSProxyValidationForwardingAndAudioResponse(t *testing.T) {
 		if body["text"] == "hello high quality" && body["mode"] != "high_quality" {
 			t.Errorf("forwarded mode=%v, want high_quality", body["mode"])
 		}
+		if body["text"] == "hello extra high quality" && body["mode"] != "extra_high_quality" {
+			t.Errorf("forwarded mode=%v, want extra_high_quality", body["mode"])
+		}
+		if body["text"] == "hello gentle" && body["audio_processing"] != "gentle" {
+			t.Errorf("audio_processing=%v, want gentle", body["audio_processing"])
+		}
+		if (body["text"] == "hello" || body["text"] == "hello none") && body["audio_processing"] != nil {
+			t.Errorf("default/none audio_processing=%v, want omitted for worker compatibility", body["audio_processing"])
+		}
 		w.Header().Set("Content-Type", "audio/wav")
 		_, _ = w.Write([]byte("RIFF-test"))
 	}))
@@ -215,8 +224,12 @@ func TestTTSProxyValidationForwardingAndAudioResponse(t *testing.T) {
 		{"explicit_ssml", `{"text":"hello ssml","input_format":"ssml"}`, 200, ""},
 		{"fast_mode", `{"text":"hello fast","mode":"fast"}`, 200, ""},
 		{"high_quality_mode", `{"text":"hello high quality","mode":"high_quality"}`, 200, ""},
+		{"extra_high_quality_mode", `{"text":"hello extra high quality","mode":"extra_high_quality"}`, 200, ""},
+		{"gentle_audio_processing", `{"text":"hello gentle","audio_processing":"gentle"}`, 200, ""},
+		{"none_audio_processing", `{"text":"hello none","audio_processing":"none"}`, 200, ""},
 		{"invalid_language", `{"text":"hello","language":"zh"}`, 400, "invalid_language"},
 		{"invalid_mode", `{"text":"hello","mode":"turbo"}`, 400, "invalid_mode"},
+		{"invalid_audio_processing", `{"text":"hello","audio_processing":"loud"}`, 400, "invalid_audio_processing"},
 		{"invalid_input_format", `{"text":"hello","input_format":"guess"}`, 400, "invalid_input_format"},
 		{"null_input_format", `{"text":"hello","input_format":null}`, 400, "invalid_input_format"},
 		{"ssml_language_field", `{"text":"hello","input_format":"ssml","language":"en"}`, 400, "invalid_language"},
