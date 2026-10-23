@@ -1,6 +1,6 @@
 # M05B verification
 
-Status: **Stage 1 offline verification and Stage 2A/2B qualification are operator-accepted. Stage 2A completed 18 requests with natural expiry and GPU recovery; 7/9 outputs at each context failed lexical invariants and remain failed. Local Qwen is retained only for user-reviewed transformations, with no quality guarantee. Stage 2B live compatibility and offline compiled-Gateway API acceptance passed. The approved Stage 2C image was built and offline-verified. An explicitly authorized deployment attempt stopped at preflight because the root-owned model integrity check required sudo authorization; no production container was changed. M05B remains open.**
+Status: **M05B CLOSED with accepted limitations, operator-approved 2026-10-23. Stage 1 and Stage 2B integration are PASS; Stage 2A's seven lexical-invariant failures per context remain failures. Stage 2C production Gateway deployment and technical local-Qwen transformation are PASS; semantic preservation is PARTIAL. Cloud integration is qualified in isolation and production cloud inference remains disabled. Simultaneous local LLM inference and TTS cold-loading are not qualified. Generated transformations require user review.**
 
 ## Stage 2A preflight and safety gate — 2026-10-22
 
@@ -1640,3 +1640,157 @@ interactive `sudo -v` preflight, clean canonical worktree preparation described
 in the readiness record, and a successful installer plan. **NOT ESTABLISHED:**
 actual no-build image inspection against the live Docker daemon through this
 new code path, successful privileged preflight, deployment, or runtime behavior.
+
+
+## Stage 2C production smoke-test attempt — 2026-10-23
+
+**OBSERVED — target and preflight (execution environment, 2026-10-23 UTC):**
+read-only Docker inspection found the production Gateway running image
+`sha256:5b07af8af964262e44d9961b39e2b1b346deef90d100ffb4cb39c45d2ef97159`,
+healthy with restart count 0. Gateway `/healthz` and `/readyz` each returned
+HTTP 200. STT and TTS were healthy with restart count 0; their observed
+container and image identities are retained in the private report. The
+operator reports that both workers retain their original image IDs. The
+mounted Gateway configuration matched
+`private/m05b/stage2c/gateway.yaml` (SHA-256
+`0c5e22b499187dd413a9b47103db833b91e6869809dddf113cc8afc45c165c95`), with
+`allow_cloud:false`, logical model `local-qwen` mapped to
+`host-ollama` / `qwen3.5:9b-q4_K_M`, and finite `keep_alive: 5s`. Read-only
+Ollama `/api/ps` showed no resident model. GPU baseline was 2,216 MiB used,
+12,694 MiB free of 15,360 MiB, 0% utilization, 34 C.
+
+**OBSERVED — authentication blocker:** the running Gateway container had an
+empty `SPEECH_API_TOKEN`; `.env` had no token value, and the existing private
+Stage 2B auth values did not match the running Gateway configuration.
+Credential values were not recorded. The smoke controller stopped before
+issuing the request. Its private report records `request_count_sent: 0`. No
+unauthenticated request, retry, additional inference, TTS operation, service
+restart, Docker mutation, deployment or infrastructure change occurred.
+Private evidence:
+`private/m05b/stage2c/production-smoke-20261023T063422Z/report.json` (mode
+0600); the bounded runner is also private in the same directory hierarchy.
+
+**NOT ESTABLISHED:** HTTP 200 for a transformation, public response identity,
+`generated`/fallback flags, nonempty output, reasoning-leak review, material
+fact and uncertainty preservation, request latency, GPU use during inference,
+natural model expiry, or post-request worker identity/health. Because no
+request was sent, the final production smoke test is **BLOCKED**, not PASS.
+Cloud access remained disabled in the mounted configuration during the
+preflight. Stop for operator review before any further attempt; do not reuse a
+mismatched credential. M05B Stage 2C and milestone closeout remain open.
+
+
+## Stage 2C production local-transformation smoke — 2026-10-23
+
+**OBSERVED — request and response:** after the private controller was corrected
+to follow the effective optional-auth configuration, it sent exactly one
+synthetic `POST /v1/text/transformations` request to the production Gateway.
+The effective token was empty, so no Authorization header was sent. The request
+explicitly selected `local-qwen`, set `local_only:true`, mode `written`, format
+`normal`, and target language `none`. HTTP status was 200; public metadata was
+model `local-qwen`, provider `host-ollama`, `generated:true`,
+`fallback_occurred:false`. Output was nonempty (159 characters), matched the
+public response schema, and contained no reasoning markers or internal
+provider fields. No retry or fallback occurred. The synthetic request and full
+response remain private.
+
+**OBSERVED — meaning review:** the output retained the November 18 date, the
+$1,250 budget, and uncertainty about whether the supplier can meet the
+deadline. However, delivery timing may sound more definite than the source
+supports, strengthening an expectation into a firmer schedule. Overall meaning
+preservation is **PARTIAL, not PASS**; this issue is called out for operator
+review. The generated text is not reproduced here.
+
+**OBSERVED — network and resource recovery:** the in-container read-only
+Gateway Ollama check passed DNS, TCP and `GET /api/version`. The mounted config
+remained the Stage 2C config with `allow_cloud:false`, model `local-qwen`,
+provider `host-ollama`, and `keep_alive:5s`. The model was observed resident
+during inference and absent 5.84 seconds after the HTTP response completed; no
+unload command was sent. GPU baseline was 2,216 MiB used / 12,694 MiB free.
+Sixteen approximately one-second passive samples recorded a sampled peak of
+8,638 MiB used, minimum free 6,272 MiB and maximum utilization 76%. After
+expiry, GPU memory returned to 2,216 MiB used / 12,694 MiB free. Samples are
+host-wide measurements and do not establish an instantaneous peak. The raw
+sampler phase label failed to transition during the POST; raw samples were
+preserved and a separate private file classifies them by UTC request boundaries
+(1 pre-request, 9 inference, 6 natural-expiry samples). The 8,638 MiB peak was
+sampled during the request and remained at that level in cooldown. Cloud access
+remained disabled and the request used only the local provider.
+
+**OBSERVED — service preservation:** the approved Gateway image ID was
+`sha256:5b07af8af964262e44d9961b39e2b1b346deef90d100ffb4cb39c45d2ef97159`.
+Gateway `/healthz` and `/readyz` returned HTTP 200 after the request. Gateway,
+STT and TTS container identities, image IDs, start times, health and restart
+counts matched the before-request snapshot; all remained healthy with zero
+restarts. No STT/TTS inference or TTS cold-load occurred.
+
+**OBSERVED — controller verification:** `PYTHONDONTWRITEBYTECODE=1 python3
+-m unittest discover -s private/m05b/stage2c -p 'test_auth_policy.py' -v`
+passed three cases covering absent-token header omission, YAML token use when
+environment is empty, and nonempty environment override. Syntax checks passed
+for the private controller and helper. The controller change is private and
+did not weaken Gateway auth enforcement.
+
+| Command | Result |
+| --- | --- |
+| `PYTHONDONTWRITEBYTECODE=1 python3 private/m05b/stage2c/run-production-smoke.py` | Completed exactly one production POST; HTTP 200 and technical routing/metadata/resource-recovery/service checks passed. Manual meaning result is PARTIAL because of the possible arrival-modality shift. No retry. |
+| `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s private/m05b/stage2c -p 'test_auth_policy.py' -v` | PASS; 3 offline tests. |
+| `git diff --check` | PASS. |
+| Local Markdown link check for the three updated M05B records | PASS. A broader link check on `PLANS.md` still reports its existing links to `docs/milestones/M06/plan.md` and `docs/adr/0022-model-lifecycle-predictive-warmup.md` unresolved while those planning files are preserved in the private Stage 2C backup; those files were not moved or changed by this task. |
+
+Private detailed evidence (mode 0600 files under a mode 0700 directory):
+`private/m05b/stage2c/production-smoke-20261023T093750Z/`. **INTERPRETATION:**
+transport, routing, local-only provider selection, bounded sampled GPU use,
+natural expiry and service preservation passed this run. Semantic acceptance
+remains partial because delivery timing may sound more definite than the source
+supports. **NOT
+ESTABLISHED:** broader transformation quality, concurrent GPU behavior, TTS
+cold-load safety, or long-duration production behavior. No services were
+restarted, no Docker/network configuration was changed, no cloud call occurred,
+and M05B remains open pending operator review.
+
+## M05B final closeout verification — 2026-10-23
+
+**OBSERVED — final requested checks:**
+
+| Command / check | Result |
+| --- | --- |
+| `make verify PYTHON=.venv/bin/python` | PASS, exit 0. Lint, format, Gateway/STT/TTS config validation, Compose rendering, release validation, test suites, build, governance validation and lock checks completed. The Go/Python verification tests completed successfully. |
+| `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest discover -s services/tts -p '*test*.py' -v` | PASS, 22 tests, including SSML parsing, synthesis, lifecycle and HTTP behavior. |
+| `make release-check PYTHON=.venv/bin/python` | PASS; v0.1.2 release descriptor, three services, linux/amd64. |
+| `make config PYTHON=.venv/bin/python` | PASS; Gateway, STT, product STT and TTS configuration checks. |
+| `make compose-check PYTHON=.venv/bin/python` | PASS; Compose profiles and static policy checks. No services were started. |
+| Local Markdown link check for `PLANS.md` and all M05B Markdown records | PASS, 11 files checked; restored M06 and ADR-0022 links resolve. |
+| M06/ADR-0022 backup hash comparison | PASS; all five M06 planning files and ADR-0022 exactly match the preserved private copies. |
+| `git diff --check` | PASS. |
+
+**OBSERVED — read-only production health:** Gateway container `9fee4bc2beed`
+uses approved image ID
+`sha256:5b07af8af964262e44d9961b39e2b1b346deef90d100ffb4cb39c45d2ef97159`;
+it is running, healthy, and has zero restarts. `/healthz` and `/readyz` each
+returned HTTP 200. STT container `02110b11d58c` uses image ID
+`sha256:41bea815f2c06a64205583255a8fd1e84937c858f2e6a65bfa784dca5e4b867e`;
+TTS container `cbda986a4e9a` uses image ID
+`sha256:0e39b7bfba33cc2a8ba6bbb459fad3fbd2c827fa51e9b2d774787517678e4c2d`;
+both are running, healthy, and have zero restarts. These identities match the
+pre-smoke records. The Gateway's read-only mounted config
+reports `allow_cloud:false`. No inference was invoked during final verification.
+
+**OBSERVED — planning restoration:** the five M06 planning files and proposed
+ADR-0022 were restored from the private preservation directory. SHA-256 values
+match the recorded backup hashes exactly. No M06 planning substance was edited.
+M06 is the next planned milestone and remains inactive.
+
+**INTERPRETATION — final acceptance:** M05B implementation/integration,
+production Gateway deployment and technical production local-Qwen transformation
+are PASS. Semantic preservation remains PARTIAL, accepted with limitations.
+Stage 2A lexical-invariant failures remain failures. Cloud integration is
+qualified in isolation while production cloud inference remains disabled.
+Simultaneous local LLM inference and TTS cold-loading are not qualified.
+Generated transformations require user review. The operator accepted these
+limitations and closed M05B on 2026-10-23. This closeout does not authorize a
+commit; commit authorization remains separate.
+
+**NOT ESTABLISHED:** quality beyond the bounded Stage 2A corpus and one Stage
+2C request, simultaneous local LLM/TTS cold-loading behavior, or long-duration
+production behavior.

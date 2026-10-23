@@ -1,6 +1,6 @@
 # M05B operator validation plan
 
-Status: **Stage 1 implementation: PASS, operator-accepted 2026-10-22. Stage 2A's bounded result is accepted with limitations: local Qwen is retained only for user-reviewed transformations; seven outputs at each context failed lexical invariants and remain failed. Stage 2B technical integration qualification is operator-accepted PASS. Production deployment and M05B closeout remain unauthorized.**
+Status: **M05B closed with accepted limitations, operator-approved 2026-10-23.** Stage 1 and Stage 2B integration are PASS; Stage 2A lexical-invariant failures remain failures; Stage 2C deployment and technical production transformation are PASS with PARTIAL semantic preservation. Generated transformations require user review.
 
 First review [plan.md](plan.md), [ADR 0021](../../adr/0021-configurable-text-transformation.md),
 and Stage 1 evidence. M05A formal closeout is complete and remains unchanged.
@@ -131,7 +131,7 @@ compatibility results. The final consolidated Stage 2B qualification is ready
 for operator review. This does not authorize production deployment, shared
 GPU concurrency testing, or M05B closeout.
 
-## Decision record
+## Decision record (current at closeout)
 
 - Plan/ADR reviewer and date: **PENDING**
 - M05A formal closeout decision: **COMPLETE; committed 2026-10-22**
@@ -141,12 +141,12 @@ GPU concurrency testing, or M05B closeout.
 - Stage 2B bounded live provider compatibility: **three model requests completed; accepted by operator 2026-10-22**
 - Stage 2B technical integration qualification: **PASS; operator-accepted 2026-10-22**
 - Cloud production permission and initial selection policy: **PENDING**
-- Deployment and synthetic cloud-validation authorization: **PENDING**
+- Production deployment and local-only synthetic smoke authorization: **GRANTED AND COMPLETED; 2026-10-23**
 - Shared GPU qualification / any restricted local operating policy: **PENDING**
 - Tokenizer/template bounds for all enabled models: **PENDING**
-- Runtime deployment evidence: **PENDING**
+- Runtime deployment evidence: **PASS; see Stage 2C verification**
 - User review of each generated transformation: **REQUIRED; no quality guarantee**
-- M05B explicit closeout: **PENDING**
+- M05B explicit closeout: **ACCEPTED; CLOSED 2026-10-23 with limitations**
 - Commit authorization: **PENDING separate operator approval under repository policy**
 # Context expansion review — Stage 1 operator acceptance recorded
 
@@ -165,3 +165,12 @@ multilingual and JSON escaping boundaries pass; the synthetic long request is
 rejected at 4K and accepted at 8K without provider dispatch at rejection; the
 M05A harness remains 4K by default and supports explicit 8K. No live benchmark
 is included in this validation. Stage 2 live comparison remains pending a separate authorization. Reviewer: operator; date: 2026-10-22; feedback: PASS for Stage 1 only.
+
+
+## Final M05B acceptance and closeout — 2026-10-23
+
+The operator accepts M05B closeout with these conclusions: implementation and integration **PASS**; production Gateway deployment **PASS**; production local-Qwen transformation **technically PASS**; semantic preservation **PARTIAL, accepted with limitations**; cloud provider integration qualified in isolation; production cloud inference disabled; simultaneous local LLM inference and TTS cold-loading not qualified. Every generated transformation requires user review.
+
+The Stage 2A result remains bounded: seven of nine outputs at each of 4K and 8K failed lexical invariants. Those failures remain documented as failures and are not overridden by acceptance. The Stage 2C production response retained the date, budget and uncertainty, while delivery timing may have been expressed more definitively than its source. Detailed output remains private.
+
+M06 is the next planned milestone and remains inactive. This acceptance closes M05B; it does not authorize a commit.

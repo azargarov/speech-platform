@@ -1,6 +1,6 @@
 # M05B — Configurable text transformation and translation
 
-Status: **M05B IN PROGRESS; Stage 1 — Offline Implementation PASS and operator-accepted (2026-10-22). Stage 2A completed all nine synthetic cases at 4K and 8K with natural GPU recovery; seven outputs per context failed lexical invariants and remain failed. The operator accepts retaining local Qwen only for user-reviewed transformations; this is not a quality pass or a guarantee of meaning preservation or multilingual quality. Stage 2B bounded live model compatibility and consolidated offline compiled-Gateway integration acceptance PASS and are operator-accepted. Stage 2C deployment preparation is complete for review; production deployment and M05B closeout remain unauthorized.**
+Status: **M05B CLOSED WITH ACCEPTED LIMITATIONS (operator-approved 2026-10-23); Stage 1 — Offline Implementation PASS and operator-accepted (2026-10-22). Stage 2A completed all nine synthetic cases at 4K and 8K with natural GPU recovery; seven outputs per context failed lexical invariants and remain failed. The operator accepts retaining local Qwen only for user-reviewed transformations; this is not a quality pass or a guarantee of meaning preservation or multilingual quality. Stage 2B bounded live model compatibility and consolidated offline compiled-Gateway integration acceptance PASS and are operator-accepted. Stage 2C approved Gateway deployment and one-request production smoke are recorded; technical routing/resource/recovery checks passed, while semantic review is PARTIAL because delivery timing may have been stated more definitively than the source supports. The operator accepted the PARTIAL semantic result and formally closed M05B on 2026-10-23; generated transformations require user review.**
 
 ## Scope, prior decision and gates
 
@@ -19,9 +19,9 @@ completion does not establish production readiness, account cost suitability,
 independent linguistic validation or safe LLM/TTS concurrency. M05B Stage 1
 offline implementation was explicitly authorized and accepted. The bounded
 Stage 2A and Stage 2B qualifications are complete and operator-accepted. Stage
-2C source and deployment preparation is authorized, but production deployment
-requires separate operator authorization. M05B closeout remains unauthorized.
-Repository governance requires separate operator authorization before commits.
+2C production deployment and smoke testing are complete and accepted with the
+limitations in the result and verification records. M05B is closed. Repository
+governance requires separate operator authorization before commits.
 
 Include direct text rewriting/translation through Gateway, validated provider
 and model configuration, explicit selection, stable ordering, bounded fallback,
@@ -829,10 +829,10 @@ operator approval. Stage 2 must establish tokenizer/framing bounds (example
 numbers are provisional), actual Ollama unload/coexistence, Go/Groq compatibility,
 network reachability, timing/resource envelope and rollback. If those cannot be
 established, keep affected models disabled and report the limitation. Production
-cloud permission/policy, any restricted local operating policy and later
-deployment authorization remain explicit operator decisions. M05A closeout is
+cloud permission/policy and any restricted local operating policy remain
+explicit operator decisions. M05A closeout is
 complete. Stage 1 implementation and offline verification are operator-accepted
 PASS. Stage 2A is accepted with limitations; seven lexical invariant failures
 per context remain failed and generated text requires user review. Stage 2B live
 compatibility and offline integration acceptance are operator-accepted PASS.
-Stage 2C deployment and M05B closeout remain separate authorization gates.
+Stage 2C deployment and M05B closeout are complete with accepted limitations.

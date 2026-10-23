@@ -1,9 +1,10 @@
 # M05B Stage 2C — Deployment Readiness Review
 
-Status: **Gateway-to-Ollama network path qualified; approved candidate built and offline-verified. A separately authorized deployment attempt stopped at preflight because the root-owned model integrity check could not obtain sudo authorization. No production service was changed.**
+Status: **The approved Gateway image is deployed. On 2026-10-23, one production local-only text smoke request passed HTTP, routing, metadata, resource-recovery and service-preservation checks. Manual meaning review is PARTIAL because delivery timing may have been stated more definitively than the source supports. Cloud remains disabled. Stage 2C awaits operator review; M05B closeout is not claimed.**
 The original read-only diagnosis was followed by the specifically authorized
-additive Ollama network attachment documented below. The 2026-10-23 deployment
-attempt did not recreate Gateway, STT, TTS or Ollama; no inference was run.
+additive Ollama network attachment documented below. Earlier 2026-10-23
+preflight attempts did not recreate Gateway, STT, TTS or Ollama and ran no
+inference; the later deployment and smoke-test evidence is recorded below.
 
 ## 1. Observed deployment baseline
 
@@ -795,3 +796,48 @@ container identities and health. Gateway rollback does not disconnect or
 restart Ollama and does not remove the external network. Do not automatically
 run network cleanup. The commands above are a proposal only; neither plan nor
 install was run during this implementation task.
+
+
+## Production Gateway local-only smoke result — 2026-10-23
+
+The approved no-build Gateway is deployed. One authorized synthetic local-only
+text request was sent without an Authorization header because the effective
+Gateway token is empty. The existing optional-auth policy was preserved; no
+Gateway configuration or service change was made for this run.
+
+HTTP 200 returned logical model `local-qwen`, provider `host-ollama`,
+`generated:true`, `fallback_occurred:false`, and nonempty output. Exact private
+request/response and passive samples are in
+`private/m05b/stage2c/production-smoke-20261023T093750Z/` (directory mode 0700,
+evidence files mode 0600).
+
+Health and readiness were HTTP 200 after the request. Gateway, STT and TTS
+container identities were unchanged and healthy with zero restarts. The
+read-only in-container Ollama network check passed. `allow_cloud:false` remained
+in effect; no cloud provider or fallback was used. The local model disappeared
+naturally with configured `keep_alive:5s`; no unload was issued. Sampled GPU use
+peaked at 8,638 MiB from a 2,216 MiB baseline and returned to 2,216 MiB after
+expiry. The raw sample phase label did not transition during the POST; raw
+samples were preserved and a separate private timestamp-classified copy shows
+one pre-request, nine inference and six natural-expiry samples. The peak was
+sampled during the request and remained present during cooldown. The detailed
+before/after observations are in the private report.
+
+Semantic preservation is **PARTIAL, not PASS**: the November 18 date, $1,250
+budget and uncertainty about supplier deadline capability were retained, but
+the wording may make delivery timing sound more certain than the source
+supports. The output is deliberately omitted. Operator review is required. No STT/TTS
+inference, TTS cold-load, deployment, restart, network change, cloud call, M06
+implementation or milestone closeout occurred.
+
+## Final acceptance addendum — 2026-10-23
+
+The subsequent authorized deployment and one-request production smoke results
+are recorded above and in [verification.md](verification.md). The operator
+accepted production deployment and technical local-Qwen transformation as
+PASS, with semantic preservation PARTIAL because delivery timing may have been
+expressed more definitively than the input. This PARTIAL result is accepted
+with mandatory user review of generated transformations. Production cloud
+inference remains disabled, and simultaneous local LLM inference with TTS
+cold-loading remains unqualified. M05B is formally closed with those
+limitations; M06 remains planned only.
