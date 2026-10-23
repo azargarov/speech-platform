@@ -10,6 +10,9 @@ from unittest.mock import patch
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+from aiohttp import FormData
+from aiohttp.test_utils import TestClient, TestServer
+
 from services.stt.application import _RunnerFactoryHandoff, create_application
 from services.stt.config import ArtifactRoot, DeploymentConfig, load_application_config
 from services.stt.domain import (
@@ -27,6 +30,7 @@ from services.stt.domain import (
 from services.stt.lifecycle import Lifecycle, ModelState, WorkerState
 from services.stt.supervisor import InferenceSupervisor
 from services.stt.testing import FakeBackendFactory
+from services.stt.http_server import STARTUP_TASK_KEY, create_http_app
 from services.worker.server import handler, load_config
 
 from services.stt.tests.test_config_artifacts import application_data
@@ -158,10 +162,19 @@ def load_app_config(
     translation_supported=True,
     idle_timeout=60,
     shutdown_drain_timeout=1,
+    max_request_bytes=None,
+    max_upload_bytes=None,
+    max_retained_audio_bytes=None,
 ):
     data = application_data()
     data["backend"]["id"] = backend
     data["admission"]["max_queued"] = max_queued
+    if max_request_bytes is not None:
+        data["admission"]["max_request_bytes"] = max_request_bytes
+    if max_upload_bytes is not None:
+        data["admission"]["max_upload_bytes"] = max_upload_bytes
+    if max_retained_audio_bytes is not None:
+        data["admission"]["max_retained_audio_bytes"] = max_retained_audio_bytes
     data["admission"]["queue_wait_timeout_seconds"] = queue_wait
     data["lifecycle"]["model_load_timeout_seconds"] = load_timeout
     data["lifecycle"]["model_idle_unload_seconds"] = idle_timeout
@@ -537,6 +550,19 @@ class ApplicationTests(unittest.TestCase):
             runner = app.runner
             self.assertTrue(runner.child_alive)
             app.transcribe(TranscriptionRequest(b"audio", "audio/wav"))
+            self.assertIs(app.runner, runner)
+            app.close()
+
+    def test_first_inference_loads_without_prior_warmup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory)
+            self.assertEqual(app.lifecycle.snapshot()[1], ModelState.UNLOADED)
+            result = app.transcribe(TranscriptionRequest(b"cold audio", "audio/wav"))
+            self.assertIn("fake transcription", result.text)
+            runner = app.runner
+            self.assertIsNotNone(runner)
+            self.assertTrue(runner.child_alive)
+            app.transcribe(TranscriptionRequest(b"second audio", "audio/wav"))
             self.assertIs(app.runner, runner)
             app.close()
 
@@ -1397,6 +1423,94 @@ class ApplicationTests(unittest.TestCase):
                 return
             time.sleep(0.005)
         raise AssertionError("condition did not become true")
+
+
+class M06HTTPIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_internal_warmup_then_transcription_uses_same_model_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = load_app_config(
+                directory,
+                idle_timeout=60,
+                max_request_bytes=1024,
+                max_upload_bytes=1024,
+                max_retained_audio_bytes=1024,
+            )
+            factory = FakeBackendFactory()
+            deployment = DeploymentConfig(
+                {
+                    "primary": ArtifactRoot(
+                        Path(directory) / "unused", Path(directory) / "manifest"
+                    )
+                }
+            )
+            application = create_application(
+                config,
+                deployment,
+                {"fake": factory},
+                FakeDeviceProbe(),
+                FakeArtifactStore(),
+            )
+
+            class HTTPFacade:
+                config = application.config
+                lifecycle = application.lifecycle
+
+                @staticmethod
+                def start():
+                    application.start(factory().capabilities())
+
+                def __getattr__(self, name):
+                    return getattr(application, name)
+
+            client = TestClient(TestServer(create_http_app(HTTPFacade())))
+            await client.start_server()
+            try:
+                await client.app[STARTUP_TASK_KEY]
+                readiness = await client.get("/readyz")
+                self.assertEqual(readiness.status, 200)
+                self.assertEqual(
+                    application.lifecycle.snapshot()[1], ModelState.UNLOADED
+                )
+                self.assertIsNone(application.runner)
+
+                warmed = await client.post(
+                    "/internal/v1/warmup",
+                    headers={"X-Request-Timeout-Ms": "5000"},
+                )
+                self.assertEqual(warmed.status, 200)
+                self.assertEqual(await warmed.json(), {"model_state": "ready"})
+                runner = application.runner
+                self.assertIsNotNone(runner)
+
+                form = FormData()
+                form.add_field(
+                    "audio",
+                    b"synthetic audio fixture",
+                    filename="synthetic.wav",
+                    content_type="audio/wav",
+                )
+                form.add_field("timestamps", "false")
+                transcription = await client.post(
+                    "/internal/v1/transcriptions",
+                    data=form,
+                    headers={"X-Request-Timeout-Ms": "5000"},
+                )
+                self.assertEqual(transcription.status, 200)
+                self.assertEqual(
+                    (await transcription.json())["text"],
+                    "fake transcription (23 bytes)",
+                )
+                repeated = await client.post(
+                    "/internal/v1/transcriptions",
+                    data=form,
+                    headers={"X-Request-Timeout-Ms": "5000"},
+                )
+                self.assertEqual(repeated.status, 200)
+                self.assertIs(application.runner, runner)
+                ready_after = await client.get("/readyz")
+                self.assertEqual(ready_after.status, 200)
+            finally:
+                await client.close()
 
 
 def _capture(failures, callback):

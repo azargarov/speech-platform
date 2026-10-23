@@ -1,6 +1,6 @@
 # M06 verification plan and evidence
 
-Status: **M06B offline implementation verification ACCEPTED 2026-10-23. M06C offline implementation and verification ACCEPTED 2026-10-23. M06D integration/regression qualification remains NOT RUN and is next; M06E live qualification is not authorized and deployment remains separately gated.**
+Status: **M06B offline implementation verification ACCEPTED 2026-10-23. M06C offline implementation and verification ACCEPTED 2026-10-23. M06D offline integration and regression qualification ACCEPTED 2026-10-23. M06E live qualification and production deployment remain separately gated pending explicit authorization.**
 
 ## Evidence scope
 
@@ -108,11 +108,34 @@ Focused Gateway regressions exercise strict/duplicate/unknown JSON handling befo
 
 An initial focused run caught the changed caller-deadline outcome (`warming` while the shared attempt remains active) and a fake-server teardown that needed an explicit release path. Both test issues were corrected; the final focused commands above pass. These checks establish coordinator context ownership and response validation against deterministic fakes, not installed Ollama behavior, native cancellation, or GPU coexistence.
 
-**Operator acceptance (user-reported 2026-10-23):** M06C offline implementation and verification are accepted, including documented limitations concerning shared GPU resources, native model-loading cancellation and unqualified installed Ollama behavior. This acceptance does not include M06D integration/regression qualification, M06E live GPU qualification, deployment, or overall M06 completion. M06D is the next stage and is not started by this closeout. M06E and deployment remain separately gated.
+**Operator acceptance (user-reported 2026-10-23):** M06C offline implementation and verification are accepted, including documented limitations concerning shared GPU resources, native model-loading cancellation and unqualified installed Ollama behavior. This acceptance does not include M06D integration/regression qualification, M06E live GPU qualification, deployment, or overall M06 completion. M06E and deployment remain separately gated.
 
-## M06D offline integration verification plan
+## M06D offline integration and regression verification (OBSERVED; accepted 2026-10-23)
 
-M06D builds on the accepted M06B lifecycle suite and the focused M06C evidence above. It verifies the following across worker/Gateway/config boundaries using fake workers and providers, alongside scoped regression suites and repository checks:
+M06D builds on accepted M06B lifecycle tests and M06C Gateway/adapter tests. It adds real Gateway handler integration against local fake STT/TTS/Ollama HTTP servers and worker HTTP paths with fake model backends. No production services, installed Ollama, CUDA model, cloud provider, container start, image build, deployment or service restart were used.
+
+- `go test -race ./...` — PASS; all Go packages passed under the race detector, including the M06 public Gateway integration test and warmup, text-transform and configuration regression suites.
+- `PYTHONPATH=. .venv/bin/python -m unittest discover -s services/stt/tests -p 'test_*.py' -v` — PASS; 89 tests. Includes new real STT HTTP application integration using the supervised fake child and synthetic audio: unloaded ready state, internal warmup, two transcriptions sharing the loaded child, and ready state after use. A separate case proves first inference loads without prior warmup. Existing deterministic lifecycle concurrency/failure tests also passed.
+- `PYTHONPATH=. .venv/bin/python -m unittest discover -s services/tts/tests -p 'test_*.py'` — PASS; 24 tests. Includes worker HTTP tests using the actual TTS lifecycle and handler with fake model factories, exercising cold synthesis, warmup, model reuse and synthesis, plus simulated insufficient VRAM mapping to a bounded 503 resource failure. The admission regression verifies an active synthesis causes both another synthesis and a competing warmup to return 429 without a warmup call.
+- `go test ./internal/gateway -run TestM06WarmupAndInferenceIntegrationAcrossAllBackends -count=1 -v` — PASS. The end-to-end handler test checks text inference before warmup; six public operation groupings (STT, TTS, text transform individually, STT+text transform, STT+TTS, all three) with ordered ready outcomes; then STT/TTS/local text inference. Fakes assert internal auth forwarding, STT timeout metadata, empty warmup request, no prompt/system on Ollama warmup, configured local model, finite separate warmup residency and normal inference `keep_alive` unchanged.
+- `PYTHONPATH=. .venv/bin/python -m unittest services.stt.tests.test_runtime.M06HTTPIntegrationTests.test_internal_warmup_then_transcription_uses_same_model_child -v` — PASS; focused STT HTTP integration test.
+- `PYTHONPATH=. .venv/bin/python -m unittest services.tts.tests.test_tts.WorkerHTTPTests.test_warmup_and_http_synthesis_share_fake_model_lifecycle services.tts.tests.test_tts.WorkerHTTPTests.test_http_warmup_reports_simulated_insufficient_vram_safely services.tts.tests.test_tts.WorkerHTTPTests.test_worker_admission_is_single_slot -v` — PASS; focused TTS warmup/inference, resource failure and active-slot tests.
+- `go test ./internal/gateway -run 'TestM06WarmupAndInferenceIntegrationAcrossAllBackends|TestPublicWarmup|TestWarmup' -count=1` — PASS; integration and Gateway warmup API regressions passed.
+- `.venv/bin/python -m unittest scripts.test_acceptance -v` — PASS; 6 tests, including OpenAPI validation, Compose isolation and worker API contract checks.
+- `make verify PYTHON=.venv/bin/python` — an initial run FAILED only because Ruff reported formatting needed in the newly changed Python test files. After formatting, subsequent runs PASSed with exit code 0. The final run completed Go vet, Ruff lint/format, Gateway/STT/TTS config checks, Compose render/static checks, release validation, `go test -race ./...`, 524 repository script tests, 89 STT tests, Go build, Python AST compilation, governance validation/tests (2 tests), and dependency lock checks. Compose commands rendered configuration only; no containers were started and no images were built.
+- `git diff --check` — PASS after documentation and test changes.
+
+The full Gateway integration exercises three fake upstreams in deterministic operation order and normal inference across all three routes. Existing tests additionally cover validation/auth/no-side-effects, request size and stalled bodies, overload/partial outcomes, same-operation shared attempts with independent deadlines/cancellation, Gateway shutdown, distinct-operation serialization, Ollama malformed/incomplete/provider-error/oversized/timeout cases, selection policies and typed fallback. The existing STT suite exercises zero-timeout unload, active/queued/pending/upload protection, lifecycle reload, failed cleanup, and ready/not-ready states. The TTS suite exercises lazy lifecycle, idle unload, active inference protection, recovery and worker admission.
+
+No application/runtime correction was revealed as necessary. The added test code was adjusted for the existing STT startup facade and test-only byte limits; neither indicates a product defect. No routing behavior or API contract changed.
+
+**NOT ESTABLISHED for M06E:** actual GPU memory coexistence or sufficiency, native model load/unload latency or cancellation, actual CUDA cleanup, deployed Docker network behavior, behavior/residency of the installed Ollama version, production readiness timing, and real multi-client shared Ollama impact. Fake resource outcomes are not capacity evidence. These remain outside the offline evidence and require separate explicit operator authorization.
+
+**Operator acceptance (user-reported 2026-10-23):** M06D offline integration and regression qualification is accepted based on the evidence recorded above. This acceptance is limited to the offline test scope. It does not establish real GPU capacity, native CUDA load/unload or cancellation behavior, installed Ollama compatibility or residency, shared Ollama ownership safety, or production networking. M06E live GPU qualification and production deployment each remain pending separate explicit authorization.
+
+### M06D coverage retained from the approved plan
+
+The accepted M06B/M06C suites plus M06D integration checks cover:
 
 - STT lazy startup, first inference, internal warmup, concurrent load singleflight, initialization deadline and confirmed failure recovery.
 - Idle timer reset after model use; unload only after idle timeout and zero active/admitted pending/queued use; unload/reap/reload races; no duplicate child.
@@ -121,7 +144,7 @@ M06D builds on the accepted M06B lifecycle suite and the focused M06C evidence a
 - Per-operation ready/partial/unavailable/resource/overloaded/timed-out results, caller disconnect, repeat/concurrent requests, overall deadline, shutdown and no false cancellation or release claims.
 - No audio, transcript, prompt or user text in warmup; no synthesis or user-facing LLM output; no cloud provider invocation.
 - Ollama warmup serialization: empty request, configured model, `stream:false`, top-level `think:false`, finite nonzero keep-alive and no unload request.
-- TTS endpoint reuse and its existing 429/admission/active-use/idle/VRAM safeguards.
+- TTS endpoint reuse and its existing 429/admission/active-use/idle safeguards, plus simulated resource-exhausted error mapping.
 - M05B ordering, explicit selection, `local_only`, `allow_cloud`, typed failure fallback and inference without prior warmup.
 - Strict configuration, public/private API contracts, shutdown, scoped regression suites and full verification required by the authorized implementation scope.
 

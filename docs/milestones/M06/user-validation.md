@@ -1,6 +1,6 @@
 # M06 operator validation
 
-Status: **M06A architecture accepted 2026-10-23. M06B offline implementation and verification accepted 2026-10-23, with documented non-cooperative-native-call limitation. M06C offline implementation and verification accepted 2026-10-23, with documented shared-GPU, native model-loading cancellation and installed-Ollama qualification limitations. M06D offline integration/regression qualification is next. M06E and deployment remain separately gated.**
+Status: **M06A architecture accepted 2026-10-23. M06B offline implementation and verification accepted 2026-10-23, with documented non-cooperative-native-call limitation. M06C offline implementation and verification accepted 2026-10-23, with documented shared-GPU, native model-loading cancellation and installed-Ollama qualification limitations. M06D offline integration and regression qualification ACCEPTED 2026-10-23. M06E live qualification and production deployment remain separately gated pending explicit authorization.**
 
 ## M06A architecture decision
 
@@ -24,13 +24,13 @@ This is approval of the planning architecture. It is not a milestone closeout, i
 | M06A architecture accepted | **ACCEPTED 2026-10-23** |
 | M06B application implementation and offline verification | **ACCEPTED 2026-10-23; acceptance is limited to offline implementation and verification and includes the documented non-cooperative-native-call limitation** |
 | M06C Gateway/API offline implementation and verification | **ACCEPTED 2026-10-23, including documented shared-GPU, native model-loading cancellation and unqualified installed-Ollama limitations** |
-| M06D offline integration and regression qualification | **NEXT STAGE; PENDING SEPARATE IMPLEMENTATION AUTHORIZATION** |
-| M06E live qualification | **PENDING SEPARATE EXPLICIT AUTHORIZATION** |
-| Deployment | **NOT AUTHORIZED; separate scope and rollback approval required** |
+| M06D offline integration and regression qualification | **ACCEPTED 2026-10-23** |
+| M06E live GPU qualification | **NEXT STAGE; PENDING SEPARATE EXPLICIT AUTHORIZATION** |
+| Production deployment | **PENDING SEPARATE EXPLICIT AUTHORIZATION AND ROLLBACK APPROVAL** |
 | M06 milestone closeout | **NOT APPLICABLE** |
 | M06B closeout commit | **COMPLETED by the 2026-10-23 closeout** |
 | M06C closeout commit | **AUTHORIZED by the 2026-10-23 closeout request** |
 
-The operator accepted M06B implementation/offline verification and M06C offline implementation/verification on 2026-10-23. M06B's non-cooperative native-call limitation remains recorded. M06C acceptance includes shared GPU-resource limitations, the fact that cancellation does not prove native model loading stopped, and that installed Ollama warmup behavior is not qualified. See [verification.md](verification.md) for exact offline evidence. M06D offline integration/regression qualification is next but not begun by this closeout. M06E live GPU qualification and deployment require separate explicit authorization; overall M06 completion remains pending.
+The operator accepted M06B implementation/offline verification, M06C offline implementation/verification, and M06D offline integration/regression qualification on 2026-10-23. M06B's non-cooperative native-call limitation remains recorded. M06C/M06D acceptance includes shared GPU-resource limits, no proof that cancellation stops native loading, unqualified installed Ollama behavior, shared Ollama ownership considerations, and unqualified production networking. M06E live GPU qualification and production deployment each require separate explicit authorization; overall M06 completion remains pending.
 
 Before M06E, operator approval must cover target identity, shared Ollama eviction acceptance or isolation choice, run envelope, monitoring, recovery and rollback. Do not infer approval from M06A acceptance.

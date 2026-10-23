@@ -400,6 +400,7 @@ class WorkerHTTPTests(unittest.TestCase):
                 self.release = threading.Event()
                 self.finished = threading.Event()
                 self.requests = []
+                self.warmups = 0
 
             def ready(self):
                 return True
@@ -408,7 +409,7 @@ class WorkerHTTPTests(unittest.TestCase):
                 return {"model_state": "unloaded", "inference_active": False}
 
             def warmup(self):
-                return None
+                self.warmups += 1
 
             def synthesize(self, text, language, mode, input_format="text"):
                 self.requests.append((text, language, mode, input_format))
@@ -457,6 +458,18 @@ class WorkerHTTPTests(unittest.TestCase):
         except urllib.error.HTTPError as error:
             return error
 
+    def _warmup(self):
+        import urllib.error
+        import urllib.request
+
+        request = urllib.request.Request(
+            self.url + "/internal/v1/warmup", data=b"", method="POST"
+        )
+        try:
+            return urllib.request.urlopen(request, timeout=3)
+        except urllib.error.HTTPError as error:
+            return error
+
     def assert_valid_wav(self, audio):
         import io
         import wave
@@ -466,6 +479,90 @@ class WorkerHTTPTests(unittest.TestCase):
             self.assertEqual(wav.getsampwidth(), 2)
             self.assertEqual(wav.getframerate(), 24000)
             self.assertEqual(wav.getnframes(), 8)
+
+    def test_warmup_and_http_synthesis_share_fake_model_lifecycle(self):
+        factory_calls = []
+        lifecycle = ModelLifecycle(
+            {"idle_unload_seconds": 60},
+            lambda: factory_calls.append(object()) or factory_calls[-1],
+        )
+        generated = []
+        lifecycle._generate = lambda *_args: (
+            generated.append(True) or b"synthetic-wav",
+            "audio/wav",
+        )
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler(self.config, lifecycle))
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = f"http://127.0.0.1:{server.server_port}"
+        try:
+            import urllib.request
+
+            # Synthesis works from a cold worker without prior warmup.
+            speech = urllib.request.Request(
+                url + "/internal/v1/speech",
+                data=b'{"text":"synthetic speech"}',
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(speech, timeout=3) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.headers["Content-Type"], "audio/wav")
+                self.assertEqual(response.read(), b"synthetic-wav")
+            self.assertEqual(len(factory_calls), 1)
+
+            warmup = urllib.request.Request(
+                url + "/internal/v1/warmup", data=b"", method="POST"
+            )
+            with urllib.request.urlopen(warmup, timeout=3) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(json.loads(response.read())["model_state"], "loaded")
+
+            with urllib.request.urlopen(speech, timeout=3) as response:
+                self.assertEqual(response.read(), b"synthetic-wav")
+            self.assertEqual(len(factory_calls), 1)
+            self.assertEqual(len(generated), 2)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(1)
+            lifecycle.stop(1)
+
+    def test_http_warmup_reports_simulated_insufficient_vram_safely(self):
+        def insufficient_resources():
+            raise RuntimeError("CUDA out of memory in synthetic test")
+
+        lifecycle = ModelLifecycle({"idle_unload_seconds": 60}, insufficient_resources)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler(self.config, lifecycle))
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            import urllib.error
+            import urllib.request
+
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/internal/v1/warmup",
+                data=b"",
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(request, timeout=3)
+            self.assertEqual(caught.exception.code, 503)
+            self.assertEqual(
+                json.loads(caught.exception.read()),
+                {
+                    "code": "resource_exhausted",
+                    "message": "GPU resources are temporarily unavailable",
+                },
+            )
+            self.assertEqual(lifecycle.state()["model_state"], "unloaded")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(1)
+            lifecycle.stop(1)
 
     def test_request_defaults_and_validation(self):
         self.lifecycle.release.set()
@@ -540,8 +637,13 @@ class WorkerHTTPTests(unittest.TestCase):
         self.assertTrue(self.lifecycle.started.wait(1))
         rejected = self._request(b'{"text":"second"}')
         self.assertEqual(rejected.code, 429)
+        warmup_rejected = self._warmup()
+        self.assertEqual(warmup_rejected.code, 429)
+        self.assertEqual(self.lifecycle.warmups, 0)
         self.lifecycle.release.set()
         client.close()
+        self.assertTrue(self.lifecycle.finished.wait(1))
+        self.assertEqual(len(self.lifecycle.requests), 1)
 
     def test_cancelled_client_does_not_interrupt_native_call(self):
         payload = json.dumps(

@@ -135,6 +135,62 @@ func TestPublicWarmupPartialFailureAndTTSBusy(t *testing.T) {
 	}
 }
 
+func TestPublicWarmupAllUnavailableAndSanitizedWorkerFailures(t *testing.T) {
+	h := HandlerWithWorkersAndText(Foundation{}, 1024, nil, nil, nil)
+	response := postWarmup(h, `{"operations":["stt"]}`, "")
+	if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), "worker") {
+		t.Fatalf("unconfigured warmup status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	for _, tc := range []struct {
+		name       string
+		status     int
+		body       string
+		wantStatus string
+		wantCode   string
+	}{
+		{"malformed_success", http.StatusOK, `{`, "unavailable", "invalid_worker_response"},
+		{"incomplete_success", http.StatusOK, `{"model_state":"loading"}`, "unavailable", "invalid_worker_response"},
+		{"resource_failure", http.StatusServiceUnavailable, `secret provider diagnostic`, "resource_unavailable", "worker_unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer worker.Close()
+			proxy := NewSTTProxy(worker.URL, "", time.Second)
+			result := proxy.warmup(context.Background())
+			if result.Status != tc.wantStatus || result.Code != tc.wantCode || strings.Contains(result.Code, "secret") {
+				t.Fatalf("result=%+v", result)
+			}
+		})
+	}
+}
+
+func TestPublicWarmupResourceUnavailablePreservesReadyOperation(t *testing.T) {
+	sttWorker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"model_state":"ready"}`)
+	}))
+	defer sttWorker.Close()
+	ttsWorker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `secret resource diagnostic`)
+	}))
+	defer ttsWorker.Close()
+	h := HandlerWithWorkersAndText(
+		Foundation{}, 1024,
+		NewSTTProxy(sttWorker.URL, "", time.Second),
+		NewTTSProxy(ttsWorker.URL, "", time.Second),
+		nil,
+	)
+	response := postWarmup(h, `{"operations":["stt","tts"]}`, "")
+	result := decodeWarmup(t, response)
+	if response.Code != http.StatusOK || result.Complete || len(result.Results) != 2 || result.Results[0].Status != "ready" || result.Results[1].Status != "resource_unavailable" || strings.Contains(response.Body.String(), "secret") {
+		t.Fatalf("status=%d result=%+v body=%s", response.Code, result, response.Body.String())
+	}
+}
+
 func TestTTSWarmupSuccessUnavailableAndTimeout(t *testing.T) {
 	success := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/internal/v1/warmup" || r.ContentLength != 0 || r.Header.Get("X-Request-Timeout-Ms") != "" {
