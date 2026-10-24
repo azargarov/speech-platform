@@ -5,6 +5,7 @@ import io
 import json
 import os
 import shutil
+import socket
 import stat
 import subprocess
 import tempfile
@@ -15,7 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts import installation_preflight as preflight
+from scripts import preflight as preflight
 from scripts import product_deployment as product
 
 
@@ -225,7 +226,6 @@ class FirstTimeSetupTests(unittest.TestCase):
 class PreflightTests(unittest.TestCase):
     def fixture(self, directory, *, transform=None, dirty=False, fail_model=False):
         root = Path(directory)
-        # Host capacity is an input to these offline tests, not a CI prerequisite.
         self.enterContext(
             patch.object(
                 preflight.shutil,
@@ -233,136 +233,342 @@ class PreflightTests(unittest.TestCase):
                 return_value=SimpleNamespace(free=64 * 1024**3),
             )
         )
-        (root / "go.mod").write_text("module fixture\n\ngo 1.24.0\n")
-        config = root / "gateway.yaml"
         import yaml
 
+        (root / "private/deployment").mkdir(parents=True)
+        (root / "models").mkdir()
+        (root / "configs").mkdir()
+        (root / "go.mod").write_text("module fixture\n\ngo 1.24.0\n")
+        shutil.copy(
+            product.ROOT / "configs/stt-product-deployment.yaml",
+            root / "configs/stt-product-deployment.yaml",
+        )
+        shutil.copy(product.ROOT / "configs/tts.yaml", root / "configs/tts.yaml")
+        config = root / "private/deployment/gateway.yaml"
         config.write_text(
             yaml.safe_dump({"text_transform": transform} if transform else {})
         )
-        values = {
-            "MODEL_STORE": directory,
-            "SPEECH_PORT": "8080",
+        env_values = {
+            "MODEL_STORE": str(root / "models"),
+            "MODEL_MANIFEST_SHA256": preflight.STT_MANIFEST_SHA256,
+            "TTS_MODEL_MANIFEST_SHA256": preflight.TTS_MANIFEST_SHA256,
+            "SPEECH_PORT": "",
             "SPEECH_BIND_IP": "127.0.0.1",
+            "SPEECH_API_TOKEN": "synthetic-token-value-with-at-least-32-chars",
             "STT_GPU_DEVICE": "0",
             "TTS_GPU_DEVICE": "0",
+            "GATEWAY_CONFIG": "private/deployment/gateway.yaml",
+            "INSTALL_MIN_FREE_GIB": "20",
         }
+        port_probe = socket.socket()
+        port_probe.bind(("127.0.0.1", 0))
+        env_values["SPEECH_PORT"] = str(port_probe.getsockname()[1])
+        port_probe.close()
+        env_file = root / ".env"
+        env_file.write_text(
+            "".join(f"{key}={value}\n" for key, value in env_values.items())
+        )
+        env_file.chmod(0o600)
         calls = []
 
-        def run(args, **_):
+        def run(args, *, root=root, timeout=60, env=None):
             calls.append(args)
-            text = ""
             if args[:3] == ["git", "rev-parse", "HEAD"]:
-                text = "a" * 40
-            elif args[:3] == ["git", "status", "--porcelain"]:
-                text = " M Makefile" if dirty else ""
-            elif args == ["go", "version"]:
-                text = "go version go1.24.0 linux/amd64"
-            elif args == ["docker", "info", "--format", "{{.DockerRootDir}}"]:
-                text = directory
-            elif args[:3] == ["docker", "compose", "version"]:
-                text = "2.40.0"
-            elif "{{json .Runtimes}}" in args:
-                text = '{"nvidia":{}}'
-            elif args[0] == "nvidia-smi":
-                text = "0, 570.0, 14000 MiB, 15000 MiB"
-            if (
-                fail_model
-                and "check" in args
-                and ("scripts.tts_model" in args or "scripts.provision_models" in args)
-            ):
-                return SimpleNamespace(returncode=2, stdout="", stderr="not available")
-            return SimpleNamespace(returncode=0, stdout=text, stderr="")
+                return "a" * 40
+            if args[:3] == ["git", "status", "--porcelain"]:
+                return " M Makefile" if dirty else ""
+            if args == ["go", "version"]:
+                return "go version go1.24.0 linux/amd64"
+            if args[:3] == ["docker", "compose", "version"]:
+                return "2.40.0"
+            if args == ["docker", "info", "--format", "{{.DockerRootDir}}"]:
+                return str(root)
+            if args[:3] == ["docker", "context", "inspect"]:
+                return (
+                    '[{"Endpoints":{"docker":{"Host":"unix:///var/run/docker.sock"}}}]'
+                )
+            if args[:2] == ["docker", "compose"] and "ls" in args:
+                return "[]"
+            if "{{json .Runtimes}}" in args:
+                return '{"nvidia":{}}'
+            if args and args[0] == "nvidia-smi":
+                return "0, 570.0, 14000 MiB, 15000 MiB"
+            return ""
 
-        p = SimpleNamespace(
-            ROOT=root,
-            run=run,
-            load_env=lambda: values,
-            validate_environment=lambda _: ("127.0.0.1", 8080, 0, 0),
-            require_local_docker=lambda: None,
-            verify_project_ownership=lambda _: False,
-            check_gateway_port=lambda *_: None,
-            gateway_config_path=lambda _: config,
-            gateway_credential_env_names=product.gateway_credential_env_names,
-            set_compose_env=lambda *_: None,
-            compose=lambda *_, **__: SimpleNamespace(returncode=0, stdout=""),
-            require_existing_workers_healthy=lambda *_: None,
-            gateway_uses_local_ollama=lambda _: False,
+        self.enterContext(patch.object(preflight, "run_command", side_effect=run))
+        self.enterContext(
+            patch.object(
+                preflight,
+                "_model_metadata",
+                side_effect=preflight.PreflightError("model metadata missing")
+                if fail_model
+                else lambda *_: True,
+            )
         )
-        return p, calls
+        return root, calls
 
     def test_success_warnings_and_disabled_optional_checks_are_read_only(self):
         with tempfile.TemporaryDirectory() as temp:
-            p, calls = self.fixture(temp)
-            report = preflight.collect(p, service="gateway")
+            root, calls = self.fixture(temp)
+            report = preflight.run_checks(root=root, service="gateway")
         self.assertFalse(report.failed)
-        self.assertIn(
-            ("GPU", "SKIP", "CUDA workers", "No GPU worker selected."), report.entries
+        self.assertTrue(
+            any(
+                group == "GPU" and status == "SKIP"
+                for group, status, *_ in report.entries
+            )
         )
         self.assertTrue(
-            any(s == "SKIP" and "credentials" in d for _, s, _, d in report.entries)
+            any(
+                status == "SKIP" and "credentials" in detail
+                for _, status, _, detail in report.entries
+            )
         )
         self.assertFalse(
-            any(a[0] == "nvidia-smi" or "scripts.tts_model" in a for a in calls)
+            any(
+                args[0] in {"nvidia-smi"}
+                or "tts_model" in args
+                or "provision_models" in args
+                for args in calls
+            )
         )
         self.assertFalse(
-            any(a[:2] in (["docker", "run"], ["docker", "pull"]) for a in calls)
+            any(args[:2] in (["docker", "run"], ["docker", "pull"]) for args in calls)
         )
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
             report.display()
-        self.assertIn("Summary: PASS=", out.getvalue())
-        self.assertTrue(out.getvalue().endswith("READY TO INSTALL\n"))
+        self.assertIn("Summary: PASS=", output.getvalue())
+        self.assertTrue(output.getvalue().endswith("READY TO INSTALL\n"))
         for group in preflight.GROUPS:
-            self.assertIn(group + ":", out.getvalue())
+            self.assertIn(group + ":", output.getvalue())
 
     def test_insufficient_checkout_and_docker_storage_remain_blocking(self):
         with tempfile.TemporaryDirectory() as temp:
-            p, _ = self.fixture(temp)
+            root, _ = self.fixture(temp)
             with patch.object(
                 preflight.shutil,
                 "disk_usage",
                 return_value=SimpleNamespace(free=1024**3),
             ):
-                report = preflight.collect(p, service="gateway")
+                report = preflight.run_checks(root=root, service="gateway")
             self.assertTrue(report.failed)
             failures = [
                 name
                 for group, status, name, _ in report.entries
                 if group == "Host" and status == "FAIL"
             ]
-            self.assertTrue(any(name.startswith("Storage (") for name in failures))
             self.assertTrue(
-                any(name.startswith("Docker storage (") for name in failures)
+                any(name.startswith("Checkout storage") for name in failures)
             )
+            self.assertTrue(any(name.startswith("Docker storage") for name in failures))
 
     def test_dirty_tree_warns_in_preflight_and_blocks_install(self):
         with tempfile.TemporaryDirectory() as temp:
-            p, _ = self.fixture(temp, dirty=True)
-            self.assertFalse(preflight.collect(p).failed)
-            self.assertTrue(preflight.collect(p, require_clean=True).failed)
+            root, _ = self.fixture(temp, dirty=True)
+            self.assertFalse(preflight.run_checks(root=root).failed)
+            self.assertTrue(preflight.run_checks(root=root, require_clean=True).failed)
 
     def test_missing_model_blocks_selected_worker_but_not_gateway(self):
         with tempfile.TemporaryDirectory() as temp:
-            p, _ = self.fixture(temp, fail_model=True)
-            self.assertTrue(preflight.collect(p, service="tts").failed)
-            self.assertFalse(preflight.collect(p, service="gateway").failed)
+            root, _ = self.fixture(temp, fail_model=True)
+            self.assertTrue(preflight.run_checks(root=root, service="tts").failed)
+            self.assertFalse(preflight.run_checks(root=root, service="gateway").failed)
 
     def test_bad_env_and_unavailable_docker_still_return_grouped_failure(self):
         with tempfile.TemporaryDirectory() as temp:
-            p, _ = self.fixture(temp)
-            p.load_env = lambda: (_ for _ in ()).throw(
-                ValueError("SECRET must not appear")
-            )
-            p.run = lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError())
-            report = preflight.collect(p)
+            root, _ = self.fixture(temp)
+            (root / ".env").write_text("SPEECH_API_TOKEN=SECRET\n")
+            (root / ".env").chmod(0o600)
+            with patch.object(preflight, "run_command", side_effect=FileNotFoundError):
+                report = preflight.run_checks(root=root)
         self.assertTrue(report.failed)
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
             report.display()
-        self.assertNotIn("SECRET", out.getvalue())
-        self.assertTrue(out.getvalue().endswith("NOT READY TO INSTALL\n"))
-        self.assertIn("SKIP", out.getvalue())
+        self.assertNotIn("SECRET", output.getvalue())
+        self.assertTrue(output.getvalue().endswith("NOT READY TO INSTALL\n"))
+        self.assertIn("SKIP", output.getvalue())
+
+    def test_preflight_compose_environment_ignores_ambient_deployment_overrides(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(temp)
+            values = preflight.load_env(root)
+            config = preflight.gateway_config_path(root, values)
+            with patch.dict(
+                os.environ,
+                {
+                    "COMPOSE_PROJECT_NAME": "wrong-project",
+                    "SOURCE_REVISION": "deadbeef",
+                    "SPEECH_PORT": "9",
+                    "COMPOSE_FILE": "unrelated.yaml",
+                },
+            ):
+                env = preflight._compose_environment(values, "a" * 40, config, root)
+        self.assertEqual(env["COMPOSE_PROJECT_NAME"], "speech-platform")
+        self.assertEqual(env["SOURCE_REVISION"], "a" * 40)
+        self.assertEqual(env["SPEECH_PORT"], values["SPEECH_PORT"])
+        self.assertNotIn("COMPOSE_FILE", env)
+
+    def test_preflight_issues_only_read_only_docker_commands(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, calls = self.fixture(temp)
+            preflight.run_checks(root=root, service="gateway")
+        mutating = {
+            "build",
+            "create",
+            "down",
+            "kill",
+            "pull",
+            "push",
+            "rm",
+            "start",
+            "stop",
+            "up",
+            "connect",
+            "disconnect",
+            "prune",
+        }
+        for args in calls:
+            if not args or args[0] != "docker":
+                continue
+            self.assertFalse(any(part in mutating for part in args[1:]), args)
+
+    def test_conflicting_compose_project_is_blocking(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(temp)
+            original = preflight.run_command
+
+            def conflicting(args, **kwargs):
+                if args[:2] == ["docker", "compose"] and "ls" in args:
+                    return json.dumps(
+                        [
+                            {
+                                "Name": "speech-platform",
+                                "ConfigFiles": "/other/compose.yaml",
+                            }
+                        ]
+                    )
+                return original(args, **kwargs)
+
+            with patch.object(preflight, "run_command", side_effect=conflicting):
+                report = preflight.run_checks(root=root, service="gateway")
+        self.assertTrue(
+            any(
+                group == "Deployment"
+                and status == "FAIL"
+                and name == "Compose project ownership"
+                for group, status, name, _ in report.entries
+            )
+        )
+
+    def test_gateway_port_conflict_is_blocking(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(temp)
+            values = preflight.load_env(root)
+            with socket.socket() as occupied:
+                occupied.bind(("127.0.0.1", 0))
+                values["SPEECH_PORT"] = str(occupied.getsockname()[1])
+                env_path = root / ".env"
+                env_path.write_text(
+                    "".join(f"{key}={value}\n" for key, value in values.items())
+                )
+                env_path.chmod(0o600)
+                report = preflight.run_checks(root=root, service="gateway")
+        self.assertTrue(
+            any(
+                group == "Networking"
+                and status == "FAIL"
+                and name == "Gateway bind port"
+                for group, status, name, _ in report.entries
+            )
+        )
+
+    def test_model_metadata_checks_manifest_file_set_and_size_without_hashing(self):
+        digest = "a" * 64
+        model = {
+            "manifest_sha256": digest,
+            "manifest_path": "releases/artifacts/test.yaml",
+        }
+        manifest = {
+            "files": [{"path": "weights.bin", "size_bytes": 4, "sha256": "b" * 64}]
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = root / "store"
+            artifact = store / digest / "artifact"
+            artifact.mkdir(parents=True)
+            (store / digest / "manifest.yaml").write_text("pinned manifest")
+            weights = artifact / "weights.bin"
+            weights.write_bytes(b"good")
+            with (
+                patch.object(
+                    preflight,
+                    "load_release",
+                    return_value={
+                        "services": {"stt": {"required_model_artifacts": [model]}}
+                    },
+                ),
+                patch.object(
+                    preflight, "load_artifact_manifest", return_value=manifest
+                ) as load_manifest,
+            ):
+                self.assertTrue(preflight._model_metadata(str(store), "stt", root))
+                load_manifest.assert_any_call(
+                    root / "releases/artifacts/test.yaml", digest
+                )
+                weights.write_bytes(b"evil")
+                self.assertTrue(preflight._model_metadata(str(store), "stt", root))
+                (artifact / "extra.bin").write_bytes(b"x")
+                with self.assertRaisesRegex(ValueError, "file set"):
+                    preflight._model_metadata(str(store), "stt", root)
+                (artifact / "extra.bin").unlink()
+                weights.write_bytes(b"bad")
+                with self.assertRaisesRegex(ValueError, "file sizes"):
+                    preflight._model_metadata(str(store), "stt", root)
+
+    def test_model_metadata_rejects_bad_manifest_and_missing_files(self):
+        digest = "c" * 64
+        model = {
+            "manifest_sha256": digest,
+            "manifest_path": "releases/artifacts/test.yaml",
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = root / "store"
+            (store / digest / "artifact").mkdir(parents=True)
+            (store / digest / "manifest.yaml").write_text("bad")
+            with (
+                patch.object(
+                    preflight,
+                    "load_release",
+                    return_value={
+                        "services": {"stt": {"required_model_artifacts": [model]}}
+                    },
+                ),
+                patch.object(
+                    preflight,
+                    "load_artifact_manifest",
+                    side_effect=ValueError("bad pinned manifest"),
+                ),
+            ):
+                with self.assertRaisesRegex(ValueError, "manifest"):
+                    preflight._model_metadata(str(store), "stt", root)
+
+    def test_secret_symlink_is_rejected(self):
+        config = {"groq_stt": {"enabled": True, "api_key_env": "GROQ_STT_API_KEY"}}
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            private = root / "private"
+            private.mkdir()
+            target = private / "actual.env"
+            target.write_text("GROQ_STT_API_KEY=synthetic-credential-value\n")
+            target.chmod(0o600)
+            (private / "cloud.env").symlink_to(target)
+            with self.assertRaisesRegex(ValueError, "symlinks"):
+                preflight.cloud_credentials(
+                    root, {}, config, preflight.credential_env_names
+                )
 
     def test_failure_exits_nonzero_before_install_side_effects(self):
         with (
@@ -403,7 +609,7 @@ class PreflightTests(unittest.TestCase):
                         "selection": {"allow_cloud": False},
                     },
                 },
-                product.gateway_credential_env_names,
+                product.credential_env_names,
             )
         )
 
@@ -425,7 +631,7 @@ class PreflightTests(unittest.TestCase):
                     root,
                     {},
                     {"text_transform": t},
-                    product.gateway_credential_env_names,
+                    product.credential_env_names,
                 )
             secret.write_text("TEST_KEY=synthetic-test-credential\n")
             secret.chmod(0o600)
@@ -434,7 +640,7 @@ class PreflightTests(unittest.TestCase):
                     root,
                     {},
                     {"text_transform": t},
-                    product.gateway_credential_env_names,
+                    product.credential_env_names,
                 )
             )
             secret.chmod(0o644)
@@ -443,7 +649,7 @@ class PreflightTests(unittest.TestCase):
                     root,
                     {},
                     {"text_transform": t},
-                    product.gateway_credential_env_names,
+                    product.credential_env_names,
                 )
             secret.chmod(0o600)
             secret.write_text("TEST_KEY=bad whitespace\n")
@@ -452,7 +658,7 @@ class PreflightTests(unittest.TestCase):
                     root,
                     {},
                     {"text_transform": t},
-                    product.gateway_credential_env_names,
+                    product.credential_env_names,
                 )
             secret.write_text("OTHER_KEY=synthetic-test-credential\n")
             with self.assertRaises(ValueError):
@@ -460,7 +666,7 @@ class PreflightTests(unittest.TestCase):
                     root,
                     {},
                     {"text_transform": t},
-                    product.gateway_credential_env_names,
+                    product.credential_env_names,
                 )
 
     def test_groq_and_cloud_text_credentials_are_independent(self):
@@ -501,7 +707,7 @@ class PreflightTests(unittest.TestCase):
                     secret.chmod(0o600)
                     self.assertTrue(
                         preflight.cloud_credentials(
-                            root, {}, document, product.gateway_credential_env_names
+                            root, {}, document, product.credential_env_names
                         )
                     )
             secret.write_text("GROQ_STT_API_KEY=synthetic-groq-credential\n")
@@ -511,7 +717,7 @@ class PreflightTests(unittest.TestCase):
                     root,
                     {},
                     combinations["both"][0],
-                    product.gateway_credential_env_names,
+                    product.credential_env_names,
                 )
 
 
@@ -650,7 +856,7 @@ class PreflightCLITests(unittest.TestCase):
                 "checks",
                 return_value=(values, "a" * 40, "compose", "GPU 0", None),
             ),
-            patch.object(product, "gateway_uses_local_ollama", return_value=False),
+            patch.object(product, "uses_local_ollama", return_value=False),
             contextlib.redirect_stdout(output),
         ):
             self.assertEqual(product.main(), 0)
@@ -664,7 +870,7 @@ class PreflightCLITests(unittest.TestCase):
         output = io.StringIO()
         with (
             patch("sys.argv", ["product", "preflight"]),
-            patch.object(preflight, "collect", return_value=r),
+            patch.object(preflight, "run_checks", return_value=r),
             patch.object(product, "load_env") as load,
             contextlib.redirect_stdout(output),
         ):
@@ -678,17 +884,19 @@ class AdditionalBoundaryTests(unittest.TestCase):
 
     def test_gpu_unavailable_blocks_workers_and_does_not_block_gateway(self):
         with tempfile.TemporaryDirectory() as temp:
-            p, _ = self.fixture(temp)
-            original = p.run
+            root, _ = self.fixture(temp)
+            original = preflight.run_command
 
             def no_gpu(args, **kw):
                 if args[0] == "nvidia-smi":
                     raise FileNotFoundError()
                 return original(args, **kw)
 
-            p.run = no_gpu
-            self.assertTrue(preflight.collect(p, service="tts").failed)
-            self.assertFalse(preflight.collect(p, service="gateway").failed)
+            with patch.object(preflight, "run_command", side_effect=no_gpu):
+                self.assertTrue(preflight.run_checks(root=root, service="tts").failed)
+                self.assertFalse(
+                    preflight.run_checks(root=root, service="gateway").failed
+                )
 
     def test_reserved_cloud_key_is_rejected_before_reading_secret(self):
         t = {
@@ -704,7 +912,7 @@ class AdditionalBoundaryTests(unittest.TestCase):
                 Path("/unused"),
                 {},
                 {"text_transform": t},
-                product.gateway_credential_env_names,
+                product.credential_env_names,
             )
 
     def test_ollama_request_has_bounded_timeout(self):

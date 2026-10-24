@@ -371,9 +371,7 @@ class ProductDeploymentTests(unittest.TestCase):
                     "runtime_variant": "foundation",
                 },
             ),
-            patch.object(
-                product_deployment, "gateway_uses_local_ollama", return_value=False
-            ),
+            patch.object(product_deployment, "uses_local_ollama", return_value=False),
             patch("builtins.print") as output,
         ):
             self.assertEqual(product_deployment.main(), 0)
@@ -426,9 +424,7 @@ class ProductDeploymentTests(unittest.TestCase):
                 "require_existing_workers_healthy",
                 side_effect=lambda *_args: events.append(("workers", None)),
             ),
-            patch.object(
-                product_deployment, "gateway_uses_local_ollama", return_value=True
-            ),
+            patch.object(product_deployment, "uses_local_ollama", return_value=True),
             patch.object(
                 product_deployment,
                 "prepare_local_ollama",
@@ -492,9 +488,7 @@ class ProductDeploymentTests(unittest.TestCase):
                 return_value=(values, self.REVISION, "compose", "gpu", None),
             ),
             patch.object(product_deployment, "require_existing_workers_healthy"),
-            patch.object(
-                product_deployment, "gateway_uses_local_ollama", return_value=False
-            ),
+            patch.object(product_deployment, "uses_local_ollama", return_value=False),
             patch.object(
                 product_deployment,
                 "compose",
@@ -558,7 +552,7 @@ class ProductDeploymentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             config = Path(temporary) / "gateway.yaml"
             config.write_text("listen_port: 8080\n")
-            self.assertFalse(product_deployment.gateway_uses_local_ollama(config))
+            self.assertFalse(product_deployment.uses_local_ollama(config))
             config.write_text(
                 """text_transform:
   enabled: false
@@ -568,7 +562,7 @@ class ProductDeploymentTests(unittest.TestCase):
     - {id: model, provider: local, enabled: true}
 """
             )
-            self.assertFalse(product_deployment.gateway_uses_local_ollama(config))
+            self.assertFalse(product_deployment.uses_local_ollama(config))
             config.write_text(
                 """text_transform:
   enabled: true
@@ -578,7 +572,7 @@ class ProductDeploymentTests(unittest.TestCase):
     - {id: model, provider: cloud, enabled: true}
 """
             )
-            self.assertFalse(product_deployment.gateway_uses_local_ollama(config))
+            self.assertFalse(product_deployment.uses_local_ollama(config))
             config.write_text(
                 """text_transform:
   enabled: true
@@ -588,7 +582,7 @@ class ProductDeploymentTests(unittest.TestCase):
     - {id: model, provider: local, enabled: true}
 """
             )
-            self.assertTrue(product_deployment.gateway_uses_local_ollama(config))
+            self.assertTrue(product_deployment.uses_local_ollama(config))
 
     def test_local_ollama_config_requires_the_network_alias_and_port(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -605,7 +599,7 @@ class ProductDeploymentTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 product_deployment.OperatorError, "ollama:11434"
             ):
-                product_deployment.gateway_uses_local_ollama(config)
+                product_deployment.uses_local_ollama(config)
 
     def test_gateway_config_override_is_resolved_inside_repository(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -622,7 +616,7 @@ class ProductDeploymentTests(unittest.TestCase):
                     {"GATEWAY_CONFIG": "private/deployment/gateway.yaml"}
                 )
                 self.assertEqual(resolved, config.resolve())
-                self.assertFalse(product_deployment.gateway_uses_local_ollama(resolved))
+                self.assertFalse(product_deployment.uses_local_ollama(resolved))
 
                 outside = root.parent / "outside-gateway.yaml"
                 outside.write_text("listen_port: 8080\n")

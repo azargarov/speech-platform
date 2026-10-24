@@ -1,6 +1,8 @@
 # Install SpeechPlatform
 
-The supported path is root `compose.yaml` through `scripts/product_deployment.py`.
+The supported runtime is root `compose.yaml`. `make preflight` runs the independent,
+read-only `scripts/preflight.py`; `make install` still uses
+`scripts/product_deployment.py` for build and deployment orchestration.
 The historical VoiceService installer has been retired. The descriptor
 `releases/voiceservice-v0.1.2.yaml` remains as historical model and image
 provenance; it does not describe the current VoxCPM2 deployment.
@@ -61,8 +63,11 @@ review the optional settings in `.env.example`.
 Provision missing artifacts separately with `make model-fetch` and
 `make tts-model-fetch`, after reviewing paths, ownership and model terms. These
 commands may need the store owner's privileges; preflight never invokes sudo,
-pulls images, downloads models, creates containers/networks or loads GPU models.
-Its configuration checks may populate ordinary Go/Python build caches.
+pulls images, downloads models, creates containers/networks, probes CUDA inside a
+container, or loads GPU models. It checks pinned manifest identity, file set and
+sizes without hashing multi-gigabyte files; worker startup verifies artifact
+SHA-256 before loading. `make tts-model-check` remains an explicit full TTS
+integrity check. Configuration checks may populate ordinary Go/Python build caches.
 
 The report groups Host, GPU, Models, Networking, External Providers and Deployment
 results. PASS is satisfied, WARN permits installation with the stated limitation,
@@ -121,9 +126,10 @@ its existing internal bridge network and alias `ollama`, endpoint
 `http://ollama:11434/api/generate`, and the exact configured model already present.
 The Ollama owner prepares these prerequisites explicitly. SpeechPlatform only
 inspects/reuses them: it never creates, restarts, upgrades or attaches shared Ollama.
-Preflight queries `/api/version` and `/api/tags` without loading a model; missing
-model/unreachable required local provider is FAIL. Gateway DNS is tested from an
-existing container when possible and checked after first installation.
+Preflight inspects the existing Ollama container/network and queries
+`/api/version` and `/api/tags` without loading a model; missing model or
+unreachable required local provider is FAIL. It does not test Gateway container
+DNS before installation; service health checks establish runtime connectivity.
 
 Cloud stays opt-in through `selection.allow_cloud: true`. No credentials are
 required while false, and cold/unavailable local models do not change routing.

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import ipaddress
 import json
 import os
 import re
@@ -14,7 +13,6 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import urlparse
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -22,14 +20,16 @@ import yaml
 
 if __package__:
     from . import ollama_network
+    from . import preflight
 else:
     import ollama_network
+    import preflight
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-DIGEST = "86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6"
-TTS_DIGEST = "04d6e05b69b22568030ac21f494e406ffdf2d06efeeab43cfdb4c21ba8c9bd41"
+DIGEST = preflight.STT_MANIFEST_SHA256
+TTS_DIGEST = preflight.TTS_MANIFEST_SHA256
 IMAGE_ID_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 SOURCE_REVISION_PATTERN = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 GATEWAY_RUNTIME_VARIANT = "foundation"
@@ -41,38 +41,7 @@ COMPOSE = [
     "-f",
     str(ROOT / "compose.yaml"),
 ]
-ALLOWED_ENV = {
-    "COMPOSE_PROJECT_NAME",
-    "SPEECH_BIND_IP",
-    "SPEECH_PORT",
-    "SPEECH_API_TOKEN",
-    "MODEL_STORE",
-    "MODEL_MANIFEST_SHA256",
-    "TTS_MODEL_MANIFEST_SHA256",
-    "TTS_MODEL_STORE",
-    "TTS_MODEL_READ_GID",
-    "MODEL_READ_GID",
-    "STT_GPU_DEVICE",
-    "TTS_GPU_DEVICE",
-    "STT_GPU_MEMORY_LIMIT",
-    "STT_CPU_LIMIT",
-    "STT_PIDS_LIMIT",
-    "STT_STOP_GRACE_PERIOD",
-    "GATEWAY_MEMORY_LIMIT",
-    "GATEWAY_CPU_LIMIT",
-    "TTS_GPU_MEMORY_LIMIT",
-    "TTS_CPU_LIMIT",
-    "TTS_PIDS_LIMIT",
-    "TTS_STOP_GRACE_PERIOD",
-    "SPEECH_API_URL",
-    "GATEWAY_CONFIG",
-    "GATEWAY_EXPECTED_IMAGE_ID",
-    "GATEWAY_EXPECTED_SOURCE_REVISION",
-    "OLLAMA_CONTAINER_NAME",
-    "OLLAMA_NETWORK_NAME",
-    "GATEWAY_SECRETS_FILE",
-    "INSTALL_MIN_FREE_GIB",
-}
+ALLOWED_ENV = preflight.ALLOWED_ENV
 
 
 class OperatorError(Exception):
@@ -95,27 +64,10 @@ def run(args: list[str], *, check=True, capture=False, cwd=None, timeout=60):
 
 
 def load_env() -> dict[str, str]:
-    path = ROOT / ".env"
-    if not path.is_file():
-        raise OperatorError(".env is missing; run: cp .env.example .env")
-    if path.stat().st_mode & 0o077:
-        raise OperatorError(".env must be private (mode 0600); run: chmod 600 .env")
-    values = {}
-    for number, raw in enumerate(path.read_text().splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            raise OperatorError(f".env line {number} must be KEY=value")
-        key, value = line.split("=", 1)
-        key, value = key.strip(), value.strip()
-        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key) or key in values:
-            raise OperatorError(f".env line {number} has an invalid or duplicate key")
-        values[key] = value
-    unknown = values.keys() - ALLOWED_ENV
-    if unknown:
-        raise OperatorError(".env contains unknown keys: " + ", ".join(sorted(unknown)))
-    return values
+    try:
+        return preflight.load_env(ROOT)
+    except (OSError, ValueError) as exc:
+        raise OperatorError(str(exc)) from exc
 
 
 def set_compose_env(
@@ -137,41 +89,22 @@ def set_compose_env(
     os.environ["GATEWAY_CONFIG"] = str(gateway_config_path(values))
     os.environ["GATEWAY_SECRETS_FILE"] = str(gateway_secrets_path(values))
     document = yaml.safe_load(gateway_config_path(values).read_text()) or {}
-    if not gateway_credential_env_names(document):
+    if not credential_env_names(document):
         os.environ["GATEWAY_SECRETS_FILE"] = "/dev/null"
     os.environ.pop("GATEWAY_IMAGE", None)
     if gateway_image is not None:
         os.environ["GATEWAY_IMAGE"] = gateway_image
 
 
-def gateway_credential_env_names(document: dict) -> set[str | None]:
+def credential_env_names(document: dict) -> set[str | None]:
     """Return credential variables used by currently enabled cloud providers."""
-    names: set[str | None] = set()
-    groq = document.get("groq_stt") or {}
-    if groq.get("enabled") is True:
-        names.add(groq.get("api_key_env", "GROQ_STT_API_KEY"))
-
-    transform = document.get("text_transform") or {}
-    selection = transform.get("selection") or {}
-    if transform.get("enabled") is True and selection.get("allow_cloud") is True:
-        enabled_provider_ids = {
-            model.get("provider")
-            for model in transform.get("models", [])
-            if model.get("enabled") is True
-        }
-        names.update(
-            provider.get("api_key_env")
-            for provider in transform.get("providers", [])
-            if provider.get("locality") == "cloud"
-            and provider.get("id") in enabled_provider_ids
-        )
-    return names
+    return preflight.credential_env_names(document)
 
 
 def compose(values, revision, *args, capture=False, gateway_image=None):
     set_compose_env(values, revision, gateway_image=gateway_image)
     command = list(COMPOSE)
-    if gateway_uses_local_ollama(gateway_config_path(values)):
+    if uses_local_ollama(gateway_config_path(values)):
         command.extend(["-f", str(ROOT / "deployments/compose/compose.ollama.yaml")])
     return run(
         [*command, *args],
@@ -353,106 +286,27 @@ def verify_gateway_image(
 
 
 def gateway_config_path(values: dict[str, str]) -> Path:
-    """Resolve a tracked or private Gateway config without following symlinks."""
-    configured = Path(values.get("GATEWAY_CONFIG", "configs/gateway.yaml"))
-    source = configured if configured.is_absolute() else ROOT / configured
-    root = ROOT.resolve()
     try:
-        resolved = source.resolve(strict=True)
-    except OSError as exc:
-        raise OperatorError("configured Gateway config file was not found") from exc
-    if not resolved.is_relative_to(root) or not resolved.is_file():
-        raise OperatorError("GATEWAY_CONFIG must identify a file inside the repository")
-
-    current = root
-    try:
-        relative = source.absolute().relative_to(root)
-    except ValueError as exc:
-        raise OperatorError("GATEWAY_CONFIG must be inside the repository") from exc
-    if ".." in relative.parts:
-        raise OperatorError("GATEWAY_CONFIG must not use parent-directory traversal")
-    for part in relative.parts:
-        current /= part
-        if current.is_symlink():
-            raise OperatorError("GATEWAY_CONFIG must not traverse symlinks")
-    return resolved
+        return preflight.gateway_config_path(ROOT, values)
+    except (OSError, ValueError) as exc:
+        raise OperatorError(str(exc)) from exc
 
 
 def gateway_secrets_path(values):
-    configured = Path(values.get("GATEWAY_SECRETS_FILE", "private/cloud.env"))
-    path = configured if configured.is_absolute() else ROOT / configured
-    root = ROOT.resolve()
     try:
-        relative = path.absolute().relative_to(root)
-    except ValueError as exc:
-        raise OperatorError("GATEWAY_SECRETS_FILE must be inside private/") from exc
-    if ".." in relative.parts or not path.resolve().is_relative_to(root / "private"):
-        raise OperatorError(
-            "GATEWAY_SECRETS_FILE must be inside private/, without traversal"
-        )
-    current = root
-    for part in relative.parts:
-        current /= part
-        if current.is_symlink():
-            raise OperatorError("GATEWAY_SECRETS_FILE must not traverse symlinks")
-    return path.absolute()
+        return preflight.gateway_secrets_path(ROOT, values)
+    except (OSError, ValueError) as exc:
+        raise OperatorError(str(exc)) from exc
 
 
-def gateway_uses_local_ollama(config_path: Path | None = None) -> bool:
+def uses_local_ollama(config_path: Path | None = None) -> bool:
     """Select the optional Ollama network only for an enabled local model."""
-    path = config_path or gateway_config_path({})
     try:
+        path = config_path or gateway_config_path({})
         document = yaml.safe_load(path.read_text())
-    except (OSError, yaml.YAMLError) as exc:
-        raise OperatorError(f"could not read Gateway config {path}") from exc
-    if not isinstance(document, dict):
-        raise OperatorError("Gateway config must contain a YAML mapping")
-    transform = document.get("text_transform")
-    if transform is None:
-        return False
-    if not isinstance(transform, dict):
-        raise OperatorError("text_transform config must be a mapping")
-    if transform.get("enabled") is not True:
-        return False
-    providers = transform.get("providers") or []
-    models = transform.get("models") or []
-    if not isinstance(providers, list) or not isinstance(models, list):
-        raise OperatorError("text_transform providers and models must be lists")
-    provider_by_id = {
-        item.get("id"): item for item in providers if isinstance(item, dict)
-    }
-    active = False
-    for model in models:
-        if not isinstance(model, dict) or model.get("enabled") is not True:
-            continue
-        provider = provider_by_id.get(model.get("provider"))
-        if (
-            not provider
-            or provider.get("type") != "ollama"
-            or provider.get("locality") != "local"
-        ):
-            continue
-        try:
-            endpoint = urlparse(str(provider.get("endpoint", "")))
-            port = endpoint.port
-        except ValueError as exc:
-            raise OperatorError(
-                "enabled local Ollama provider endpoint is invalid"
-            ) from exc
-        if (
-            endpoint.scheme != "http"
-            or endpoint.hostname != "ollama"
-            or port != 11434
-            or endpoint.username
-            or endpoint.password
-            or endpoint.query
-            or endpoint.fragment
-        ):
-            raise OperatorError(
-                "enabled local Ollama providers must use http://ollama:11434"
-            )
-        active = True
-    return active
+        return preflight.uses_local_ollama(document)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        raise OperatorError(str(exc)) from exc
 
 
 def prepare_local_ollama(values: dict[str, str]) -> dict[str, str]:
@@ -627,108 +481,10 @@ def require_existing_workers_healthy(values, revision) -> None:
 
 
 def validate_environment(values):
-    required = {
-        "MODEL_STORE",
-        "MODEL_MANIFEST_SHA256",
-        "TTS_MODEL_MANIFEST_SHA256",
-        "SPEECH_BIND_IP",
-        "SPEECH_PORT",
-        "STT_GPU_DEVICE",
-        "TTS_GPU_DEVICE",
-    }
-    missing = required - values.keys()
-    if missing:
-        raise OperatorError(
-            ".env is missing required keys: " + ", ".join(sorted(missing))
-        )
-    if values["MODEL_MANIFEST_SHA256"] != DIGEST:
-        raise OperatorError("MODEL_MANIFEST_SHA256 must match the pinned v0.1.2 model")
-    if values["TTS_MODEL_MANIFEST_SHA256"] != TTS_DIGEST:
-        raise OperatorError(
-            "TTS_MODEL_MANIFEST_SHA256 must match the pinned VoxCPM2 artifact"
-        )
-    if not Path(values["MODEL_STORE"]).is_absolute():
-        raise OperatorError("MODEL_STORE must be an absolute host path")
-    if (
-        values.get("TTS_MODEL_STORE")
-        and not Path(values["TTS_MODEL_STORE"]).is_absolute()
-    ):
-        raise OperatorError("TTS_MODEL_STORE must be an absolute host path")
     try:
-        port = int(values["SPEECH_PORT"])
-        gpu = int(values["STT_GPU_DEVICE"])
-        tts_gpu = int(values["TTS_GPU_DEVICE"])
-        ip = str(ipaddress.IPv4Address(values["SPEECH_BIND_IP"]))
-    except ValueError as exc:
-        raise OperatorError(
-            "SPEECH_PORT, STT_GPU_DEVICE, TTS_GPU_DEVICE or SPEECH_BIND_IP is invalid"
-        ) from exc
-    if not 1 <= port <= 65535 or gpu < 0 or tts_gpu < 0:
-        raise OperatorError(
-            "SPEECH_PORT or a GPU device index is outside its valid range"
-        )
-    if not socket.inet_aton(ip):
-        raise OperatorError("SPEECH_BIND_IP must resolve to an IPv4 address")
-    if len(values.get("SPEECH_API_TOKEN", "")) < 32:
-        raise OperatorError(
-            "SPEECH_API_TOKEN must contain at least 32 characters for every deployment"
-        )
-    if not ipaddress.ip_address(ip).is_loopback:
-        parsed_api = urlparse(values.get("SPEECH_API_URL", ""))
-        if parsed_api.scheme != "https" or not parsed_api.hostname:
-            raise OperatorError(
-                "non-loopback API use requires a TLS reverse proxy; set SPEECH_API_URL to its https endpoint"
-            )
-    if (
-        values.get("MODEL_READ_GID", "988").isdecimal() is False
-        or not 1 <= int(values.get("MODEL_READ_GID", "988")) <= 2147483647
-    ):
-        raise OperatorError("MODEL_READ_GID must be in 1..2147483647")
-    if (
-        values.get(
-            "TTS_MODEL_READ_GID", values.get("MODEL_READ_GID", "988")
-        ).isdecimal()
-        is False
-        or not 1
-        <= int(values.get("TTS_MODEL_READ_GID", values.get("MODEL_READ_GID", "988")))
-        <= 2147483647
-    ):
-        raise OperatorError("TTS_MODEL_READ_GID must be in 1..2147483647")
-    try:
-        ollama_network.validate_names(
-            values.get("OLLAMA_NETWORK_NAME", ollama_network.DEFAULT_NETWORK),
-            values.get("OLLAMA_CONTAINER_NAME", ollama_network.DEFAULT_CONTAINER),
-        )
-    except ollama_network.NetworkError as exc:
+        return preflight.validate_environment(values, ROOT)
+    except (OSError, ValueError) as exc:
         raise OperatorError(str(exc)) from exc
-    if "SPEECH_API_URL" in values:
-        parsed_api = urlparse(values["SPEECH_API_URL"])
-        if (
-            parsed_api.username
-            or parsed_api.password
-            or parsed_api.query
-            or parsed_api.fragment
-            or parsed_api.path not in ("", "/")
-        ):
-            raise OperatorError(
-                "SPEECH_API_URL must be an origin without credentials, query or path"
-            )
-        if parsed_api.scheme == "http" and parsed_api.hostname not in {
-            "127.0.0.1",
-            "localhost",
-        }:
-            raise OperatorError("HTTP SPEECH_API_URL is allowed only for loopback")
-        if parsed_api.scheme not in {"http", "https"} or not parsed_api.hostname:
-            raise OperatorError("SPEECH_API_URL must be an HTTP(S) origin")
-
-    gateway_secrets_path(values)
-    try:
-        minimum_disk = int(values.get("INSTALL_MIN_FREE_GIB", "20"))
-        if not 1 <= minimum_disk <= 1024:
-            raise ValueError
-    except ValueError as exc:
-        raise OperatorError("INSTALL_MIN_FREE_GIB must be in 1..1024") from exc
-    return ip, port, gpu, tts_gpu
 
 
 def checks(
@@ -748,12 +504,8 @@ def checks(
         raise OperatorError(
             "GPU process ownership is not inspected; available VRAM is advisory"
         )
-    if __package__:
-        from .installation_preflight import collect
-    else:
-        from installation_preflight import collect
-    report = collect(
-        sys.modules[__name__],
+    report = preflight.run_checks(
+        root=ROOT,
         service=service,
         model=model,
         compose_config=compose_config,
@@ -1002,11 +754,7 @@ def main() -> int:
                 parser.error(
                     "preflight is read-only; use plan/install for Gateway --no-build identity options"
                 )
-            if __package__:
-                from .installation_preflight import collect
-            else:
-                from installation_preflight import collect
-            report = collect(sys.modules[__name__], service=args.service)
+            report = preflight.run_checks(root=ROOT, service=args.service)
             report.display()
             return 2 if report.failed else 0
         values = load_env()
@@ -1057,7 +805,7 @@ def main() -> int:
                 print(
                     "No-build mode: disabled; selected service image builds remain enabled."
                 )
-            if gateway_uses_local_ollama(gateway_config_path(values)):
+            if uses_local_ollama(gateway_config_path(values)):
                 print(
                     "Local Ollama: enabled; requires existing private network "
                     f"{values.get('OLLAMA_NETWORK_NAME', ollama_network.DEFAULT_NETWORK)} "
@@ -1084,7 +832,7 @@ def main() -> int:
                 )
             if args.service == "gateway":
                 require_existing_workers_healthy(values, revision)
-            if (args.service in (None, "gateway")) and gateway_uses_local_ollama(
+            if (args.service in (None, "gateway")) and uses_local_ollama(
                 gateway_config_path(values)
             ):
                 network_result = prepare_local_ollama(values)
@@ -1174,7 +922,7 @@ def main() -> int:
                 compose(values, revision, "up", "-d", "--no-build", "--pull", "never")
             wait_ready(int(values["SPEECH_PORT"]), values["SPEECH_BIND_IP"], services)
             verify_running_images(values, revision, identities)
-            if (args.service in (None, "gateway")) and gateway_uses_local_ollama(
+            if (args.service in (None, "gateway")) and uses_local_ollama(
                 gateway_config_path(values)
             ):
                 compose(

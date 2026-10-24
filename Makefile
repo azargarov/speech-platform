@@ -125,7 +125,7 @@ tts-state:
 init:
 	sh scripts/init.sh
 preflight:
-	$(PYTHON) scripts/product_deployment.py preflight $(if $(SERVICE),--service "$(SERVICE)")
+	$(PYTHON) scripts/preflight.py $(if $(SERVICE),--service "$(SERVICE)")
 gpu-check stop remove:
 	$(PYTHON) scripts/product_deployment.py $@ $(if $(SERVICE),--service "$(SERVICE)")
 plan:
