@@ -20,10 +20,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PRIVATE = ROOT / "private/m05b/stage2b"
-EVIDENCE = PRIVATE / "offline-lifecycle.json"
-TOKEN_FILE = PRIVATE / "gateway-test.env"
-CONFIG_FILE = PRIVATE / "gateway.yaml"
+CONFIG_FILE = ROOT / "configs/gateway-text.example.yaml"
 SYNTHETIC_OUTPUT = "Synthetic offline transformation result."
 
 
@@ -69,15 +66,6 @@ class FakeHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def read_private_token() -> str:
-    for line in TOKEN_FILE.read_text().splitlines():
-        if line.startswith("SPEECH_API_TOKEN="):
-            token = line.partition("=")[2].strip().strip("'\"")
-            if len(token) >= 32:
-                return token
-    raise RuntimeError("private test bearer token is missing or invalid")
-
-
 def free_loopback_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -96,8 +84,6 @@ def request_json(url: str, token: str, payload: dict | None = None) -> tuple[int
 
 class GatewayProcessLifecycleTest(unittest.TestCase):
     def test_gateway_stays_alive_for_sequential_authenticated_requests(self):
-        PRIVATE.mkdir(mode=0o700, parents=True, exist_ok=True)
-        PRIVATE.chmod(0o700)
         evidence = {
             "scenario": "single-controller owns Gateway across readiness and sequential requests",
             "provider": "local fake Ollama protocol endpoint",
@@ -109,6 +95,7 @@ class GatewayProcessLifecycleTest(unittest.TestCase):
         log_file = None
 
         with tempfile.TemporaryDirectory(prefix="stage2b-lifecycle-") as workdir:
+            evidence_path = Path(workdir) / "offline-lifecycle.json"
             binary = Path(workdir) / "gateway"
             build = subprocess.run(
                 ["go", "build", "-o", str(binary), "./cmd/gateway"],
@@ -139,11 +126,11 @@ class GatewayProcessLifecycleTest(unittest.TestCase):
             test_config.write_text(yaml.safe_dump(config, sort_keys=False))
             test_config.chmod(0o600)
 
-            token = read_private_token()
+            token = "synthetic-stage2b-offline-token-00000000"
             env = os.environ.copy()
             env.pop("GROQ_API_KEY", None)
             env["SPEECH_API_TOKEN"] = token
-            log_path = PRIVATE / "offline-gateway.log"
+            log_path = Path(workdir) / "offline-gateway.log"
             log_file = log_path.open("w", encoding="utf-8")
             log_path.chmod(0o600)
             try:
@@ -266,8 +253,8 @@ class GatewayProcessLifecycleTest(unittest.TestCase):
                     fake_thread.join(timeout=3)
                 if log_file is not None:
                     log_file.close()
-                EVIDENCE.write_text(json.dumps(evidence, indent=2) + "\n")
-                EVIDENCE.chmod(0o600)
+                evidence_path.write_text(json.dumps(evidence, indent=2) + "\n")
+                evidence_path.chmod(0o600)
 
         self.assertTrue(evidence.get("cleaned_up"))
         self.assertFalse(evidence.get("forced_kill", False))

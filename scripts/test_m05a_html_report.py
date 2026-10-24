@@ -1,13 +1,69 @@
 import re
+import json
+import shutil
+import tempfile
+from pathlib import Path
 import unittest
 
 from scripts import m05a_html_report as report
 
 
 class M05AHtmlReportTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.cases = report.load_report_data()
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        # Use only the tracked synthetic corpus; never read historical private outputs.
+        cases = []
+        for corpus, source in report.CASE_FILES.items():
+            target = self.root / source.relative_to(report.ROOT)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            cases.extend(
+                dict(case, corpus=corpus) for case in report.read_jsonl(source)
+            )
+        for _, _, original, unseen in report.MODEL_SOURCES:
+            for corpus, name in (
+                (("original", original), ("unseen", unseen))
+                if unseen
+                else ((None, original),)
+            ):
+                destination = self.root / "private/m05a" / name / "results.jsonl"
+                destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                rows = [
+                    {
+                        "case_id": case["id"],
+                        "transformation": {
+                            key: case.get(key)
+                            for key in (
+                                "input_language",
+                                "mode",
+                                "formatting",
+                                "target_language",
+                                "text",
+                            )
+                        },
+                        "response": case["text"],
+                        "timing": {"request_seconds": 0.1},
+                    }
+                    for case in cases
+                    if corpus is None or case["corpus"] == corpus
+                ]
+                destination.write_text(
+                    "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+                )
+                destination.chmod(0o600)
+        self.cases = report.load_report_data(self.root)
+
+    def test_source_mismatch_in_synthetic_result_is_rejected(self):
+        source = (
+            self.root / "private/m05a" / report.MODEL_SOURCES[0][2] / "results.jsonl"
+        )
+        rows = report.read_jsonl(source)
+        rows[0]["transformation"]["text"] = "mismatched synthetic input"
+        source.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        with self.assertRaisesRegex(ValueError, "source text mismatch"):
+            report.load_report_data(self.root)
 
     def test_all_46_cases_have_aligned_original_and_three_outputs(self):
         self.assertEqual(len(self.cases), 46)

@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,8 @@ from unittest.mock import patch
 import requests
 
 from scripts import m05a_eval, m05a_groq_eval as groq
+
+PROMPT = m05a_eval.ROOT / "docs/milestones/M05A/prompts/v2.md"
 
 
 class Response:
@@ -24,6 +27,20 @@ class Response:
 class GroqEvalTests(unittest.TestCase):
     def setUp(self):
         self.case = m05a_eval.read_cases()[0]
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / "private").mkdir(mode=0o700)
+        (root / "private/m05a").mkdir(mode=0o700)
+        corpus = root / "docs/milestones/M05A"
+        corpus.mkdir(parents=True)
+        for name in ("cases.jsonl", "unseen-cases.jsonl"):
+            shutil.copyfile(
+                m05a_eval.ROOT / "docs/milestones/M05A" / name, corpus / name
+            )
+        (corpus / "prompts").mkdir()
+        shutil.copyfile(PROMPT, corpus / "prompts/v2.md")
+        self.enterContext(patch.object(m05a_eval, "ROOT", root))
 
     def test_missing_key_is_rejected_before_network(self):
         with self.assertRaisesRegex(ValueError, "GROQ_API_KEY"):
@@ -111,7 +128,7 @@ class GroqEvalTests(unittest.TestCase):
                     "qwen/qwen3.8-27b",
                     run_dir,
                     [self.case],
-                    m05a_eval.ROOT / "docs/milestones/M05A/prompts/v2.md",
+                    PROMPT,
                     "v2",
                     0,
                     5,
@@ -183,7 +200,7 @@ class GroqEvalTests(unittest.TestCase):
                         "qwen/qwen3.8-27b",
                         run_dir,
                         [self.case],
-                        m05a_eval.ROOT / "docs/milestones/M05A/prompts/v2.md",
+                        PROMPT,
                         "v2",
                         0,
                         5,
@@ -251,7 +268,7 @@ class GroqEvalTests(unittest.TestCase):
                         "qwen/qwen3.8-27b",
                         run_dir,
                         cases,
-                        m05a_eval.ROOT / "docs/milestones/M05A/prompts/v2.md",
+                        PROMPT,
                         "v2",
                         0,
                         5,
@@ -271,7 +288,7 @@ class GroqEvalTests(unittest.TestCase):
                         "qwen/qwen3.8-27b",
                         run_dir,
                         cases,
-                        m05a_eval.ROOT / "docs/milestones/M05A/prompts/v2.md",
+                        PROMPT,
                         "v2",
                         0,
                         5,

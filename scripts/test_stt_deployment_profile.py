@@ -1217,6 +1217,21 @@ class DeploymentProfileTests(unittest.TestCase):
             {"host_port": 8080, "listen_port": 8080},
         )
 
+    def test_private_root_permissions_precede_missing_file_diagnostic(self):
+        private = self.root / "private"
+        private.mkdir(mode=0o700)
+        missing = private / "missing.yaml"
+        for mode in (0o750, 0o755, 0o777):
+            with self.subTest(mode=oct(mode)):
+                private.chmod(mode)
+                with self.assertRaisesRegex(
+                    ValueError, "directory permissions are too broad"
+                ):
+                    require_private_config_paths([missing], repository_root=self.root)
+        private.chmod(0o700)
+        with self.assertRaisesRegex(ValueError, "explicit private file"):
+            require_private_config_paths([missing], repository_root=self.root)
+
     def test_private_configuration_rejects_broad_directory_and_symlink(self):
         private = self.root / "private"
         private.mkdir(mode=0o700)

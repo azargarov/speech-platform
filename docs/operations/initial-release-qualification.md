@@ -348,3 +348,90 @@ the expected origin/main. Remote URL inspection confirms
 push route were attempted. Local commit may proceed after verification; push and
 new CI execution remain blocked on SSH authentication. No release tag/publication
 is authorized.
+
+## CI fixture isolation correction — 2026-10-24
+
+Status: operator-accepted for release-candidate CI requalification on 2026-10-24;
+final review, commit and normal fast-forward push authorized. CI rerun pending.
+
+OBSERVED: [run 40082412731](https://github.com/azargarov/speech-platform/actions/runs/40082412731)
+is the `verify` workflow, triggered by a push to main at
+`93f2c3c26b59efc16236e798ab9f1d87daf35ebe`. It contains the warmup correction;
+Go race tests passed. Foundation then stopped after 531 discovered Python tests
+with five failures and six errors. The complete job log was inspected.
+
+Failure inventory (test names below use their module's test class):
+
+| Module | Failed test/setup | Cause |
+| --- | --- | --- |
+| test_installation_preflight | test_gpu_unavailable_blocks_workers_and_does_not_block_gateway | Host disk capacity leaked into fake prerequisites |
+| test_installation_preflight | test_dirty_tree_warns_in_preflight_and_blocks_install | Same storage dependency |
+| test_installation_preflight | test_missing_model_blocks_selected_worker_but_not_gateway | Same storage dependency |
+| test_installation_preflight | test_success_warnings_and_disabled_optional_checks_are_read_only | Same storage dependency |
+| test_stt_deployment | test_missing_private_configuration_diagnostic_names_the_requirement | Real private/ permissions failed before the intended missing-file rule |
+| test_m05a_groq_eval | test_result_persistence_and_resume_skip_completed_case | Untracked private/m05a directory missing |
+| test_m05a_groq_eval | test_run_rejects_missing_key_before_creating_artifacts | Same missing fixture parent |
+| test_m05a_groq_eval | test_run_retries_transient_failure_then_persists_single_success | Same missing fixture parent |
+| test_m05a_html_report | M05AHtmlReportTests.setUpClass | Untracked historical model output JSONL missing |
+| test_m05b_stage2b_controller | Module import | Untracked private operator run_live.py missing |
+| test_m05b_stage2b_lifecycle | test_gateway_stays_alive_for_sequential_authenticated_requests | Untracked Gateway configuration missing; private bearer file would also be required |
+
+OBSERVED reproduction: a pinned isolated checkout without operator files reproduced
+all six missing-private errors and the diagnostic-order failure. Simulated 10 GiB
+host storage reproduced the other four failures. INTERPRETATION: the preflight
+fixture's remaining real disk-capacity input explains the runner-dependent four
+assertions; actual runner free-byte values were not printed in that job log.
+Default parent creation by the old lifecycle test left private/ broadly accessible
+before the later deployment diagnostic test. The actual strict validation correctly
+rejected it; changing validation order or permissions policy was unnecessary.
+
+Corrections are test-only:
+
+- Fake prerequisite capacity is explicitly 64 GiB, including a configured fake
+  Docker storage path. A new negative test still requires blocking failures for
+  both checkout and Docker storage at 1 GiB. The real 20 GiB default is unchanged.
+- Missing-config orchestration uses a disposable cwd with private/ explicitly
+  mode 0700, a missing file and an absolute tracked release descriptor. It never
+  changes the operator's real private/ directory.
+- Groq persistence tests own a temporary root/private/m05a with copied tracked
+  synthetic corpus/prompt files; mocked provider calls remain offline.
+- HTML tests build synthetic result rows from the tracked 46-case corpus instead
+  of reading operator output. A new source-mismatch test preserves rejection.
+  These fixtures do not establish historical model performance.
+- Gateway process lifecycle uses the tracked example, a synthetic bearer token,
+  fake loopback providers and temporary evidence/logs, without operator config.
+- The 18 historical controller checks run locally when their private tool exists.
+  They are explicitly SKIP when it is not distributed, rather than importing
+  private operator code into a release or fabricating its implementation. This
+  optional private-tool coverage is NOT ESTABLISHED on GitHub; product/security
+  validation tests are not skipped.
+- A new negative test rejects root private/ modes 0750/0755/0777 before missing-file
+  validation, and verifies that 0700 reaches the intended missing-file diagnostic.
+  Existing bad file-mode, nested-directory, symlink, ACL, traversal, missing/invalid
+  cloud credential and disabled-cloud tests remain in the full suite.
+
+OBSERVED verification:
+
+- `make verify PYTHON=.venv/bin/python`: PASS; 558 script tests (no skips with the
+  local private tool), 89 STT, 30 TTS and 2 governance tests, plus Go race tests,
+  lint/build/schema/config/Compose/lock checks.
+- In the pinned isolated checkout with only candidate test changes overlaid:
+  `make verify PYTHON=/home/master/speech-platform/.venv/bin/python`: PASS;
+  558 script tests, including 18 explicit private-controller skips, plus 89 STT,
+  30 TTS and 2 governance tests. No ignored operator files or model weights copied.
+  The checkout's existing broad private/ was retained, not repaired to hide the bug.
+- Five focused runs each discovered 51 tests: 33 passed, 18 optional controller
+  skips. They used an empty HOME, simulated 10 GiB host storage and umasks
+  0022/0002/0077/0022/0002. Existing Go caches were explicitly reused for the fake
+  Gateway build; no paid provider or installed model was called.
+- `git diff --check` and Ruff: PASS. All production implementation, permission
+  requirements, credentials policy and CI workflow files remain unchanged.
+
+Private logs use `private/release-qualification/deployment-ci-*.log`.
+NOT ESTABLISHED: GitHub execution of these corrections. The operator subsequently
+accepted the eight-file correction and authorized final verification, commit and
+a normal fast-forward push to the expected origin/main. Stop if SSH authentication
+fails; do not change credentials or use a force-push. The new commit must pass all
+six verification/image/secret jobs; foundation must report exactly the documented
+18 optional private-controller skips, with no unexpected skips. No tag, release,
+image publication or deployment is authorized.

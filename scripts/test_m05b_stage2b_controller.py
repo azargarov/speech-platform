@@ -16,12 +16,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTROLLER_PATH = ROOT / "private/m05b/stage2b/run_live.py"
-SPEC = importlib.util.spec_from_file_location(
-    "stage2b_live_controller", CONTROLLER_PATH
-)
-assert SPEC is not None and SPEC.loader is not None
-controller = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(controller)
+controller = None
+if CONTROLLER_PATH.is_file():
+    SPEC = importlib.util.spec_from_file_location(
+        "stage2b_live_controller", CONTROLLER_PATH
+    )
+    assert SPEC is not None and SPEC.loader is not None
+    controller = importlib.util.module_from_spec(SPEC)
+    SPEC.loader.exec_module(controller)
 
 
 class FakeHTTPResponse:
@@ -74,6 +76,10 @@ class SuccessfulGatewayHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+@unittest.skipUnless(
+    controller is not None,
+    "Optional private M05B operator controller is not distributed with the release",
+)
 class ControllerFailureTests(unittest.TestCase):
     def test_live_controller_is_capped_to_two_sequential_explicit_groq_requests(self):
         self.assertEqual(

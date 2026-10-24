@@ -18,6 +18,14 @@ from scripts import product_deployment as product
 class PreflightTests(unittest.TestCase):
     def fixture(self, directory, *, transform=None, dirty=False, fail_model=False):
         root = Path(directory)
+        # Host capacity is an input to these offline tests, not a CI prerequisite.
+        self.enterContext(
+            patch.object(
+                preflight.shutil,
+                "disk_usage",
+                return_value=SimpleNamespace(free=64 * 1024**3),
+            )
+        )
         (root / "go.mod").write_text("module fixture\n\ngo 1.24.0\n")
         config = root / "gateway.yaml"
         import yaml
@@ -43,6 +51,8 @@ class PreflightTests(unittest.TestCase):
                 text = " M Makefile" if dirty else ""
             elif args == ["go", "version"]:
                 text = "go version go1.24.0 linux/amd64"
+            elif args == ["docker", "info", "--format", "{{.DockerRootDir}}"]:
+                text = directory
             elif args[:3] == ["docker", "compose", "version"]:
                 text = "2.40.0"
             elif "{{json .Runtimes}}" in args:
@@ -97,6 +107,26 @@ class PreflightTests(unittest.TestCase):
         self.assertTrue(out.getvalue().endswith("READY TO INSTALL\n"))
         for group in preflight.GROUPS:
             self.assertIn(group + ":", out.getvalue())
+
+    def test_insufficient_checkout_and_docker_storage_remain_blocking(self):
+        with tempfile.TemporaryDirectory() as temp:
+            p, _ = self.fixture(temp)
+            with patch.object(
+                preflight.shutil,
+                "disk_usage",
+                return_value=SimpleNamespace(free=1024**3),
+            ):
+                report = preflight.collect(p, service="gateway")
+            self.assertTrue(report.failed)
+            failures = [
+                name
+                for group, status, name, _ in report.entries
+                if group == "Host" and status == "FAIL"
+            ]
+            self.assertTrue(any(name.startswith("Storage (") for name in failures))
+            self.assertTrue(
+                any(name.startswith("Docker storage (") for name in failures)
+            )
 
     def test_dirty_tree_warns_in_preflight_and_blocks_install(self):
         with tempfile.TemporaryDirectory() as temp:
