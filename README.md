@@ -41,7 +41,7 @@ Configure these values in `.env` when needed:
 - `MODEL_STORE`: absolute path to the existing model store.
 - `STT_GPU_DEVICE`: host GPU index; the worker sees the selected device as GPU 0.
 - `SPEECH_BIND_IP` and `SPEECH_PORT`: API bind address and port. The default bind is loopback.
-- `SPEECH_API_TOKEN`: required when the host API bind is not loopback. Use a random secret of at least 32 characters. Keep `.env` private.
+- `SPEECH_API_TOKEN`: required for every Gateway deployment, including loopback. Set a random secret of at least 32 characters and keep `.env` private. `.env.example` leaves it empty; Gateway startup fails until it is set.
 - `SPEECH_API_URL`: optional HTTPS URL for the TLS reverse proxy used by `make test-stt`; configure it for non-loopback exposure. The Gateway itself serves HTTP, so keep its host port loopback-only unless a firewall permits access only from the TLS proxy.
 - `MODEL_READ_GID`: supplementary group allowed to read model artifacts (default 988).
 
@@ -57,13 +57,14 @@ The install builds from the checked-out Git source. Docker base images, CUDA Pyt
 
 ```sh
 curl --fail-with-body \
+  -H "Authorization: Bearer $SPEECH_API_TOKEN" \
   -F 'audio=@sample.wav;type=audio/wav' \
   -F 'source_language=auto' \
   -F 'output_language=auto' \
   http://127.0.0.1:8080/v1/stt/transcriptions
 ```
 
-For non-loopback exposure, include the configured bearer token:
+The configured bearer token is required for loopback and external requests:
 
 ```sh
 curl --fail-with-body -H "Authorization: Bearer $SPEECH_API_TOKEN" \

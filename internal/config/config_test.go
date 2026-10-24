@@ -12,6 +12,7 @@ func TestConfig(t *testing.T) {
 		t.Fatal(e)
 	}
 	t.Setenv("GROQ_STT_API_KEY", "")
+	t.Setenv("SPEECH_API_TOKEN", "offline-test-token-0123456789abcdef")
 	t.Setenv("SPEECH_LISTEN_PORT", "")
 	withoutWarmup := strings.Replace(string(raw), "warmup_timeout: 180s\n", "", 1)
 	pathWithoutWarmup := t.TempDir() + "/gateway.yaml"
@@ -72,6 +73,7 @@ func TestConfig(t *testing.T) {
 
 func TestGroqSTTConfigurationDefaultsAndValidation(t *testing.T) {
 	t.Setenv("SPEECH_LISTEN_PORT", "")
+	t.Setenv("SPEECH_API_TOKEN", "offline-test-token-0123456789abcdef")
 	raw, err := os.ReadFile("../../configs/gateway.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -120,6 +122,7 @@ func TestValidHost(t *testing.T) {
 
 func TestTextTransformExampleAndStrictNestedConfig(t *testing.T) {
 	t.Setenv("SPEECH_LISTEN_PORT", "")
+	t.Setenv("SPEECH_API_TOKEN", "offline-test-token-0123456789abcdef")
 	t.Setenv("GROQ_API_KEY", "")
 	raw, err := os.ReadFile("../../configs/gateway-text.example.yaml")
 	if err != nil {
@@ -159,6 +162,7 @@ func TestTextTransformExampleAndStrictNestedConfig(t *testing.T) {
 }
 
 func TestCloudCredentialsAreResolvedOnlyForPermittedEnabledModels(t *testing.T) {
+	t.Setenv("SPEECH_API_TOKEN", "offline-test-token-0123456789abcdef")
 	t.Setenv("GROQ_API_KEY", "secret-test-value")
 	c, err := Load("../../configs/gateway-text.example.yaml")
 	if err != nil {
@@ -171,5 +175,25 @@ func TestCloudCredentialsAreResolvedOnlyForPermittedEnabledModels(t *testing.T) 
 	got := c.TextTransform.ResolveTextCredentials()
 	if got["groq"] != "secret-test-value" {
 		t.Fatalf("credential not resolved for permitted model: %#v", got)
+	}
+}
+
+func TestGatewayRequiresStrongTokenRegardlessOfBindAddress(t *testing.T) {
+	for _, bind := range []string{"127.0.0.1", "0.0.0.0"} {
+		t.Run(bind, func(t *testing.T) {
+			t.Setenv("SPEECH_API_TOKEN", "")
+			t.Setenv("SPEECH_BIND_IP", bind)
+			if _, err := Load("../../configs/gateway.yaml"); err == nil {
+				t.Fatal("accepted empty token")
+			}
+			t.Setenv("SPEECH_API_TOKEN", "short-token")
+			if _, err := Load("../../configs/gateway.yaml"); err == nil {
+				t.Fatal("accepted short token")
+			}
+			t.Setenv("SPEECH_API_TOKEN", "offline-test-token-0123456789abcdef")
+			if _, err := Load("../../configs/gateway.yaml"); err != nil {
+				t.Fatalf("rejected valid token: %v", err)
+			}
+		})
 	}
 }

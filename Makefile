@@ -80,7 +80,7 @@ lint:
 	$(PYTHON) -m ruff check services scripts
 	$(PYTHON) -m ruff format --check services scripts
 config:
-	go run ./cmd/gateway --config configs/gateway.yaml --check-config
+	SPEECH_API_TOKEN=offline-config-validation-token-0123456789 go run ./cmd/gateway --config configs/gateway.yaml --check-config
 	$(PYTHON) -m services.stt.main --config configs/stt.yaml --check-config
 	$(PYTHON) -m services.stt.main --config configs/stt.yaml --application-config configs/stt-product-application.yaml --deployment-config configs/stt-product-deployment.yaml --check-config
 	$(PYTHON) -m services.tts.main --config configs/tts.yaml --check-config

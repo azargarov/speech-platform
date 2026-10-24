@@ -17,6 +17,31 @@ class ProductDeploymentTests(unittest.TestCase):
     )
     REVISION = "c3f0079227af573f7715640afa5b229a22c46ab6"
 
+    def test_gateway_token_is_required_for_loopback_and_external_bind(self):
+        values = {
+            "MODEL_STORE": "/models",
+            "MODEL_MANIFEST_SHA256": product_deployment.DIGEST,
+            "TTS_MODEL_MANIFEST_SHA256": product_deployment.TTS_DIGEST,
+            "SPEECH_BIND_IP": "127.0.0.1",
+            "SPEECH_PORT": "8080",
+            "STT_GPU_DEVICE": "0",
+            "TTS_GPU_DEVICE": "0",
+        }
+        with self.assertRaisesRegex(
+            product_deployment.OperatorError, "every deployment"
+        ):
+            product_deployment.validate_environment(values)
+        values["SPEECH_API_TOKEN"] = "short"
+        with self.assertRaisesRegex(
+            product_deployment.OperatorError, "every deployment"
+        ):
+            product_deployment.validate_environment(values)
+        values["SPEECH_API_TOKEN"] = "synthetic-deployment-token-0123456789"
+        product_deployment.validate_environment(values)
+        values["SPEECH_BIND_IP"] = "0.0.0.0"
+        values["SPEECH_API_URL"] = "https://speech.example.test"
+        product_deployment.validate_environment(values)
+
     def _valid_gateway_image(self, **overrides):
         image = {
             "Id": self.IMAGE_ID,

@@ -42,7 +42,10 @@ python3 -m venv .venv
 make bootstrap PYTHON=.venv/bin/python
 cp .env.example .env
 chmod 600 .env
-# Review model paths, reader GIDs, GPU indices, project name, bind IP and port.
+# Edit .env: set SPEECH_API_TOKEN to a private random value of at least 32 characters,
+# and review model paths, reader GIDs, GPU indices, project name, bind IP and port.
+# `openssl rand -hex 32` can generate one; do not commit or print it in reports.
+${EDITOR:-vi} .env
 make preflight PYTHON=.venv/bin/python
 make install PYTHON=.venv/bin/python
 make status PYTHON=.venv/bin/python
@@ -129,10 +132,12 @@ and reports never include credential values.
 `make test` is the deterministic offline test suite. Live smoke tests are explicit:
 
 ```sh
-# Add Authorization: Bearer ... for token-protected deployments.
-curl --fail-with-body -H 'Content-Type: application/json' \
+# Every public speech/text API call requires the configured bearer token.
+curl --fail-with-body -H 'Authorization: Bearer <SPEECH_API_TOKEN>' \
+  -H 'Content-Type: application/json' \
   -d '{"operations":["stt","tts"]}' http://127.0.0.1:8080/v1/models/warmup
-curl --fail-with-body -H 'Content-Type: application/json' \
+curl --fail-with-body -H 'Authorization: Bearer <SPEECH_API_TOKEN>' \
+  -H 'Content-Type: application/json' \
   -d '{"text":"This is a synthetic speech test.","language":"en","mode":"extra_high_quality","audio_processing":"gentle"}' \
   http://127.0.0.1:8080/v1/tts/speech -o private/synthetic.wav
 make test-stt PYTHON=.venv/bin/python AUDIO=private/synthetic.wav SOURCE_LANGUAGE=en

@@ -649,11 +649,11 @@ def validate_environment(values):
         )
     if not socket.inet_aton(ip):
         raise OperatorError("SPEECH_BIND_IP must resolve to an IPv4 address")
+    if len(values.get("SPEECH_API_TOKEN", "")) < 32:
+        raise OperatorError(
+            "SPEECH_API_TOKEN must contain at least 32 characters for every deployment"
+        )
     if not ipaddress.ip_address(ip).is_loopback:
-        if len(values.get("SPEECH_API_TOKEN", "")) < 32:
-            raise OperatorError(
-                "non-loopback SPEECH_BIND_IP requires a 32-character SPEECH_API_TOKEN"
-            )
         parsed_api = urlparse(values.get("SPEECH_API_URL", ""))
         if parsed_api.scheme != "https" or not parsed_api.hostname:
             raise OperatorError(

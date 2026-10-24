@@ -102,8 +102,8 @@ func (c Config) Validate() error {
 			return fmt.Errorf("%s is required", name)
 		}
 	}
-	if c.APIToken != "" && len(c.APIToken) < 32 {
-		return fmt.Errorf("SPEECH_API_TOKEN must contain at least 32 characters when configured")
+	if len(c.APIToken) < 32 {
+		return fmt.Errorf("SPEECH_API_TOKEN must contain at least 32 characters")
 	}
 	if c.GroqSTT.Capacity == nil || *c.GroqSTT.Capacity < 1 || *c.GroqSTT.Capacity > 2 {
 		return fmt.Errorf("groq_stt.capacity must be 1 or 2")
