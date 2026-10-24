@@ -66,7 +66,7 @@ else
 $(error Unknown publish service '$(SERVICE)'; choose gateway, stt, or tts)
 endif
 endif
-.PHONY: preflight gpu-check stop remove verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check tts-lock-check release-check model-check model-fetch tts-model-check tts-model-fetch tts-warmup tts-state plan install status logs test-stt stt-cpu-integration stt-cuda-http-integration
+.PHONY: init preflight gpu-check stop remove verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check tts-lock-check release-check model-check model-fetch tts-model-check tts-model-fetch tts-warmup tts-state plan install status logs test-stt stt-cpu-integration stt-cuda-http-integration
 bootstrap:
 	$(PYTHON) -m pip install -r requirements-dev.txt
 	$(PYTHON) -m pip install --require-hashes -r services/requirements-stt-cpu.lock
@@ -122,6 +122,8 @@ tts-warmup:
 	docker compose --env-file .env -f compose.yaml exec -T tts python -c 'import urllib.request; print(urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8082/internal/v1/warmup", data=b"", method="POST"), timeout=600).read().decode())'
 tts-state:
 	docker compose --env-file .env -f compose.yaml exec -T tts python -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8082/internal/v1/state", timeout=3).read().decode())'
+init:
+	sh scripts/init.sh
 preflight:
 	$(PYTHON) scripts/product_deployment.py preflight $(if $(SERVICE),--service "$(SERVICE)")
 gpu-check stop remove:

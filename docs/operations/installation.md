@@ -40,16 +40,23 @@ provenance; it does not describe the current VoxCPM2 deployment.
 ```sh
 python3 -m venv .venv
 make bootstrap PYTHON=.venv/bin/python
-cp .env.example .env
-chmod 600 .env
-# Edit .env: set SPEECH_API_TOKEN to a private random value of at least 32 characters,
-# and review model paths, reader GIDs, GPU indices, project name, bind IP and port.
-# `openssl rand -hex 32` can generate one; do not commit or print it in reports.
+make init
+# Review model paths, reader GIDs, GPU indices, project name, bind IP and port.
+# Do not print or paste SPEECH_API_TOKEN into logs or reports.
 ${EDITOR:-vi} .env
 make preflight PYTHON=.venv/bin/python
 make install PYTHON=.venv/bin/python
 make status PYTHON=.venv/bin/python
 ```
+
+`make init` creates `.env` only when absent, assigns a fresh 32-byte
+cryptographically secure API token, and creates `private/`, `private/audio/`
+and `private/deployment/` with mode `0700`. It does not replace existing
+configuration. The generated `.env` is mode `0600`. Local-only operation needs
+no Groq or cloud-text credentials; those remain optional and are configured
+only when the corresponding provider is intentionally enabled. For custom
+Gateway configuration or provider credentials, use files under `private/` and
+review the optional settings in `.env.example`.
 
 Provision missing artifacts separately with `make model-fetch` and
 `make tts-model-fetch`, after reviewing paths, ownership and model terms. These

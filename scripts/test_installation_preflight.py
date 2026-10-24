@@ -3,6 +3,10 @@
 import contextlib
 import io
 import json
+import os
+import shutil
+import stat
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -13,6 +17,209 @@ from unittest.mock import patch
 
 from scripts import installation_preflight as preflight
 from scripts import product_deployment as product
+
+
+class FirstTimeSetupTests(unittest.TestCase):
+    def make_checkout(self, root):
+        root = Path(root)
+        shutil.copy(product.ROOT / ".env.example", root / ".env.example")
+        shutil.copy(product.ROOT / "Makefile", root / "Makefile")
+        scripts = root / "scripts"
+        scripts.mkdir(exist_ok=True)
+        shutil.copy(product.ROOT / "scripts/init.sh", scripts / "init.sh")
+        return root
+
+    def run_init(self, root, *, env=None):
+        return subprocess.run(
+            ["make", "init"],
+            cwd=root,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+
+    def test_clean_init_creates_private_token_and_preflight_compatible_env(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.make_checkout(temp)
+            result = self.run_init(root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("SPEECH_API_TOKEN=", result.stdout)
+
+            env_path = root / ".env"
+            self.assertEqual(stat.S_IMODE(env_path.stat().st_mode), 0o600)
+            values = dict(
+                line.split("=", 1)
+                for line in env_path.read_text().splitlines()
+                if line and not line.startswith("#")
+            )
+            token = values["SPEECH_API_TOKEN"]
+            self.assertEqual(len(token), 64)
+            self.assertTrue(all(character in "0123456789abcdef" for character in token))
+            self.assertNotIn(token, result.stdout + result.stderr)
+            for relative in ("private", "private/audio", "private/deployment"):
+                self.assertEqual(stat.S_IMODE((root / relative).stat().st_mode), 0o700)
+            self.assertNotIn("GROQ_STT_API_KEY", values)
+            with patch.object(product, "ROOT", root):
+                loaded = product.load_env()
+                product.validate_environment(loaded)
+            self.assertEqual(loaded["SPEECH_API_TOKEN"], token)
+
+    def test_tokens_are_independent_and_repeated_init_preserves_existing_env(self):
+        tokens = []
+        for _ in range(2):
+            with tempfile.TemporaryDirectory() as temp:
+                root = self.make_checkout(temp)
+                first = self.run_init(root)
+                self.assertEqual(first.returncode, 0, first.stderr)
+                env_path = root / ".env"
+                original = env_path.read_bytes()
+                original_stat = env_path.stat()
+                token = next(
+                    line.split("=", 1)[1]
+                    for line in original.decode().splitlines()
+                    if line.startswith("SPEECH_API_TOKEN=")
+                )
+                tokens.append(token)
+
+                second = self.run_init(root)
+                self.assertEqual(second.returncode, 0, second.stderr)
+                self.assertEqual(env_path.read_bytes(), original)
+                self.assertEqual(env_path.stat().st_mtime_ns, original_stat.st_mtime_ns)
+                self.assertNotIn(token, second.stdout + second.stderr)
+        self.assertNotEqual(tokens[0], tokens[1])
+
+    def test_existing_operator_env_and_private_files_are_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.make_checkout(temp)
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            secret = private / "cloud.env"
+            secret.write_text("SYNTHETIC_CREDENTIAL=do-not-change\n")
+            config_dir = private / "deployment"
+            config_dir.mkdir(mode=0o700)
+            config = config_dir / "gateway.yaml"
+            config.write_text("synthetic: operator-config\n")
+            env_path = root / ".env"
+            original = b"SPEECH_API_TOKEN=operator-owned-value\n# keep this file\n"
+            env_path.write_bytes(original)
+            env_path.chmod(0o600)
+            original_mtime = env_path.stat().st_mtime_ns
+
+            result = self.run_init(root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(env_path.read_bytes(), original)
+            self.assertEqual(env_path.stat().st_mtime_ns, original_mtime)
+            self.assertEqual(secret.read_text(), "SYNTHETIC_CREDENTIAL=do-not-change\n")
+            self.assertEqual(config.read_text(), "synthetic: operator-config\n")
+            self.assertNotIn("operator-owned-value", result.stdout + result.stderr)
+
+    def test_missing_openssl_fails_before_creating_configuration(self):
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            tempfile.TemporaryDirectory() as bin_dir,
+        ):
+            root = self.make_checkout(temp)
+            for tool in ("mkdir", "chmod", "mktemp", "ln", "rm"):
+                executable = shutil.which(tool)
+                self.assertIsNotNone(executable, f"test host lacks {tool}")
+                os.symlink(executable, Path(bin_dir) / tool)
+            result = subprocess.run(
+                ["/bin/sh", "scripts/init.sh"],
+                cwd=root,
+                env={"PATH": bin_dir},
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "required system tool 'openssl' is unavailable", result.stderr
+            )
+            self.assertFalse((root / ".env").exists())
+            self.assertFalse((root / "private").exists())
+
+    def test_malformed_token_template_fails_before_creating_configuration(self):
+        malformed_templates = (
+            "SPEECH_API_TOKEN=\nSPEECH_API_TOKEN=\n",
+            " SPEECH_API_TOKEN=\n",
+            "SPEECH_API_TOKEN=preconfigured-value\n",
+            "SPEECH_API_TOKEN\n",
+        )
+        for template in malformed_templates:
+            with self.subTest(template=template), tempfile.TemporaryDirectory() as temp:
+                root = self.make_checkout(temp)
+                (root / ".env.example").write_text(template)
+                result = self.run_init(root)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((root / ".env").exists())
+                self.assertFalse((root / "private").exists())
+                self.assertNotIn("preconfigured-value", result.stdout + result.stderr)
+
+    def test_concurrent_init_never_overwrites_first_published_env(self):
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            tempfile.TemporaryDirectory() as bin_dir,
+            tempfile.TemporaryDirectory() as barrier_dir,
+        ):
+            root = self.make_checkout(temp)
+            bin_path = Path(bin_dir)
+            for tool in ("mkdir", "chmod", "mktemp", "rm", "openssl", "sleep"):
+                executable = shutil.which(tool)
+                self.assertIsNotNone(executable, f"test host lacks {tool}")
+                os.symlink(executable, bin_path / tool)
+
+            real_ln = shutil.which("ln")
+            self.assertIsNotNone(real_ln)
+            wrapper = bin_path / "ln"
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                "source=$1\n"
+                "destination=$2\n"
+                ': > "$INIT_BARRIER/ready.$$"\n'
+                "while :; do\n"
+                '    set -- "$INIT_BARRIER"/ready.*\n'
+                '    [ "$#" -ge 2 ] && break\n'
+                "    sleep 0.01\n"
+                "done\n"
+                'exec "$INIT_REAL_LN" "$source" "$destination"\n'
+            )
+            wrapper.chmod(0o700)
+            environment = os.environ.copy()
+            environment.update(
+                PATH=bin_dir,
+                INIT_BARRIER=barrier_dir,
+                INIT_REAL_LN=real_ln,
+            )
+            processes = [
+                subprocess.Popen(
+                    ["/bin/sh", "scripts/init.sh"],
+                    cwd=root,
+                    env=environment,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                for _ in range(2)
+            ]
+            results = [process.communicate(timeout=10) for process in processes]
+
+            for process, (stdout, stderr) in zip(processes, results, strict=True):
+                self.assertEqual(process.returncode, 0, stderr)
+                self.assertNotIn("SPEECH_API_TOKEN=", stdout + stderr)
+            env_path = root / ".env"
+            values = dict(
+                line.split("=", 1)
+                for line in env_path.read_text().splitlines()
+                if line and not line.startswith("#")
+            )
+            token = values["SPEECH_API_TOKEN"]
+            self.assertEqual(len(token), 64)
+            self.assertTrue(all(character in "0123456789abcdef" for character in token))
+            self.assertEqual(stat.S_IMODE(env_path.stat().st_mode), 0o600)
+            self.assertEqual(list(root.glob(".env.init.*")), [])
 
 
 class PreflightTests(unittest.TestCase):
