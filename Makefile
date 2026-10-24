@@ -10,10 +10,6 @@ PUBLISH_SELECTION :=
 PUBLISH_VERSION := $(strip $(VERSION))
 PUBLISH_VARIANT := $(if $(strip $(VARIANT)),$(strip $(VARIANT)),cuda)
 PLATFORM_RELEASE ?= releases/voiceservice-v0.1.2.yaml
-ENABLED_SERVICES_CONFIG ?= private/deployment/enabled-services.yaml
-SERVICES_DEPLOYMENT_CONFIG ?= private/deployment/services.yaml
-GATEWAY_DEPLOYMENT_CONFIG ?= private/deployment/gateway.yaml
-TTS_DEPLOYMENT_CONFIG ?= private/deployment/tts.yaml
 MODEL_STORE ?= /srv/speech-platform/models
 MODEL_READ_GID ?= 988
 MODEL_READ_GROUP ?= $(shell getent group $(MODEL_READ_GID) | cut -d: -f1)
@@ -22,8 +18,6 @@ TTS_MODEL_READ_GID ?= $(MODEL_READ_GID)
 TTS_MODEL_READ_GROUP ?= $(shell getent group $(TTS_MODEL_READ_GID) | cut -d: -f1)
 TTS_MODEL_OWNER_UID ?= 0
 SOURCE_REVISION ?= $(shell git rev-parse HEAD)
-LOCK_ROOT ?= $(SPEECH_PLATFORM_LOCK_ROOT)
-PROFILE ?= regular
 NO_BUILD_ARGS :=
 ifneq ($(strip $(NO_BUILD)),)
 ifneq ($(NO_BUILD),1)
@@ -36,20 +30,6 @@ ifneq ($(SERVICE),gateway)
 $(error NO_BUILD=1 requires SERVICE=gateway)
 endif
 NO_BUILD_ARGS := --no-build
-endif
-ifneq ($(filter legacy-plan legacy-install,$(MAKECMDGOALS)),)
-ifeq ($(PROFILE),regular)
-STT_DEPLOYMENT_DIR := private/deployment/stt-cuda
-else ifeq ($(PROFILE),experimental)
-STT_DEPLOYMENT_DIR := private/deployment/stt-cuda-experimental
-else
-$(error Unknown deployment PROFILE '$(PROFILE)'; choose regular or experimental)
-endif
-override STT_DEPLOYMENT_PROFILE := $(STT_DEPLOYMENT_DIR)/profile.yaml
-override STT_APPLICATION_CONFIG := $(STT_DEPLOYMENT_DIR)/stt-application.yaml
-override STT_DEPLOYMENT_CONFIG := $(STT_DEPLOYMENT_DIR)/stt-deployment.yaml
-override STT_WORKER_CONFIG := $(STT_DEPLOYMENT_DIR)/stt.yaml
-override STT_COMPOSE_ENV := $(STT_DEPLOYMENT_DIR)/compose.env
 endif
 ifneq ($(filter image,$(MAKECMDGOALS)),)
 ifeq ($(filter $(IMAGE_VARIANT),cpu cuda),)
@@ -86,7 +66,7 @@ else
 $(error Unknown publish service '$(SERVICE)'; choose gateway, stt, or tts)
 endif
 endif
-.PHONY: preflight gpu-check stop remove verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check tts-lock-check release-check model-check model-fetch tts-model-check tts-model-fetch tts-warmup tts-state plan install legacy-plan legacy-install status logs test-stt stt-cpu-integration stt-cuda-http-integration
+.PHONY: preflight gpu-check stop remove verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check tts-lock-check release-check model-check model-fetch tts-model-check tts-model-fetch tts-warmup tts-state plan install status logs test-stt stt-cpu-integration stt-cuda-http-integration
 bootstrap:
 	$(PYTHON) -m pip install -r requirements-dev.txt
 	$(PYTHON) -m pip install --require-hashes -r services/requirements-stt-cpu.lock
@@ -156,10 +136,6 @@ logs:
 	$(PYTHON) scripts/product_deployment.py logs $(if $(SERVICE),--service "$(SERVICE)")
 test-stt:
 	$(PYTHON) scripts/product_deployment.py test-stt $(if $(AUDIO),--audio "$(AUDIO)") $(if $(SOURCE_LANGUAGE),--source-language "$(SOURCE_LANGUAGE)") $(if $(OUTPUT_LANGUAGE),--output-language "$(OUTPUT_LANGUAGE)")
-legacy-plan:
-	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m scripts.stt_deployment plan --service "$(SERVICE)" --enabled-services "$(ENABLED_SERVICES_CONFIG)" --services-profile "$(SERVICES_DEPLOYMENT_CONFIG)" --gateway-config "$(GATEWAY_DEPLOYMENT_CONFIG)" --tts-config "$(TTS_DEPLOYMENT_CONFIG)" --profile "$(STT_DEPLOYMENT_PROFILE)" --application-config "$(STT_APPLICATION_CONFIG)" --deployment-config "$(STT_DEPLOYMENT_CONFIG)" --worker-config "$(STT_WORKER_CONFIG)" --release "$(PLATFORM_RELEASE)" --env-file "$(STT_COMPOSE_ENV)"
-legacy-install:
-	SPEECH_PLATFORM_LOCK_ROOT="$(LOCK_ROOT)" PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m scripts.stt_deployment install --service "$(SERVICE)" --enabled-services "$(ENABLED_SERVICES_CONFIG)" --services-profile "$(SERVICES_DEPLOYMENT_CONFIG)" --gateway-config "$(GATEWAY_DEPLOYMENT_CONFIG)" --tts-config "$(TTS_DEPLOYMENT_CONFIG)" --profile "$(STT_DEPLOYMENT_PROFILE)" --application-config "$(STT_APPLICATION_CONFIG)" --deployment-config "$(STT_DEPLOYMENT_CONFIG)" --worker-config "$(STT_WORKER_CONFIG)" --release "$(PLATFORM_RELEASE)" --env-file "$(STT_COMPOSE_ENV)"
 governance-check:
 	$(PYTHON) scripts/validate_governance.py
 	$(PYTHON) -m unittest discover -s scripts -p 'test_governance.py' -v

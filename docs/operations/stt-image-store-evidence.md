@@ -1,9 +1,13 @@
 # One-time containerd image-store evidence collection
 
-This procedure describes the diagnostic collector in
-`scripts/collect_stt_image_store_evidence.py`. It is not part of the production
-deployment validator and does not make `ctr` a production dependency. `ctr` is
-used because the supported Docker Engine inspection API does not expose the
+> Historical evidence procedure: `scripts/collect_stt_image_store_evidence.py`
+> has been retired. Commands below are preserved as evidence context and are
+> not supported for current installation or diagnostics.
+
+This historical procedure used the diagnostic collector
+`scripts/collect_stt_image_store_evidence.py`. It was not part of the production
+deployment validator and did not make `ctr` a production dependency. At the
+time, `ctr` was used because the supported Docker Engine inspection API did not expose the
 containerd image-record association and content-store blob bytes needed by the
 existing `containerd_oci_manifest` evidence contract. Its CLI and output are
 version-dependent; the collector fails closed when the observed output does

@@ -1,5 +1,9 @@
 # M01E-F fresh-install and model-staging rehearsal
 
+> Historical M01E evidence only: the profile-based deployment installer used
+> for this rehearsal has been retired. Its commands below are not supported
+> for current installation. Use the [current installation guide](installation.md).
+
 Status: the approved M01E-F2 fresh installation completed and passed on
 2026-10-19. The fresh containers/networks and staged model remain in place;
 cleanup is not authorized by this record. Exact F2 execution evidence is in

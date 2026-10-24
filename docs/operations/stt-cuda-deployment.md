@@ -1,4 +1,4 @@
-> Historical M01 deployment evidence: Make plan/install examples below now correspond to `legacy-plan`/`legacy-install`. For current STT/TTS/Gateway installation, use [the canonical product workflow](installation.md). Do not deploy inference TTS through the health-only foundation profile.
+> Historical M01 deployment evidence: the profile-based installer and its `legacy-plan`/`legacy-install` commands have been retired. The commands below are preserved as historical procedure and are not supported for current deployments. For current STT/TTS/Gateway installation, use [the canonical product workflow](installation.md). Do not deploy inference TTS through the health-only foundation profile.
 
 # Persistent CUDA STT deployment profile — C.6A
 

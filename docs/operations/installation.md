@@ -1,9 +1,9 @@
 # Install SpeechPlatform
 
 The supported path is root `compose.yaml` through `scripts/product_deployment.py`.
-`legacy-plan`/`legacy-install` and `releases/voiceservice-v0.1.2.yaml` describe the
-historical VoiceService foundation, including health-only TTS. Do not use that
-installer to deploy the current VoxCPM2 worker.
+The historical VoiceService installer has been retired. The descriptor
+`releases/voiceservice-v0.1.2.yaml` remains as historical model and image
+provenance; it does not describe the current VoxCPM2 deployment.
 
 ## Prerequisites
 
