@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import os
 import socket
 import struct
+import sys
 import threading
 import time
 import unittest
 import shutil
 import tempfile
+import types
 from unittest import mock
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -17,7 +21,10 @@ from services.tts.config import load_config
 from services.tts.lifecycle import (
     ModelLifecycle,
     PermanentModelError,
+    SynthesisContext,
     TTSFailure,
+    _file_metadata,
+    _file_sha256,
     language_instruction,
     mode_timesteps,
     vox_model_factory,
@@ -38,6 +45,10 @@ ROOT = Path(__file__).resolve().parents[3]
 
 def test_config():
     return load_config(ROOT / "configs/tts.yaml")
+
+
+def fake_model_factory(_context=None):
+    return object()
 
 
 class ConfigTests(unittest.TestCase):
@@ -342,6 +353,647 @@ class AudioCompositionTests(unittest.TestCase):
 
 
 class LifecycleTests(unittest.TestCase):
+    def _artifact_fixture(self, root):
+        import yaml
+
+        model_path = root / "artifact"
+        model_path.mkdir()
+        contents = {
+            "model.safetensors": b"tiny model fixture",
+            "config.json": b"{}\n",
+        }
+        entries = []
+        for name, value in contents.items():
+            (model_path / name).write_bytes(value)
+            entries.append(
+                {
+                    "path": name,
+                    "size_bytes": len(value),
+                    "sha256": hashlib.sha256(value).hexdigest(),
+                }
+            )
+        manifest = {
+            "manifest_version": 1,
+            "model": {
+                "family": "voxcpm2",
+                "repository": "openbmb/VoxCPM2",
+                "revision": "test-revision",
+            },
+            "artifact": {
+                "format": "voxcpm2",
+                "tool": "VoxCPM from_local",
+                "tool_version": "test-version",
+            },
+            "files": entries,
+        }
+        (root / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+        config = test_config()
+        config["model_path"] = str(model_path)
+        config["model_revision"] = "test-revision"
+        config["model_manifest_sha256"] = hashlib.sha256(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return config, model_path, contents
+
+    def _fake_voxcpm_imports(self):
+        loaded = object()
+        load_calls = []
+        torch = types.ModuleType("torch")
+        torch.cuda = types.SimpleNamespace(
+            is_available=lambda: True,
+            mem_get_info=lambda: (16 * 1024**2 * 1024, 16 * 1024**2 * 1024),
+            set_per_process_memory_fraction=lambda *_: None,
+            empty_cache=lambda: None,
+        )
+        torch.set_num_threads = lambda *_: None
+        voxcpm = types.ModuleType("voxcpm")
+
+        class VoxCPM:
+            @staticmethod
+            def from_pretrained(*_args, **_kwargs):
+                load_calls.append(True)
+                return loaded
+
+        voxcpm.VoxCPM = VoxCPM
+        return loaded, load_calls, {"torch": torch, "voxcpm": voxcpm}
+
+    def test_model_factory_verifies_valid_artifact_checksums_before_load(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, model_path, contents = self._artifact_fixture(Path(temp))
+            loaded, load_calls, fake_modules = self._fake_voxcpm_imports()
+            with (
+                mock.patch.dict(sys.modules, fake_modules),
+                mock.patch(
+                    "services.tts.lifecycle._file_sha256",
+                    wraps=_file_sha256,
+                ) as digest,
+            ):
+                self.assertIs(vox_model_factory(config)(), loaded)
+            self.assertEqual(len(digest.call_args_list), len(contents))
+            self.assertEqual(len(load_calls), 1)
+            self.assertTrue((model_path / "model.safetensors").is_file())
+
+    def test_model_factory_rejects_missing_wrong_size_corrupt_and_bad_manifest(self):
+        for case in ("missing", "wrong_size", "same_size_corruption", "bad_manifest"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp:
+                config, model_path, contents = self._artifact_fixture(Path(temp))
+                target = model_path / "model.safetensors"
+                if case == "missing":
+                    target.unlink()
+                elif case == "wrong_size":
+                    target.write_bytes(b"different size")
+                elif case == "same_size_corruption":
+                    original = contents["model.safetensors"]
+                    target.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+                else:
+                    config["model_manifest_sha256"] = "0" * 64
+                with self.assertRaises(PermanentModelError) as caught:
+                    vox_model_factory(config)()
+                self.assertEqual(caught.exception.category, "model_artifact_invalid")
+                self.assertNotIn(str(model_path), caught.exception.message)
+
+    def test_artifact_hashes_run_lazily_once_per_model_load_not_per_request(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, _model_path, contents = self._artifact_fixture(Path(temp))
+            loaded, load_calls, fake_modules = self._fake_voxcpm_imports()
+            with (
+                mock.patch.dict(sys.modules, fake_modules),
+                mock.patch(
+                    "services.tts.lifecycle._file_sha256",
+                    wraps=_file_sha256,
+                ) as digest,
+            ):
+                lifecycle = ModelLifecycle(config, vox_model_factory(config))
+                try:
+                    self.assertTrue(lifecycle.ready())
+                    self.assertEqual(digest.call_count, 0)
+                    lifecycle._generate_segment = lambda *_args: (b"wav", "audio/wav")
+                    lifecycle.synthesize("one", "en", "quality")
+                    lifecycle.synthesize("two", "en", "quality")
+                    self.assertEqual(digest.call_count, len(contents))
+                    self.assertEqual(len(load_calls), 1)
+                    self.assertIsNotNone(lifecycle._model)
+                finally:
+                    with mock.patch.dict(sys.modules, fake_modules):
+                        lifecycle.stop(1)
+
+    def test_worker_restart_performs_fresh_full_verification(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, _model_path, contents = self._artifact_fixture(Path(temp))
+            _loaded, _load_calls, fake_modules = self._fake_voxcpm_imports()
+            calls = []
+            with (
+                mock.patch.dict(sys.modules, fake_modules),
+                mock.patch(
+                    "services.tts.lifecycle._file_sha256",
+                    side_effect=lambda path, context: (
+                        calls.append(path.name) or _file_sha256(path, context)
+                    ),
+                ),
+            ):
+                first_worker = ModelLifecycle(config, vox_model_factory(config))
+                second_worker = None
+                try:
+                    first_worker.warmup()
+                    self.assertEqual(len(calls), len(contents))
+                    self.assertTrue(first_worker.stop(1))
+
+                    second_worker = ModelLifecycle(config, vox_model_factory(config))
+                    second_worker.warmup()
+                    self.assertEqual(len(calls), 2 * len(contents))
+                finally:
+                    if second_worker is not None:
+                        second_worker.stop(1)
+
+    def test_idle_reload_reuses_hashes_until_manifest_or_file_metadata_changes(self):
+        for changed in ("artifact_mtime", "manifest_mtime"):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temp:
+                config, model_path, contents = self._artifact_fixture(Path(temp))
+                _loaded, _load_calls, fake_modules = self._fake_voxcpm_imports()
+                calls = []
+                lifecycle = ModelLifecycle(config, vox_model_factory(config))
+                try:
+                    with (
+                        mock.patch.dict(sys.modules, fake_modules),
+                        mock.patch(
+                            "services.tts.lifecycle._file_sha256",
+                            side_effect=lambda path, context: (
+                                calls.append(path.name) or _file_sha256(path, context)
+                            ),
+                        ),
+                    ):
+                        lifecycle.warmup()
+                        self.assertEqual(len(calls), len(contents))
+                        self.assertTrue(lifecycle.unload())
+                        lifecycle.warmup()
+                        self.assertEqual(len(calls), len(contents))
+
+                        target = (
+                            model_path / "model.safetensors"
+                            if changed == "artifact_mtime"
+                            else Path(config["model_path"]).parent / "manifest.yaml"
+                        )
+                        stat = target.stat()
+                        os.utime(
+                            target,
+                            ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000),
+                        )
+                        self.assertTrue(lifecycle.unload())
+                        lifecycle.warmup()
+                        self.assertEqual(len(calls), 2 * len(contents))
+                finally:
+                    with mock.patch.dict(sys.modules, fake_modules):
+                        lifecycle.stop(1)
+
+    def test_changed_artifact_size_forces_full_hash_and_is_not_cached(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, model_path, contents = self._artifact_fixture(Path(temp))
+            _loaded, _load_calls, fake_modules = self._fake_voxcpm_imports()
+            calls = []
+            lifecycle = ModelLifecycle(config, vox_model_factory(config))
+            try:
+                with (
+                    mock.patch.dict(sys.modules, fake_modules),
+                    mock.patch(
+                        "services.tts.lifecycle._file_sha256",
+                        side_effect=lambda path, context: (
+                            calls.append(path.name) or _file_sha256(path, context)
+                        ),
+                    ),
+                ):
+                    lifecycle.warmup()
+                    self.assertTrue(lifecycle.unload())
+                    (model_path / "model.safetensors").write_bytes(
+                        contents["model.safetensors"] + b"x"
+                    )
+                    with self.assertRaises(TTSFailure) as failure:
+                        lifecycle.warmup()
+                    self.assertEqual(failure.exception.code, "model_artifact_invalid")
+                    self.assertEqual(len(calls), 2 * len(contents))
+
+                    (model_path / "model.safetensors").write_bytes(
+                        contents["model.safetensors"]
+                    )
+                    calls.clear()
+                    lifecycle.warmup()
+                    self.assertEqual(len(calls), len(contents))
+                    self.assertTrue(lifecycle.ready())
+            finally:
+                with mock.patch.dict(sys.modules, fake_modules):
+                    lifecycle.stop(1)
+
+    def test_failed_verification_is_not_cached(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, _model_path, contents = self._artifact_fixture(Path(temp))
+            loaded, load_calls, fake_modules = self._fake_voxcpm_imports()
+            calls = []
+
+            def fail_first_hash(path, context):
+                calls.append(path.name)
+                if len(calls) == 1:
+                    raise OSError("synthetic transient read error")
+                return _file_sha256(path, context)
+
+            lifecycle = ModelLifecycle(config, vox_model_factory(config))
+            try:
+                with (
+                    mock.patch.dict(sys.modules, fake_modules),
+                    mock.patch(
+                        "services.tts.lifecycle._file_sha256",
+                        side_effect=fail_first_hash,
+                    ),
+                ):
+                    with self.assertRaises(TTSFailure):
+                        lifecycle.warmup()
+                    self.assertTrue(lifecycle.ready())
+                    lifecycle.warmup()
+                    self.assertEqual(len(calls), len(contents) + 1)
+                    self.assertIs(lifecycle._model, loaded)
+                    self.assertEqual(len(load_calls), 1)
+            finally:
+                with mock.patch.dict(sys.modules, fake_modules):
+                    lifecycle.stop(1)
+
+    def test_stat_io_error_is_recoverable_and_not_cached(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, _model_path, contents = self._artifact_fixture(Path(temp))
+            loaded, load_calls, fake_modules = self._fake_voxcpm_imports()
+            calls = []
+
+            def fail_manifest_stat_once(path):
+                calls.append(path.name)
+                if len(calls) == 1:
+                    raise OSError("synthetic transient stat error")
+                return _file_metadata(path)
+
+            lifecycle = ModelLifecycle(config, vox_model_factory(config))
+            try:
+                with (
+                    mock.patch.dict(sys.modules, fake_modules),
+                    mock.patch(
+                        "services.tts.lifecycle._file_metadata",
+                        side_effect=fail_manifest_stat_once,
+                    ),
+                    mock.patch(
+                        "services.tts.lifecycle._file_sha256",
+                        wraps=_file_sha256,
+                    ) as digest,
+                ):
+                    with self.assertRaises(TTSFailure) as failure:
+                        lifecycle.warmup()
+                    self.assertEqual(failure.exception.code, "model_load_failed")
+                    self.assertTrue(lifecycle.ready())
+                    self.assertEqual(digest.call_count, 0)
+                    lifecycle.warmup()
+                    self.assertEqual(digest.call_count, len(contents))
+                    self.assertIs(lifecycle._model, loaded)
+                    self.assertEqual(len(load_calls), 1)
+            finally:
+                with mock.patch.dict(sys.modules, fake_modules):
+                    lifecycle.stop(1)
+
+    def test_cancelled_verification_is_not_cached(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, _model_path, contents = self._artifact_fixture(Path(temp))
+            loaded, load_calls, fake_modules = self._fake_voxcpm_imports()
+            entered, release = threading.Event(), threading.Event()
+            disconnected, failures, calls = [False], [], []
+            context = SynthesisContext(time.monotonic() + 10, lambda: disconnected[0])
+
+            def block_first_hash(path, hash_context):
+                calls.append(path.name)
+                if len(calls) == 1:
+                    entered.set()
+                    if not release.wait(2):
+                        raise AssertionError("test did not release blocked hash")
+                return _file_sha256(path, hash_context)
+
+            lifecycle = ModelLifecycle(config, vox_model_factory(config))
+            with (
+                mock.patch.dict(sys.modules, fake_modules),
+                mock.patch(
+                    "services.tts.lifecycle._file_sha256",
+                    side_effect=block_first_hash,
+                ),
+            ):
+                request = threading.Thread(
+                    target=lambda: self._capture_tts_failure(
+                        lambda: lifecycle.synthesize(
+                            "hello", "en", "quality", context=context
+                        ),
+                        failures,
+                    )
+                )
+                try:
+                    request.start()
+                    self.assertTrue(entered.wait(1))
+                    disconnected[0] = True
+                finally:
+                    release.set()
+                    request.join(2)
+                self.assertFalse(request.is_alive())
+                self.assertEqual(failures[0].code, "request_cancelled")
+                disconnected[0] = False
+                lifecycle.warmup()
+                self.assertEqual(len(calls), len(contents) + 1)
+                self.assertIs(lifecycle._model, loaded)
+                self.assertEqual(len(load_calls), 1)
+                lifecycle.stop(1)
+
+    def test_replaced_inode_forces_full_verification(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, model_path, contents = self._artifact_fixture(Path(temp))
+            _loaded, _load_calls, fake_modules = self._fake_voxcpm_imports()
+            calls = []
+            lifecycle = ModelLifecycle(config, vox_model_factory(config))
+            with (
+                mock.patch.dict(sys.modules, fake_modules),
+                mock.patch(
+                    "services.tts.lifecycle._file_sha256",
+                    side_effect=lambda path, context: (
+                        calls.append(path.name) or _file_sha256(path, context)
+                    ),
+                ),
+            ):
+                try:
+                    lifecycle.warmup()
+                    self.assertTrue(lifecycle.unload())
+                    target = model_path / "model.safetensors"
+                    old_stat = target.stat()
+                    replacement = model_path / "replacement.tmp"
+                    replacement.write_bytes(contents["model.safetensors"])
+                    os.utime(
+                        replacement,
+                        ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns),
+                    )
+                    os.replace(replacement, target)
+                    self.assertNotEqual(target.stat().st_ino, old_stat.st_ino)
+                    self.assertEqual(target.stat().st_mtime_ns, old_stat.st_mtime_ns)
+                    lifecycle.warmup()
+                    self.assertEqual(len(calls), 2 * len(contents))
+                finally:
+                    lifecycle.stop(1)
+
+    def test_same_size_modification_with_restored_mtime_uses_ctime(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, model_path, contents = self._artifact_fixture(Path(temp))
+            _loaded, _load_calls, fake_modules = self._fake_voxcpm_imports()
+            calls = []
+            lifecycle = ModelLifecycle(config, vox_model_factory(config))
+            with (
+                mock.patch.dict(sys.modules, fake_modules),
+                mock.patch(
+                    "services.tts.lifecycle._file_sha256",
+                    side_effect=lambda path, context: (
+                        calls.append(path.name) or _file_sha256(path, context)
+                    ),
+                ),
+            ):
+                try:
+                    lifecycle.warmup()
+                    self.assertTrue(lifecycle.unload())
+                    target = model_path / "model.safetensors"
+                    original = contents["model.safetensors"]
+                    original_stat = target.stat()
+                    changed = bytes([original[0] ^ 1]) + original[1:]
+                    target.write_bytes(changed)
+                    os.utime(
+                        target,
+                        ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+                    )
+                    changed_stat = target.stat()
+                    self.assertEqual(changed_stat.st_size, original_stat.st_size)
+                    self.assertEqual(
+                        changed_stat.st_mtime_ns, original_stat.st_mtime_ns
+                    )
+                    self.assertNotEqual(
+                        changed_stat.st_ctime_ns, original_stat.st_ctime_ns
+                    )
+                    with self.assertRaises(TTSFailure) as failure:
+                        lifecycle.warmup()
+                    self.assertEqual(failure.exception.code, "model_artifact_invalid")
+                    self.assertEqual(len(calls), 2 * len(contents))
+                finally:
+                    lifecycle.stop(1)
+
+    def _capture_tts_failure(self, operation, failures):
+        try:
+            operation()
+        except TTSFailure as error:
+            failures.append(error)
+
+    def test_concurrent_waiter_cannot_bypass_incomplete_verification(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, _model_path, contents = self._artifact_fixture(Path(temp))
+            loaded, load_calls, fake_modules = self._fake_voxcpm_imports()
+            entered, release, second_waiting = (
+                threading.Event(),
+                threading.Event(),
+                threading.Event(),
+            )
+            calls, errors = [], []
+            lifecycle = ModelLifecycle(config, vox_model_factory(config))
+            original_wait = lifecycle._condition.wait
+
+            def observe_wait(timeout=None):
+                second_waiting.set()
+                return original_wait(timeout)
+
+            lifecycle._condition.wait = observe_wait
+
+            def block_hash(path, context):
+                calls.append(path.name)
+                if len(calls) == 1:
+                    entered.set()
+                    if not release.wait(2):
+                        raise AssertionError("test did not release blocked hash")
+                return _file_sha256(path, context)
+
+            def warmup():
+                try:
+                    lifecycle.warmup()
+                except Exception as error:  # captured for the test thread
+                    errors.append(error)
+
+            with (
+                mock.patch.dict(sys.modules, fake_modules),
+                mock.patch(
+                    "services.tts.lifecycle._file_sha256", side_effect=block_hash
+                ),
+            ):
+                first = threading.Thread(target=warmup)
+                second = threading.Thread(target=warmup)
+                first.start()
+                try:
+                    self.assertTrue(entered.wait(1))
+                    second.start()
+                    self.assertTrue(second_waiting.wait(1))
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(load_calls, [])
+                finally:
+                    release.set()
+                    first.join(2)
+                    second.join(2)
+                    self.assertIs(lifecycle._model, loaded)
+                    lifecycle.stop(1)
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(len(calls), len(contents))
+            self.assertEqual(len(load_calls), 1)
+            self.assertIs(lifecycle._model, None)
+
+    def test_artifact_integrity_failure_recovers_after_repair(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, model_path, contents = self._artifact_fixture(Path(temp))
+            original = contents["model.safetensors"]
+            (model_path / "model.safetensors").write_bytes(
+                bytes([original[0] ^ 1]) + original[1:]
+            )
+            loaded, load_calls, fake_modules = self._fake_voxcpm_imports()
+            with mock.patch.dict(sys.modules, fake_modules):
+                lifecycle = ModelLifecycle(config, vox_model_factory(config))
+                try:
+                    with self.assertRaises(TTSFailure) as failure:
+                        lifecycle.warmup()
+                    self.assertEqual(failure.exception.code, "model_artifact_invalid")
+                    self.assertFalse(lifecycle.ready())
+                    self.assertEqual(
+                        lifecycle.readiness()["code"], "model_artifact_invalid"
+                    )
+                    (model_path / "model.safetensors").write_bytes(original)
+                    lifecycle.warmup()
+                    self.assertTrue(lifecycle.ready())
+                    self.assertIs(lifecycle._model, loaded)
+                    self.assertEqual(len(load_calls), 1)
+                finally:
+                    lifecycle.stop(1)
+
+    def test_hash_io_error_is_transient_and_does_not_latch_readiness(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, _model_path, _contents = self._artifact_fixture(Path(temp))
+            loaded, load_calls, fake_modules = self._fake_voxcpm_imports()
+            with mock.patch.dict(sys.modules, fake_modules):
+                lifecycle = ModelLifecycle(config, vox_model_factory(config))
+                try:
+                    with mock.patch(
+                        "services.tts.lifecycle._file_sha256",
+                        side_effect=OSError("synthetic transient read error"),
+                    ):
+                        with self.assertRaises(TTSFailure) as failure:
+                            lifecycle.warmup()
+                    self.assertEqual(failure.exception.code, "model_load_failed")
+                    self.assertTrue(lifecycle.ready())
+                    self.assertEqual(lifecycle.readiness(), {"ready": True})
+                    lifecycle.warmup()
+                    self.assertTrue(lifecycle.ready())
+                    self.assertIs(lifecycle._model, loaded)
+                    self.assertEqual(len(load_calls), 1)
+                finally:
+                    lifecycle.stop(1)
+
+    def test_deadline_and_cancellation_during_hash_stop_before_native_load(self):
+        for reason in ("deadline", "cancellation"):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as temp:
+                config, _model_path, _contents = self._artifact_fixture(Path(temp))
+                loaded, load_calls, fake_modules = self._fake_voxcpm_imports()
+                entered, release = threading.Event(), threading.Event()
+                now, disconnected, failures = [0], [False], []
+                context = SynthesisContext(
+                    10, lambda: disconnected[0], clock=lambda: now[0]
+                )
+
+                def blocked_hash(path, hash_context):
+                    entered.set()
+                    if not release.wait(2):
+                        raise AssertionError("test did not release blocked hash")
+                    return _file_sha256(path, hash_context)
+
+                with (
+                    mock.patch.dict(sys.modules, fake_modules),
+                    mock.patch(
+                        "services.tts.lifecycle._file_sha256",
+                        side_effect=blocked_hash,
+                    ),
+                ):
+                    lifecycle = ModelLifecycle(config, vox_model_factory(config))
+
+                    def synthesize():
+                        try:
+                            lifecycle.synthesize(
+                                "hello", "en", "quality", context=context
+                            )
+                        except TTSFailure as error:
+                            failures.append(error)
+
+                    request = threading.Thread(target=synthesize)
+                    request.start()
+                    try:
+                        self.assertTrue(entered.wait(1))
+                        self.assertTrue(lifecycle.state()["inference_active"])
+                        if reason == "deadline":
+                            now[0] = 11
+                        else:
+                            disconnected[0] = True
+                    finally:
+                        release.set()
+                        request.join(2)
+                        lifecycle.stop(1)
+                self.assertFalse(request.is_alive())
+                self.assertEqual(len(failures), 1)
+                self.assertEqual(
+                    failures[0].code,
+                    "deadline_exceeded"
+                    if reason == "deadline"
+                    else "request_cancelled",
+                )
+                self.assertEqual(load_calls, [])
+
+    def test_native_model_load_retains_ownership_after_caller_timeout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, _model_path, _contents = self._artifact_fixture(Path(temp))
+            loaded, load_calls, fake_modules = self._fake_voxcpm_imports()
+            entered, release = threading.Event(), threading.Event()
+            now, failures = [0], []
+
+            def blocked_load(*_args, **_kwargs):
+                entered.set()
+                if not release.wait(2):
+                    raise AssertionError("test did not release native load")
+                load_calls.append(True)
+                return loaded
+
+            fake_modules["voxcpm"].VoxCPM.from_pretrained = staticmethod(blocked_load)
+            lifecycle = ModelLifecycle(config, vox_model_factory(config))
+            context = SynthesisContext(10, clock=lambda: now[0])
+
+            def synthesize():
+                try:
+                    lifecycle.synthesize("hello", "en", "quality", context=context)
+                except TTSFailure as error:
+                    failures.append(error)
+
+            request = threading.Thread(target=synthesize)
+            with mock.patch.dict(sys.modules, fake_modules):
+                request.start()
+                try:
+                    self.assertTrue(entered.wait(2))
+                    now[0] = 11
+                    self.assertFalse(lifecycle.stop(0.01))
+                    self.assertTrue(lifecycle.state()["inference_active"])
+                    self.assertFalse(lifecycle.ready())
+                    self.assertEqual(load_calls, [])
+                finally:
+                    release.set()
+                    request.join(2)
+                self.assertFalse(request.is_alive())
+                self.assertEqual(len(failures), 1)
+                self.assertEqual(failures[0].code, "deadline_exceeded")
+                self.assertIs(lifecycle._model, loaded)
+                self.assertFalse(lifecycle.ready())
+                self.assertTrue(lifecycle.stop(1))
+            self.assertEqual(len(load_calls), 1)
+
     def test_model_factory_marks_missing_and_invalid_artifacts_permanent(self):
         with tempfile.TemporaryDirectory() as temp:
             missing = test_config()
@@ -364,7 +1016,8 @@ class LifecycleTests(unittest.TestCase):
     def test_unloaded_worker_is_ready_without_loading(self):
         calls = []
         lifecycle = ModelLifecycle(
-            {"idle_unload_seconds": 0}, lambda: calls.append(True) or object()
+            {"idle_unload_seconds": 0},
+            lambda _context=None: calls.append(True) or object(),
         )
         try:
             self.assertTrue(lifecycle.ready())
@@ -380,7 +1033,7 @@ class LifecycleTests(unittest.TestCase):
     def test_permanent_artifact_failure_marks_unready_and_recovers_after_repair(self):
         attempts = []
 
-        def factory():
+        def factory(_context=None):
             attempts.append(True)
             if len(attempts) == 1:
                 raise PermanentModelError(
@@ -423,7 +1076,7 @@ class LifecycleTests(unittest.TestCase):
             lifecycle.stop(1)
 
     def test_synthesis_selects_steps_for_each_mode(self):
-        lifecycle = ModelLifecycle({"idle_unload_seconds": 0}, object)
+        lifecycle = ModelLifecycle({"idle_unload_seconds": 0}, fake_model_factory)
         observed = []
         lifecycle._generate = lambda _model, _text, _language, steps: (
             observed.append(steps) or b"wav",
@@ -443,7 +1096,9 @@ class LifecycleTests(unittest.TestCase):
             lifecycle.stop(1)
 
     def test_processing_defaults_to_none_and_gentle_wraps_completed_audio(self):
-        lifecycle = ModelLifecycle(ssml_config(idle_unload_seconds=0), object)
+        lifecycle = ModelLifecycle(
+            ssml_config(idle_unload_seconds=0), fake_model_factory
+        )
         source = wav_segment(b"\x01\x00" * 480)
         calls = []
         lifecycle._generate = lambda *_args, **_kwargs: (source, "audio/wav")
@@ -474,7 +1129,8 @@ class LifecycleTests(unittest.TestCase):
     def test_invalid_processing_does_not_load_model(self):
         calls = []
         lifecycle = ModelLifecycle(
-            {"idle_unload_seconds": 0}, lambda: calls.append(True) or object()
+            {"idle_unload_seconds": 0},
+            lambda _context=None: calls.append(True) or object(),
         )
         try:
             with self.assertRaises(TTSFailure) as caught:
@@ -487,7 +1143,9 @@ class LifecycleTests(unittest.TestCase):
             lifecycle.stop(1)
 
     def test_ssml_synthesis_uses_language_context_and_composes_all_segments(self):
-        lifecycle = ModelLifecycle(ssml_config(idle_unload_seconds=0), object)
+        lifecycle = ModelLifecycle(
+            ssml_config(idle_unload_seconds=0), fake_model_factory
+        )
         observed = []
 
         def generate(_model, text, language, steps):
@@ -518,7 +1176,9 @@ class LifecycleTests(unittest.TestCase):
             lifecycle.stop(1)
 
     def test_ssml_segment_failure_never_returns_composed_audio(self):
-        lifecycle = ModelLifecycle(ssml_config(idle_unload_seconds=0), object)
+        lifecycle = ModelLifecycle(
+            ssml_config(idle_unload_seconds=0), fake_model_factory
+        )
         calls = []
 
         def generate(_model, text, language, steps):
@@ -544,7 +1204,7 @@ class LifecycleTests(unittest.TestCase):
         calls = []
         lifecycle = ModelLifecycle(
             {"idle_unload_seconds": 0.2},
-            lambda: calls.append(object()) or calls[-1],
+            lambda _context=None: calls.append(object()) or calls[-1],
         )
         try:
             self.assertEqual(lifecycle.state()["model_state"], "unloaded")
@@ -565,7 +1225,7 @@ class LifecycleTests(unittest.TestCase):
     def test_active_inference_prevents_unload(self):
         entered = threading.Event()
         release = threading.Event()
-        lifecycle = ModelLifecycle({"idle_unload_seconds": 0.1}, object)
+        lifecycle = ModelLifecycle({"idle_unload_seconds": 0.1}, fake_model_factory)
         worker = threading.Thread(
             target=lambda: lifecycle._with_model(
                 lambda _model: (entered.set(), release.wait(2))
@@ -587,7 +1247,7 @@ class LifecycleTests(unittest.TestCase):
     def test_failed_load_recovers_on_next_request(self):
         attempts = []
 
-        def factory():
+        def factory(_context=None):
             attempts.append(True)
             if len(attempts) == 1:
                 raise RuntimeError("temporary load failure")
@@ -607,7 +1267,7 @@ class LifecycleTests(unittest.TestCase):
             lifecycle.stop(1)
 
     def test_inference_failure_does_not_latch_worker(self):
-        lifecycle = ModelLifecycle({"idle_unload_seconds": 0}, object)
+        lifecycle = ModelLifecycle({"idle_unload_seconds": 0}, fake_model_factory)
         attempts = []
         original = lifecycle._generate
 
@@ -737,7 +1397,7 @@ class WorkerHTTPTests(unittest.TestCase):
         factory_calls = []
         lifecycle = ModelLifecycle(
             {"idle_unload_seconds": 60},
-            lambda: factory_calls.append(object()) or factory_calls[-1],
+            lambda _context=None: factory_calls.append(object()) or factory_calls[-1],
         )
         generated = []
         lifecycle._generate = lambda *_args, **_kwargs: (
@@ -782,8 +1442,81 @@ class WorkerHTTPTests(unittest.TestCase):
             thread.join(1)
             lifecycle.stop(1)
 
+    def test_health_and_readiness_remain_responsive_during_artifact_hash(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, _model_path, _contents = LifecycleTests()._artifact_fixture(
+                Path(temp)
+            )
+            loaded, load_calls, fake_modules = LifecycleTests()._fake_voxcpm_imports()
+            entered, release = threading.Event(), threading.Event()
+            lifecycle = ModelLifecycle(config, vox_model_factory(config))
+            lifecycle._generate_segment = lambda *_args: (
+                wav_segment(b"\x01\x00" * 480),
+                "audio/wav",
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler(config, lifecycle))
+            server.daemon_threads = True
+            serving = threading.Thread(target=server.serve_forever, daemon=True)
+            serving.start()
+            url = f"http://127.0.0.1:{server.server_port}"
+
+            def blocked_hash(path, context):
+                entered.set()
+                if not release.wait(2):
+                    raise AssertionError("test did not release artifact hash")
+                return _file_sha256(path, context)
+
+            results = []
+
+            def synthesize():
+                import urllib.error
+                import urllib.request
+
+                request = urllib.request.Request(
+                    url + "/internal/v1/speech",
+                    data=b'{"text":"hello"}',
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Request-Timeout-Ms": "5000",
+                    },
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(request, timeout=3) as response:
+                        results.append(response.status)
+                except urllib.error.HTTPError as error:
+                    results.append(error.code)
+
+            request_thread = threading.Thread(target=synthesize)
+            with (
+                mock.patch.dict(sys.modules, fake_modules),
+                mock.patch(
+                    "services.tts.lifecycle._file_sha256", side_effect=blocked_hash
+                ),
+            ):
+                request_thread.start()
+                try:
+                    self.assertTrue(entered.wait(1))
+                    import urllib.request
+
+                    with urllib.request.urlopen(url + "/healthz", timeout=1) as health:
+                        self.assertEqual(health.status, 200)
+                    with urllib.request.urlopen(url + "/readyz", timeout=1) as ready:
+                        self.assertEqual(ready.status, 200)
+                    self.assertEqual(lifecycle.state()["model_state"], "loading")
+                finally:
+                    release.set()
+                    request_thread.join(3)
+                    server.shutdown()
+                    server.server_close()
+                    serving.join(1)
+                    lifecycle.stop(1)
+            self.assertFalse(request_thread.is_alive())
+            self.assertEqual(results, [200])
+            self.assertEqual(len(load_calls), 1)
+
     def test_readiness_exposes_sanitized_permanent_failure_and_liveness(self):
-        def permanently_invalid():
+        def permanently_invalid(_context=None):
             try:
                 raise RuntimeError("/private/model-store/secret diagnostic")
             except RuntimeError as error:
@@ -833,7 +1566,7 @@ class WorkerHTTPTests(unittest.TestCase):
             lifecycle.stop(1)
 
     def test_http_warmup_reports_simulated_insufficient_vram_safely(self):
-        def insufficient_resources():
+        def insufficient_resources(_context=None):
             raise RuntimeError("CUDA out of memory in synthetic test")
 
         lifecycle = ModelLifecycle({"idle_unload_seconds": 60}, insufficient_resources)

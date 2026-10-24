@@ -85,7 +85,7 @@ class SynthesisDeadlineTests(unittest.TestCase):
             yield
 
         model = SimpleNamespace(generate=Mock())
-        lifecycle = ModelLifecycle(test_config(), object)
+        lifecycle = ModelLifecycle(test_config(), lambda _context=None: object())
         try:
             with patch.dict(
                 "sys.modules",
@@ -109,7 +109,9 @@ class SynthesisDeadlineTests(unittest.TestCase):
 
     def test_expired_budget_does_not_load(self):
         calls = []
-        lifecycle = ModelLifecycle(test_config(), lambda: calls.append("load"))
+        lifecycle = ModelLifecycle(
+            test_config(), lambda _context=None: calls.append("load")
+        )
         try:
             with self.assertRaises(TTSFailure) as caught:
                 lifecycle.synthesize(
@@ -126,7 +128,7 @@ class SynthesisDeadlineTests(unittest.TestCase):
     def test_load_completion_after_deadline_does_not_start_inference(self):
         now, calls = [0], []
 
-        def load():
+        def load(_context=None):
             now[0] = 11
             return object()
 
@@ -149,7 +151,7 @@ class SynthesisDeadlineTests(unittest.TestCase):
     def test_load_failure_after_deadline_is_timeout_not_unavailable(self):
         now = [0]
 
-        def load():
+        def load(_context=None):
             now[0] = 11
             raise RuntimeError("synthetic private diagnostic")
 
@@ -172,7 +174,9 @@ class SynthesisDeadlineTests(unittest.TestCase):
         for reason in ("deadline", "disconnect"):
             with self.subTest(reason=reason):
                 now, disconnected, calls = [0], [False], []
-                lifecycle = ModelLifecycle(test_config(), object)
+                lifecycle = ModelLifecycle(
+                    test_config(), lambda _context=None: object()
+                )
 
                 def generate(_model, text, _language, _steps, *, context=None):
                     calls.append(text)
@@ -211,7 +215,7 @@ class SynthesisDeadlineTests(unittest.TestCase):
                     lifecycle.stop(1)
 
     def test_mastering_receives_same_absolute_deadline(self):
-        lifecycle = ModelLifecycle(test_config(), object)
+        lifecycle = ModelLifecycle(test_config(), lambda _context=None: object())
         audio = wav_segment(b"\x01\x00" * 480)
         lifecycle._generate = lambda *_, **_kwargs: (audio, "audio/wav")
         context = SynthesisContext(10, clock=lambda: 0)

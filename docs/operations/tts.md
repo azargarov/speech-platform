@@ -26,6 +26,33 @@ Fetching is a separate network operation. The worker itself is offline. Keep
 the model files outside Git and do not change the pinned manifest digest
 without reviewing the model revision and hashes.
 
+At lazy load, before importing VoxCPM2, the worker verifies the pinned manifest,
+exact file set and sizes, then streams every file through SHA-256 in 1 MiB chunks.
+After an idle unload, it repeats manifest identity, file-set, size and metadata
+checks. It rehashes every artifact if any fingerprint changes. Fingerprints
+(`st_dev`, `st_ino`, `st_size`, `st_mtime_ns`, `st_ctime_ns`) are held only in
+worker memory; a process restart always performs full SHA-256 verification.
+Synthesis deadlines and client cancellation are checked between hash chunks and
+again before native model construction. The current manifest covers about 4.96 GB.
+On the llm host, a sequential read-only check of the deployed artifact using the
+same 1 MiB SHA-256 loop took 15.6 seconds (about 304 MiB/s); observed disk/cache
+conditions affect this measurement. All seven artifact hashes and sizes matched.
+That cost applies on the first verified load per worker and after a fingerprint
+change; unchanged idle reloads perform metadata checks without reading all weights.
+
+Matching metadata after the initial full verification is a performance shortcut,
+not equivalent to rehashing on every model load. It may not detect a change that
+preserves every recorded fingerprint. `make tts-model-check` remains the explicit
+full-integrity check for operators.
+
+Missing or mismatched artifacts produce a sanitized permanent readiness failure;
+repair the store and a later request retries validation. Filesystem I/O errors
+produce a sanitized recoverable load failure and do not latch readiness. GPU
+resource failures also remain recoverable. A deadline/cancellation cannot stop
+native VoxCPM initialization once it has started: the request returns after that
+call finishes, and lifecycle ownership is retained until then. Shutdown waits
+within its configured bound and does not unload a model while loading is active.
+
 For the protected root-owned store, run the pinned check, fetch, then check as
 root with `stt-model-reader` as the primary group. This preserves the store's
 existing `root:stt-model-reader` ownership and `2710` mode; it does not change

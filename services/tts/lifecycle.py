@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import hashlib
 import json
+import stat
 import threading
 import time
 from pathlib import Path
@@ -54,7 +55,11 @@ class SynthesisContext:
 
 
 class ModelLifecycle:
-    def __init__(self, config: dict, model_factory: Callable[[], object]):
+    def __init__(
+        self,
+        config: dict,
+        model_factory: Callable[[SynthesisContext | None], object],
+    ):
         self.config = config
         self.model_factory = model_factory
         self._condition = threading.Condition()
@@ -312,7 +317,11 @@ class ModelLifecycle:
                 if context is not None:
                     context.check()
                 try:
-                    self._model = self.model_factory()
+                    self._model = self.model_factory(context)
+                except TTSFailure:
+                    with self._condition:
+                        self._state = "unloaded"
+                    raise
                 except PermanentModelError as error:
                     with self._condition:
                         self._permanent_failure = (error.category, error.message)
@@ -437,15 +446,52 @@ def language_instruction(text: str, language: str, instructions: dict[str, str])
     return f"({instructions[language]}){text}"
 
 
+def _file_sha256(path: Path, context: SynthesisContext | None = None) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            if context is not None:
+                context.check()
+            block = stream.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    if context is not None:
+        context.check()
+    return digest.hexdigest()
+
+
+def _file_metadata(path: Path) -> tuple[int, int, int, int, int]:
+    metadata = path.lstat()
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
 def vox_model_factory(config: dict):
-    def load():
+    verified_metadata = None
+
+    def load(context: SynthesisContext | None = None):
+        nonlocal verified_metadata
         path = Path(config["model_path"])
         manifest_path = path.parent / "manifest.yaml"
+        try:
+            model_stat = path.lstat()
+            manifest_stat = manifest_path.lstat()
+        except (FileNotFoundError, NotADirectoryError) as error:
+            raise PermanentModelError(
+                "model_artifact_unavailable",
+                "configured TTS model artifacts are unavailable; verify the model mount and files",
+            ) from error
         if (
-            path.is_symlink()
-            or not path.is_dir()
-            or manifest_path.is_symlink()
-            or not manifest_path.is_file()
+            stat.S_ISLNK(model_stat.st_mode)
+            or not stat.S_ISDIR(model_stat.st_mode)
+            or stat.S_ISLNK(manifest_stat.st_mode)
+            or not stat.S_ISREG(manifest_stat.st_mode)
         ):
             raise PermanentModelError(
                 "model_artifact_unavailable",
@@ -456,6 +502,8 @@ def vox_model_factory(config: dict):
         from services.worker.server import StrictLoader
 
         try:
+            if context is not None:
+                context.check()
             manifest = yaml.load(manifest_path.read_text(), Loader=StrictLoader)
             digest = hashlib.sha256(
                 json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
@@ -465,21 +513,96 @@ def vox_model_factory(config: dict):
                 or manifest.get("model", {}).get("revision") != config["model_revision"]
             ):
                 raise ValueError("manifest identity mismatch")
-            expected = {
-                entry["path"]: entry["size_bytes"]
-                for entry in manifest.get("files", [])
-            }
+            entries = manifest.get("files", [])
+            if not isinstance(entries, list) or not entries:
+                raise ValueError("manifest file list is invalid")
+            expected = {}
+            for entry in entries:
+                if not isinstance(entry, dict) or set(entry) != {
+                    "path",
+                    "size_bytes",
+                    "sha256",
+                }:
+                    raise ValueError("manifest file entry is invalid")
+                name = entry["path"]
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or Path(name).name != name
+                    or "\\" in name
+                    or name in expected
+                ):
+                    raise ValueError("manifest file path is invalid")
+                expected[name] = entry
             actual = {}
             for child in path.iterdir():
-                if child.is_symlink() or not child.is_file():
+                child_stat = child.lstat()
+                if stat.S_ISLNK(child_stat.st_mode) or not stat.S_ISREG(
+                    child_stat.st_mode
+                ):
                     raise ValueError("unsupported artifact entry")
-                actual[child.name] = child.stat().st_size
+                actual[child.name] = (
+                    child,
+                    (
+                        child_stat.st_dev,
+                        child_stat.st_ino,
+                        child_stat.st_size,
+                        child_stat.st_mtime_ns,
+                        child_stat.st_ctime_ns,
+                    ),
+                )
             if (
                 not expected
-                or actual != expected
+                or set(actual) != set(expected)
                 or "model.safetensors" not in expected
             ):
                 raise ValueError("artifact files do not match the manifest")
+            manifest_metadata = _file_metadata(manifest_path)
+            metadata = (
+                manifest_metadata,
+                tuple((name, actual[name][1]) for name in sorted(actual)),
+            )
+            sizes_match = all(
+                type(expected[name]["size_bytes"]) is int
+                and actual[name][1][2] == expected[name]["size_bytes"]
+                for name in actual
+            )
+            if verified_metadata != metadata:
+                hashes = {}
+                for name in sorted(actual):
+                    child, _file_stat = actual[name]
+                    hashes[name] = _file_sha256(child, context)
+
+                after_metadata = (
+                    _file_metadata(manifest_path),
+                    tuple(
+                        (name, _file_metadata(actual[name][0]))
+                        for name in sorted(actual)
+                    ),
+                )
+                if after_metadata != metadata:
+                    raise ValueError("artifact metadata changed during verification")
+
+                for name in actual:
+                    entry = expected[name]
+                    if (
+                        type(entry["size_bytes"]) is not int
+                        or actual[name][1][2] != entry["size_bytes"]
+                    ):
+                        raise ValueError("artifact file size mismatch")
+                    if hashes[name] != entry["sha256"]:
+                        raise ValueError("artifact file digest mismatch")
+                if context is not None:
+                    context.check()
+                verified_metadata = metadata
+            elif not sizes_match:
+                # Keep the size check explicit on every load, even on a cache hit.
+                raise ValueError("artifact file size mismatch")
+        except TTSFailure:
+            raise
+        except OSError:
+            # Filesystem I/O may recover; do not latch it as artifact corruption.
+            raise
         except Exception as error:
             raise PermanentModelError(
                 "model_artifact_invalid",
@@ -488,6 +611,8 @@ def vox_model_factory(config: dict):
         import torch
         from voxcpm import VoxCPM
 
+        if context is not None:
+            context.check()
         if not torch.cuda.is_available():
             raise PermanentModelError(
                 "cuda_unavailable",
@@ -500,6 +625,8 @@ def vox_model_factory(config: dict):
             )
         torch.cuda.set_per_process_memory_fraction(config["cuda_memory_fraction"])
         torch.set_num_threads(4)
+        if context is not None:
+            context.check()
         return VoxCPM.from_pretrained(
             str(path),
             load_denoiser=False,
