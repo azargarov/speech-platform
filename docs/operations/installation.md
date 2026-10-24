@@ -93,8 +93,9 @@ Gateway speech queues are independent and FIFO: STT has one active local
 Faster-Whisper request plus three waiting requests; TTS has one active plus one
 waiting request. Waiting counts against each request's deadline, and queued STT
 audio is not buffered. A full queue returns 429; an expired request returns 504.
-Groq STT is not implemented: current public STT is local-only. These request
-limits do not reserve GPU memory or guarantee STT/TTS/Ollama coexistence; use
+Groq STT is optional and disabled by default. Public STT remains local-only
+unless the operator enables it and each request supplies cloud-audio consent.
+These request limits do not reserve GPU memory or guarantee STT/TTS/Ollama coexistence; use
 sequential warmups and observe available resources on constrained GPUs.
 
 ## Optional local text transformation and Ollama

@@ -10,10 +10,10 @@ import (
 type speechProviderID string
 
 const (
-	defaultSpeechProvider speechProviderID = "default"
-	localWhisperProvider  speechProviderID = "local-whisper"
-	groqWhisperProvider   speechProviderID = "groq-whisper"
-	futureGroqConcurrency                  = 2
+	defaultSpeechProvider  speechProviderID = "default"
+	localWhisperProvider   speechProviderID = "local-whisper"
+	groqWhisperProvider    speechProviderID = "groq-whisper"
+	defaultGroqConcurrency                  = 2
 )
 
 var (
@@ -48,6 +48,8 @@ type speechAdmission struct {
 	providerIDs []speechProviderID
 	waiting     []*speechAdmissionWaiter
 	maxWaiting  int
+	maxActive   int
+	activeTotal int
 	closed      bool
 }
 
@@ -69,16 +71,33 @@ func newSpeechAdmission(maxWaiting int) *speechAdmission {
 }
 
 func newSTTAdmission(maxWaiting int) *speechAdmission {
-	return newProviderSpeechAdmission(maxWaiting, map[speechProviderID]speechProviderConfig{
+	return newSTTAdmissionWithGroq(maxWaiting, defaultGroqConcurrency, false)
+}
+
+func newSTTAdmissionWithGroq(maxWaiting, groqCapacity int, groqEnabled bool) *speechAdmission {
+	providers := map[speechProviderID]speechProviderConfig{
 		localWhisperProvider: {capacity: 1, enabled: true, available: true},
-		// Reserve the small internal capacity record for future integration.
-		// Public requests are not eligible for Groq until cloud STT is explicitly
-		// implemented and authorized.
-		groqWhisperProvider: {capacity: futureGroqConcurrency, enabled: false, available: false},
-	})
+		groqWhisperProvider:  {capacity: defaultGroqConcurrency, enabled: false, available: false},
+	}
+	if groqEnabled {
+		providers[groqWhisperProvider] = speechProviderConfig{
+			capacity: groqCapacity, enabled: true, available: true,
+		}
+	}
+	return newProviderSpeechAdmissionWithLimit(maxWaiting, providers, 2)
 }
 
 func newProviderSpeechAdmission(maxWaiting int, configured map[speechProviderID]speechProviderConfig) *speechAdmission {
+	maxActive := 0
+	for _, cfg := range configured {
+		if cfg.enabled {
+			maxActive += cfg.capacity
+		}
+	}
+	return newProviderSpeechAdmissionWithLimit(maxWaiting, configured, maxActive)
+}
+
+func newProviderSpeechAdmissionWithLimit(maxWaiting int, configured map[speechProviderID]speechProviderConfig, maxActive int) *speechAdmission {
 	providers := make(map[speechProviderID]*speechProviderState, len(configured))
 	ids := make([]speechProviderID, 0, len(configured))
 	for id, cfg := range configured {
@@ -92,12 +111,14 @@ func newProviderSpeechAdmission(maxWaiting int, configured map[speechProviderID]
 	if maxWaiting < 0 {
 		maxWaiting = 0
 	}
-	return &speechAdmission{providers: providers, providerIDs: ids, maxWaiting: maxWaiting}
+	if maxActive < 1 {
+		maxActive = 1
+	}
+	return &speechAdmission{providers: providers, providerIDs: ids, maxWaiting: maxWaiting, maxActive: maxActive}
 }
 
-// acquire accepts the request's already-authorized provider set. Current STT
-// routes pass only localWhisperProvider; future provider adapters must perform
-// selection and cloud authorization before calling this method.
+// acquire accepts the request's already-authorized providers in preference
+// order. The public handler validates cloud consent before entering admission.
 func (a *speechAdmission) acquire(ctx context.Context, eligible ...speechProviderID) (*speechAdmissionLease, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
@@ -165,7 +186,6 @@ func (a *speechAdmission) enabledEligibleLocked(requested []speechProviderID) []
 		seen[id] = struct{}{}
 		eligible = append(eligible, id)
 	}
-	sort.Slice(eligible, func(i, j int) bool { return eligible[i] < eligible[j] })
 	return eligible
 }
 
@@ -249,6 +269,7 @@ func (a *speechAdmission) release(id speechProviderID) {
 		return
 	}
 	provider.active--
+	a.activeTotal--
 	a.dispatchLocked()
 }
 
@@ -272,6 +293,7 @@ func (a *speechAdmission) dispatchLocked() {
 			continue
 		}
 		a.providers[id].active++
+		a.activeTotal++
 		waiter.provider = id
 		close(waiter.ready)
 	}
@@ -289,7 +311,7 @@ func (a *speechAdmission) bestAssignmentLocked() ([]speechProviderID, int) {
 	var search func(int, int)
 	search = func(index, count int) {
 		if index == len(a.waiting) {
-			if betterAssignment(current, best, count, bestCount) {
+			if a.betterAssignment(current, best, count, bestCount) {
 				copy(best, current)
 				bestCount = count
 			}
@@ -298,7 +320,7 @@ func (a *speechAdmission) bestAssignmentLocked() ([]speechProviderID, int) {
 		waiter := a.waiting[index]
 		for _, id := range waiter.eligible {
 			provider := a.providers[id]
-			if provider == nil || !provider.enabled || !provider.available || provider.active+used[id] >= provider.capacity {
+			if provider == nil || !provider.enabled || !provider.available || provider.active+used[id] >= provider.capacity || a.activeTotal+count >= a.maxActive {
 				continue
 			}
 			current[index] = id
@@ -313,7 +335,7 @@ func (a *speechAdmission) bestAssignmentLocked() ([]speechProviderID, int) {
 	return best, bestCount
 }
 
-func betterAssignment(candidate, best []speechProviderID, candidateCount, bestCount int) bool {
+func (a *speechAdmission) betterAssignment(candidate, best []speechProviderID, candidateCount, bestCount int) bool {
 	if candidateCount != bestCount {
 		return candidateCount > bestCount
 	}
@@ -325,8 +347,20 @@ func betterAssignment(candidate, best []speechProviderID, candidateCount, bestCo
 	}
 	for i := range candidate {
 		if candidate[i] != best[i] {
-			return candidate[i] < best[i]
+			return a.providerPreference(i, candidate[i]) < a.providerPreference(i, best[i])
 		}
 	}
 	return false
+}
+
+func (a *speechAdmission) providerPreference(waiter int, id speechProviderID) int {
+	if id == "" {
+		return int(^uint(0) >> 1)
+	}
+	for rank, eligible := range a.waiting[waiter].eligible {
+		if eligible == id {
+			return rank
+		}
+	}
+	return int(^uint(0) >> 1)
 }

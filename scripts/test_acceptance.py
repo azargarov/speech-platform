@@ -205,6 +205,21 @@ class Acceptance(unittest.TestCase):
                     "http://www.w3.org/XML/1998/namespace",
                 ):
                     text = text.replace(namespace, "")
+                relative_path = path.relative_to(ROOT).as_posix()
+                if relative_path == "internal/gateway/groq_stt.go":
+                    # This fixed endpoint is a provider protocol constant, not
+                    # a deployment-specific address.
+                    text = text.replace(
+                        "https://api.groq.com/openai/v1/audio/transcriptions", ""
+                    )
+                if relative_path in {
+                    "internal/gateway/groq_stt.go",
+                    "internal/config/config.go",
+                }:
+                    # These exact model IDs form the validated external
+                    # provider allowlist, not a local deployment model choice.
+                    text = text.replace("whisper-large-v3-turbo", "")
+                    text = text.replace("whisper-large-v3", "")
                 for forbidden in (
                     "http://",
                     "https://",

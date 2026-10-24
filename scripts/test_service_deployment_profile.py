@@ -92,6 +92,39 @@ class ServiceDeploymentProfileTests(unittest.TestCase):
         self.assertEqual(config["listen_host"], "0.0.0.0")
         self.assertEqual(config["listen_port"], 8080)
         self.assertEqual(config["warmup_timeout"], "180s")
+        self.assertFalse(config["groq_stt"]["enabled"])
+        self.assertEqual(config["groq_stt"]["capacity"], 2)
+
+    def test_groq_stt_configuration_is_validated_without_secrets(self):
+        path = Path(self.temporary.name) / "gateway-groq.yaml"
+        body = (
+            "listen_host: 0.0.0.0\nlisten_port: 8080\nmax_header_bytes: 1024\n"
+            "max_request_bytes: 2048\nread_timeout: 1s\nwrite_timeout: 20s\n"
+            "idle_timeout: 1s\nshutdown_timeout: 1s\n"
+            "groq_stt: {enabled: false, capacity: 2, model: whisper-large-v3-turbo, "
+            "api_key_env: GROQ_STT_API_KEY}\n"
+        )
+        path.write_text(body, encoding="utf-8")
+        self.assertFalse(load_gateway_config(path)["groq_stt"]["enabled"])
+        for invalid, message in (
+            (
+                body.replace("enabled: false", 'enabled: "yes"'),
+                "enabled must be boolean",
+            ),
+            (body.replace("capacity: 2", "capacity: 0"), "capacity must be 1 or 2"),
+            (
+                body.replace("whisper-large-v3-turbo", "unknown-model"),
+                "model is unsupported",
+            ),
+            (body.replace("GROQ_STT_API_KEY", "bad-name"), "api_key_env is invalid"),
+            (
+                body.replace("api_key_env: GROQ_STT_API_KEY", "extra: true"),
+                "fields are invalid",
+            ),
+        ):
+            path.write_text(invalid, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, message):
+                load_gateway_config(path)
 
     def test_gateway_config_rejects_unknown_fields_and_non_container_bind(self):
         path = Path(self.temporary.name) / "gateway.yaml"

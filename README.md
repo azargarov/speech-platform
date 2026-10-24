@@ -98,6 +98,37 @@ The response retains `text` and `language` for compatibility and adds explicit f
 
 Automatic detection of a language outside Russian, English and Swedish returns `unsupported_detected_language` (422).
 
+### Optional Groq STT
+
+STT remains local-only by default. Groq Whisper is disabled unless
+`groq_stt.enabled` is set in the Gateway configuration and the configured
+`api_key_env` is supplied through the private Gateway secrets file. This audio
+permission is independent of text transformation's `allow_cloud` setting.
+Each request must also carry `X-Allow-Cloud-Audio: true` before Groq can be
+eligible. `X-STT-Provider: local` pins local processing; `X-STT-Provider: groq`
+pins Groq and requires that consent. With no provider header, an explicitly
+consenting request prefers local capacity and may use Groq when local capacity
+is occupied. A provider error is returned; the same request is not retried on
+another provider. Existing clients that omit these headers remain local-only.
+
+The initial Gateway configuration allows one local and at most two Groq
+operations, with a total of two active STT operations across both providers to
+bound retained audio buffers. The existing three-request STT waiting queue is
+unchanged. This is request-count admission, not a GPU memory reservation.
+Groq uses the configured Whisper model and supports only same-language or
+automatic transcription through this API; cross-language audio translation is
+rejected. Provider provenance is returned in `X-Speech-Provider`.
+
+When authorized requests use Groq, uploaded audio is transmitted to Groq's
+transcription endpoint. Groq states that inference customer data is not
+retained by default, but inputs/outputs may be temporarily retained for
+reliability or abuse investigation for up to 30 days; account data controls
+including Zero Data Retention determine applicable handling. Review Groq's
+[speech-to-text API](https://console.groq.com/docs/speech-to-text) and
+[data-retention policy](https://console.groq.com/docs/your-data) before enabling
+cloud audio for sensitive recordings. SpeechPlatform does not log or persist
+the uploaded audio.
+
 Use `make test-stt AUDIO=private/audio/sample.wav SOURCE_LANGUAGE=auto OUTPUT_LANGUAGE=auto` to submit a local file through Gateway. The command prints detected/output metadata and transcription to the invoking terminal; audio is not copied into logs by the service.
 
 ## Operate and recover
@@ -125,8 +156,9 @@ active request and three waiting requests; TTS allows one active request and
 one waiting request. Queue waiting counts against the request deadline. Waiting
 STT uploads are not buffered until admitted. A full queue returns the existing
 429 response; deadline exhaustion returns 504. Public STT currently dispatches
-only to local Faster-Whisper. Groq STT is not implemented, and queue capacity
-does not reserve GPU memory.
+to local Faster-Whisper by default. Optional Groq STT requires operator
+configuration plus per-request cloud-audio consent as described above. Queue
+capacity does not reserve GPU memory.
 
 ## TTS API
 

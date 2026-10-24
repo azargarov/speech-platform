@@ -32,8 +32,17 @@ func run() error {
 	if e != nil {
 		return fmt.Errorf("configuration: %w", e)
 	}
+	duration := func(s string) time.Duration { d, _ := time.ParseDuration(s); return d }
 	if err := texttransform.ValidateConfig(c.TextTransform); err != nil {
 		return fmt.Errorf("configuration: %w", err)
+	}
+	var groqSTT *gateway.GroqSTTAdapter
+	if c.GroqSTT.Enabled {
+		apiKey := os.Getenv(c.GroqSTT.APIKeyEnv)
+		groqSTT, e = gateway.NewGroqSTTAdapter(apiKey, c.GroqSTT.Model, duration(c.STTTimeout))
+		if e != nil {
+			return fmt.Errorf("configuration: %w", e)
+		}
 	}
 	if *check {
 		return nil
@@ -46,7 +55,6 @@ func run() error {
 		return nil
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	duration := func(s string) time.Duration { d, _ := time.ParseDuration(s); return d }
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	stt := gateway.NewSTTProxy(c.STTURL, c.APIToken, duration(c.STTTimeout))
@@ -62,7 +70,7 @@ func run() error {
 		defer textService.Close()
 	}
 	ready := gateway.NewWorkersReadiness(stt, tts)
-	srv := &http.Server{Addr: net.JoinHostPort(c.ListenHost, fmt.Sprint(c.ListenPort)), Handler: gateway.HandlerWithWarmupContext(ready, c.MaxRequestBytes, stt, tts, textService, duration(c.WarmupTimeout), ctx), ReadTimeout: duration(c.ReadTimeout), ReadHeaderTimeout: duration(c.ReadTimeout), WriteTimeout: duration(c.WriteTimeout), IdleTimeout: duration(c.IdleTimeout), MaxHeaderBytes: c.MaxHeaderBytes}
+	srv := &http.Server{Addr: net.JoinHostPort(c.ListenHost, fmt.Sprint(c.ListenPort)), Handler: gateway.HandlerWithWarmupContextAndGroqSTT(ready, c.MaxRequestBytes, stt, tts, textService, duration(c.WarmupTimeout), ctx, groqSTT, c.GroqSTT.Enabled, *c.GroqSTT.Capacity), ReadTimeout: duration(c.ReadTimeout), ReadHeaderTimeout: duration(c.ReadTimeout), WriteTimeout: duration(c.WriteTimeout), IdleTimeout: duration(c.IdleTimeout), MaxHeaderBytes: c.MaxHeaderBytes}
 	errs := make(chan error, 1)
 	go func() { logger.Info("gateway starting"); errs <- srv.ListenAndServe() }()
 	select {

@@ -11,6 +11,7 @@ func TestConfig(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	t.Setenv("GROQ_STT_API_KEY", "")
 	t.Setenv("SPEECH_LISTEN_PORT", "")
 	withoutWarmup := strings.Replace(string(raw), "warmup_timeout: 180s\n", "", 1)
 	pathWithoutWarmup := t.TempDir() + "/gateway.yaml"
@@ -67,6 +68,41 @@ func TestConfig(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestGroqSTTConfigurationDefaultsAndValidation(t *testing.T) {
+	t.Setenv("SPEECH_LISTEN_PORT", "")
+	raw, err := os.ReadFile("../../configs/gateway.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := func(content string) string {
+		t.Helper()
+		name := t.TempDir() + "/gateway.yaml"
+		if err := os.WriteFile(name, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return name
+	}
+	c, err := Load(path(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.GroqSTT.Enabled || c.GroqSTT.Capacity == nil || *c.GroqSTT.Capacity != 2 || c.GroqSTT.Model != "whisper-large-v3-turbo" || c.GroqSTT.APIKeyEnv != "GROQ_STT_API_KEY" {
+		t.Fatalf("unexpected Groq defaults: %+v", c.GroqSTT)
+	}
+	for name, body := range map[string]string{
+		"capacity zero":       strings.Replace(string(raw), "capacity: 2", "capacity: 0", 1),
+		"capacity over limit": strings.Replace(string(raw), "capacity: 2", "capacity: 3", 1),
+		"unsupported model":   strings.Replace(string(raw), "whisper-large-v3-turbo", "other-model", 1),
+		"invalid env name":    strings.Replace(string(raw), "GROQ_STT_API_KEY", "bad-name", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(path(body)); err == nil {
+				t.Fatal("invalid Groq configuration was accepted")
+			}
+		})
+	}
 }
 
 func TestValidHost(t *testing.T) {

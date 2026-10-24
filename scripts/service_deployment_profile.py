@@ -40,7 +40,9 @@ GATEWAY_OPTIONAL_FIELDS = {
     "tts_url",
     "tts_timeout",
     "warmup_timeout",
+    "groq_stt",
 }
+GROQ_STT_FIELDS = {"enabled", "capacity", "model", "api_key_env"}
 
 
 def _fields(value, expected: set[str], label: str) -> None:
@@ -207,4 +209,21 @@ def load_gateway_config(path: str | Path) -> dict:
             raise ValueError(
                 "Gateway tts_timeout must be a positive Go duration no greater than 10m"
             )
+    if "groq_stt" in config:
+        groq = config["groq_stt"]
+        if not isinstance(groq, dict) or set(groq) - GROQ_STT_FIELDS:
+            raise ValueError("Gateway groq_stt configuration fields are invalid")
+        if "enabled" in groq and type(groq["enabled"]) is not bool:
+            raise ValueError("Gateway groq_stt.enabled must be boolean")
+        capacity = groq.get("capacity", 2)
+        if type(capacity) is not int or not 1 <= capacity <= 2:
+            raise ValueError("Gateway groq_stt.capacity must be 1 or 2")
+        model = groq.get("model", "whisper-large-v3-turbo")
+        if model not in {"whisper-large-v3", "whisper-large-v3-turbo"}:
+            raise ValueError("Gateway groq_stt.model is unsupported")
+        api_key_env = groq.get("api_key_env", "GROQ_STT_API_KEY")
+        if not isinstance(api_key_env, str) or not re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]{0,127}", api_key_env
+        ):
+            raise ValueError("Gateway groq_stt.api_key_env is invalid")
     return config

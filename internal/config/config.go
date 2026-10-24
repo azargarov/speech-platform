@@ -27,7 +27,15 @@ type Config struct {
 	TTSURL          string         `yaml:"tts_url"`
 	TTSTimeout      string         `yaml:"tts_timeout"`
 	WarmupTimeout   string         `yaml:"warmup_timeout"`
+	GroqSTT         GroqSTT        `yaml:"groq_stt"`
 	TextTransform   *TextTransform `yaml:"text_transform"`
+}
+
+type GroqSTT struct {
+	Enabled   bool   `yaml:"enabled"`
+	Capacity  *int   `yaml:"capacity"`
+	Model     string `yaml:"model"`
+	APIKeyEnv string `yaml:"api_key_env"`
 }
 
 const PublicMaxRequestBytes int64 = 25 * 1024 * 1024
@@ -50,6 +58,16 @@ func Load(path string) (Config, error) {
 	}
 	if c.WarmupTimeout == "" {
 		c.WarmupTimeout = "180s"
+	}
+	if c.GroqSTT.Capacity == nil {
+		capacity := 2
+		c.GroqSTT.Capacity = &capacity
+	}
+	if c.GroqSTT.Model == "" {
+		c.GroqSTT.Model = "whisper-large-v3-turbo"
+	}
+	if c.GroqSTT.APIKeyEnv == "" {
+		c.GroqSTT.APIKeyEnv = "GROQ_STT_API_KEY"
 	}
 	if value, ok := os.LookupEnv("SPEECH_LISTEN_PORT"); ok && value != "" {
 		port, err := strconv.Atoi(value)
@@ -86,6 +104,15 @@ func (c Config) Validate() error {
 	}
 	if c.APIToken != "" && len(c.APIToken) < 32 {
 		return fmt.Errorf("SPEECH_API_TOKEN must contain at least 32 characters when configured")
+	}
+	if c.GroqSTT.Capacity == nil || *c.GroqSTT.Capacity < 1 || *c.GroqSTT.Capacity > 2 {
+		return fmt.Errorf("groq_stt.capacity must be 1 or 2")
+	}
+	if c.GroqSTT.Model != "whisper-large-v3" && c.GroqSTT.Model != "whisper-large-v3-turbo" {
+		return fmt.Errorf("groq_stt.model must be whisper-large-v3 or whisper-large-v3-turbo")
+	}
+	if !envName.MatchString(c.GroqSTT.APIKeyEnv) {
+		return fmt.Errorf("groq_stt.api_key_env is invalid")
 	}
 	sttTimeout, err := time.ParseDuration(c.STTTimeout)
 	if err != nil || sttTimeout <= 0 || sttTimeout > 10*time.Minute {

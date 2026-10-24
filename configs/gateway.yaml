@@ -7,6 +7,13 @@ tts_timeout: 600s
 warmup_timeout: 180s
 max_header_bytes: 1048576
 max_request_bytes: 26214400
+# Optional remote audio transcription. The separate request consent header is
+# required even when this provider and its private credential are configured.
+groq_stt:
+  enabled: false
+  capacity: 2
+  model: whisper-large-v3-turbo
+  api_key_env: GROQ_STT_API_KEY
 read_timeout: 30s
 write_timeout: 610s
 idle_timeout: 60s

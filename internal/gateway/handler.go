@@ -125,6 +125,12 @@ func HandlerWithWorkersAndText(state Readiness, maxBytes int64, stt *STTProxy, t
 }
 
 func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tts *TTSProxy, text http.Handler, timeout time.Duration, warmupRoot context.Context) http.Handler {
+	return HandlerWithWarmupContextAndGroqSTT(state, maxBytes, stt, tts, text, timeout, warmupRoot, nil, false, 2)
+}
+
+// HandlerWithWarmupContextAndGroqSTT adds an explicitly authorized Groq STT
+// path while retaining the existing local-only behavior for existing callers.
+func HandlerWithWarmupContextAndGroqSTT(state Readiness, maxBytes int64, stt *STTProxy, tts *TTSProxy, text http.Handler, timeout time.Duration, warmupRoot context.Context, groq *GroqSTTAdapter, groqEnabled bool, groqCapacity int) http.Handler {
 	mux := http.NewServeMux()
 	warmup := newWarmupCoordinator()
 	warmupSlots := make(chan struct{}, 4)
@@ -134,7 +140,7 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 	if warmupRoot == nil {
 		warmupRoot = context.Background()
 	}
-	sttAdmission := newSTTAdmission(sttRequestQueueCapacity)
+	sttAdmission := newSTTAdmissionWithGroq(sttRequestQueueCapacity, groqCapacity, groqEnabled && groq != nil)
 	ttsAdmission := newSpeechAdmission(ttsRequestQueueCapacity)
 	if warmupRoot.Done() != nil {
 		context.AfterFunc(warmupRoot, func() {
@@ -197,6 +203,11 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 			transport.JSON(w, 415, transport.Error{Code: "unsupported_media_type", Message: "multipart/form-data is required"})
 			return
 		}
+		eligibleProviders, providerErr := selectSTTProviders(r.Header, groqEnabled && groq != nil)
+		if providerErr != nil {
+			transport.JSON(w, providerErr.Status, transport.Error{Code: providerErr.Code, Message: providerErr.Message})
+			return
+		}
 		bodyLimit := requestBodyLimit(r.URL.Path, maxBytes)
 		if r.ContentLength > bodyLimit {
 			transport.JSON(w, 413, transport.Error{Code: "request_too_large", Message: "request size limit exceeded"})
@@ -212,7 +223,7 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 		if speechStopped(w, ctx) {
 			return
 		}
-		admissionLease, full, admissionErr := sttAdmission.acquire(ctx, localWhisperProvider)
+		admissionLease, full, admissionErr := sttAdmission.acquire(ctx, eligibleProviders...)
 		if admissionErr != nil {
 			writeAdmissionError(w, ctx, admissionErr)
 			return
@@ -229,13 +240,13 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 		if speechStopped(w, ctx) {
 			return
 		}
-		body, err := io.ReadAll(r.Body)
+		body, err := readBoundedSTTRequest(r.Body, r.ContentLength, bodyLimit)
 		if err != nil {
 			if speechStopped(w, ctx) {
 				return
 			}
 			var tooLarge *http.MaxBytesError
-			if errors.As(err, &tooLarge) {
+			if errors.Is(err, errSTTRequestTooLarge) || errors.As(err, &tooLarge) {
 				transport.JSON(w, 413, transport.Error{Code: "request_too_large", Message: "request size limit exceeded"})
 				return
 			}
@@ -243,6 +254,51 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 			return
 		}
 		if speechStopped(w, ctx) {
+			return
+		}
+		if admissionLease.provider == groqWhisperProvider {
+			if groq == nil {
+				transport.JSON(w, 503, transport.Error{Code: "provider_unavailable", Message: "selected STT provider is unavailable"})
+				return
+			}
+			if speechStopped(w, ctx) {
+				return
+			}
+			budget := speechBudget(ctx)
+			if budget == "" {
+				transport.JSON(w, 504, transport.Error{Code: "deadline_exceeded", Message: "speech request deadline exceeded"})
+				return
+			}
+			adapterCtx, cancel := context.WithTimeout(ctx, groq.timeout)
+			defer cancel()
+			input, err := parseGroqSTTRequest(body, r.Header.Get("Content-Type"))
+			if err != nil {
+				if speechStopped(w, ctx) {
+					return
+				}
+				writeGroqSTTFailure(w, err)
+				return
+			}
+			body = nil // Drop the original multipart copy before the remote call.
+			responseBody, retry, err := groq.Transcribe(adapterCtx, input)
+			if err != nil {
+				if speechStopped(w, ctx) {
+					return
+				}
+				writeGroqSTTFailure(w, err)
+				return
+			}
+			if speechStopped(w, ctx) {
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Speech-Provider", "groq")
+			if retry != "" {
+				w.Header().Set("Retry-After", retry)
+			}
+			beginDelivery()
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(responseBody)
 			return
 		}
 		if stt == nil {
@@ -286,6 +342,7 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Speech-Provider", "local")
 		w.WriteHeader(response.StatusCode)
 		beginDelivery()
 		_, _ = w.Write(responseBody)

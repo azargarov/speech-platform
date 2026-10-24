@@ -53,7 +53,7 @@ paths:
                   type: string
                   minLength: 1
                   maxLength: 128
-                  description: Optional platform alias; configured default when absent.
+                  description: Optional platform alias for local STT. Groq uses the server-configured model and rejects a non-empty explicit model value.
                 timestamps:
                   type: boolean
                   default: false
@@ -62,13 +62,35 @@ paths:
                   enum:
                   - false
                   default: false
-                  description: Streaming reserved; true is rejected in M01-M04.
+                  description: Streaming is not supported and true is rejected.
             encoding:
               audio:
                 contentType: audio/wav, audio/flac, audio/mpeg, audio/ogg, audio/mp4
+      parameters:
+      - in: header
+        name: X-Allow-Cloud-Audio
+        required: false
+        schema:
+          type: string
+          enum: ["true", "false"]
+          default: "false"
+        description: Per-request cloud-audio consent, independent of text transformation allow_cloud. Groq is never eligible without true.
+      - in: header
+        name: X-STT-Provider
+        required: false
+        schema:
+          type: string
+          enum: [local, groq]
+        description: Pins this request to one provider. groq requires X-Allow-Cloud-Audio true. If omitted, requests stay local-only unless cloud-audio consent is true; then local is preferred and Groq may serve the request when local capacity is occupied. Provider errors are not retried on another provider.
       responses:
         '200':
           description: Success
+          headers:
+            X-Speech-Provider:
+              description: Provider that handled the request (local or groq).
+              schema:
+                type: string
+                enum: [local, groq]
           content:
             application/json:
               schema:
@@ -86,7 +108,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '403': &id003
-          description: Forbidden
+          description: Cloud STT was explicitly selected without per-request cloud-audio consent.
           content:
             application/json:
               schema:
@@ -116,7 +138,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '429': &id008
-          description: Capacity exhausted; Retry-After may be provided
+          description: Gateway queue full or Groq rate limit; Retry-After may be provided
           content:
             application/json:
               schema:
@@ -202,6 +224,12 @@ paths:
         '500': *id009
         '503': *id010
         '504': *id011
+        '502':
+          description: Selected provider returned an invalid or unusable response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /v1/stt/models:
     get:
       operationId: listModels
