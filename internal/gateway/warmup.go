@@ -42,10 +42,11 @@ type warmupCoordinator struct {
 	mu      sync.Mutex
 	flights map[string]*warmupFlight
 	serial  chan struct{}
+	now     func() time.Time
 }
 
 func newWarmupCoordinator() *warmupCoordinator {
-	return &warmupCoordinator{flights: make(map[string]*warmupFlight), serial: make(chan struct{}, 1)}
+	return &warmupCoordinator{flights: make(map[string]*warmupFlight), serial: make(chan struct{}, 1), now: time.Now}
 }
 
 func (c *warmupCoordinator) run(ctx, root context.Context, maxAttempt time.Duration, operation string, fn func(context.Context) warmupResult) warmupResult {
@@ -214,7 +215,10 @@ func serveWarmup(w http.ResponseWriter, r *http.Request, token string, coordinat
 
 	results := make([]warmupResult, 0, len(request.Operations))
 	for _, operation := range request.Operations {
-		if ctx.Err() != nil {
+		// Timer notification can lag its deadline. Do not admit another operation
+		// merely because the request context has not published its error yet.
+		deadline, bounded := ctx.Deadline()
+		if ctx.Err() != nil || bounded && !coordinator.now().Before(deadline) {
 			results = append(results, warmupResult{Operation: operation, Status: "not_attempted", Code: "deadline_exceeded"})
 			continue
 		}

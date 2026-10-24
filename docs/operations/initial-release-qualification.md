@@ -288,3 +288,63 @@ Git history and an export of exactly the staged files, excluding ignored data.
 NOT ESTABLISHED: candidate execution on GitHub, and fresh-checkout installation
 from the resulting candidate commit. These remain release gates. No push, tag,
 publication or deployment is part of this commit task.
+
+## CI warmup deadline correction — 2026-10-24
+
+Status: correction operator-accepted on 2026-10-24; final verification and commit
+authorized. GitHub CI requalification remains pending.
+
+OBSERVED: [run 40080867199](https://github.com/azargarov/speech-platform/actions/runs/40080867199)
+checked out `148f3a36f396f0dc3bdb12b05eb85024011923e8` with Go 1.27.2.
+Gateway, STT CPU/CUDA, TTS CUDA image jobs and secret scanning passed.
+Foundation failed in `TestWarmupDeadlineMarksLaterOperationNotAttempted`:
+STT returned `timed_out/deadline_exceeded`, then TTS returned
+`unavailable/worker_unavailable`. The test configured no TTS proxy, so this
+establishes later operation dispatch, not an actual TTS HTTP/model-loading call.
+The raw foundation log is preserved privately, without private inference data.
+
+INTERPRETATION: two competing timeout notifications made the original 30 ms test
+schedule-dependent. A completed shared-attempt timeout may be observed before
+the caller context publishes its error; the test also incorrectly required an
+in-progress `warming` result at that completion boundary. The production loop
+checked only `ctx.Err()`, which is insufficient when the deadline has elapsed but
+its notification is delayed. With a configured later worker this could admit
+unwanted warmup after the total request deadline.
+
+Correction: check both cancellation and the elapsed absolute request deadline
+before admitting each operation. A coordinator-owned clock defaults to `time.Now`
+and is substituted only in deterministic tests. Shared attempt contexts, ownership,
+serialization, independent caller cancellation and bounded loading semantics are
+unchanged. No API status/schema changes or cloud/routing changes.
+
+The replacement regression advances the admission clock at STT transport
+completion while the real request context remains uncancelled. It checks both
+successful and timed-out STT completion, preserved results and exactly zero TTS
+transport calls after expiration. Both cases failed against the old deadline
+check and passed after correction. A companion test verifies that a worker timeout
+before total deadline exhaustion still permits the next operation.
+
+OBSERVED verification:
+
+- Original wall-clock test, `go test -race ./internal/gateway -run '^TestWarmupDeadlineMarksLaterOperationNotAttempted$' -count=1000`:
+  passed on Go 1.24.0 and with `GOTOOLCHAIN=go1.27.2`; the natural CI schedule was
+  not reproduced locally. This does not negate the controlled regression failure.
+- `go test -race ./internal/gateway -run '^TestWarmup(DeadlineMarksLaterOperationNotAttempted|WorkerTimeoutBeforeTotalDeadlineAllowsLaterOperation)$' -count=1000`:
+  passed on Go 1.24.0 and with `GOTOOLCHAIN=go1.27.2`; no sleeps or live workers.
+- `go test -race ./internal/gateway`: passed on both toolchains, including existing
+  caller cancellation, independent deadlines, shutdown and shared-attempt tests.
+- `make verify PYTHON=.venv/bin/python`: passed, including 555 script tests,
+  89 STT tests, 30 TTS tests, 2 governance tests, Go race tests, schema/config,
+  lint, build and dependency-lock checks.
+- `git diff --check`: passed. The investigation performed no deployment, live
+  inference, staging, commit, push or tag.
+
+NOT ESTABLISHED: corrected candidate execution on GitHub. The operator subsequently
+accepted the correction and authorized commit plus a normal fast-forward push to
+the expected origin/main. Remote URL inspection confirms
+`git@github.com:azargarov/speech-platform.git`, but
+`git ls-remote --exit-code origin refs/heads/main` still fails with
+`Permission denied (publickey)` in this session. No credential changes or alternate
+push route were attempted. Local commit may proceed after verification; push and
+new CI execution remain blocked on SSH authentication. No release tag/publication
+is authorized.

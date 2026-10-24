@@ -483,17 +483,73 @@ func TestWarmupDistinctOperationsRemainSerializedUntilUpstreamReturns(t *testing
 	}
 }
 
+type warmupRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f warmupRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
 func TestWarmupDeadlineMarksLaterOperationNotAttempted(t *testing.T) {
-	entered := make(chan struct{})
-	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(entered); <-r.Context().Done() }))
-	defer worker.Close()
-	stt := NewSTTProxy(worker.URL, "", 2*time.Second)
-	h := HandlerWithWarmupContext(Foundation{}, 1024, stt, nil, nil, 30*time.Millisecond, context.Background())
+	for _, firstStatus := range []string{"ready", "timed_out"} {
+		t.Run(firstStatus, func(t *testing.T) {
+			// Advance only the admission clock after STT returns. The real request
+			// context remains uncancelled, as when its timer notification is late.
+			var expired atomic.Bool
+			coordinator := newWarmupCoordinator()
+			now := time.Now()
+			coordinator.now = func() time.Time {
+				if expired.Load() {
+					return now.Add(3 * time.Hour)
+				}
+				return now
+			}
+			var sttCalls, ttsCalls atomic.Int32
+			stt := NewSTTProxy("http://stt.invalid", "", time.Second)
+			stt.Client.Transport = warmupRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				sttCalls.Add(1)
+				expired.Store(true)
+				status := http.StatusOK
+				if firstStatus == "timed_out" {
+					status = http.StatusGatewayTimeout
+				}
+				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(`{"model_state":"ready"}`)), Header: make(http.Header)}, nil
+			})
+			tts := NewTTSProxy("http://tts.invalid", "", time.Second)
+			tts.Client.Transport = warmupRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				ttsCalls.Add(1)
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"model_state":"loaded","inference_active":false}`)), Header: make(http.Header)}, nil
+			})
+			r := httptest.NewRequest(http.MethodPost, "/v1/models/warmup", strings.NewReader(`{"operations":["stt","tts"]}`))
+			r.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			serveWarmup(w, r, "", coordinator, make(chan struct{}, 4), stt, tts, nil, 2*time.Hour, context.Background())
+			got := decodeWarmup(t, w)
+			if w.Code != http.StatusOK || len(got.Results) != 2 || got.Complete || got.Results[0].Status != firstStatus || got.Results[1].Status != "not_attempted" || got.Results[1].Code != "deadline_exceeded" {
+				t.Fatalf("status=%d result=%+v", w.Code, got)
+			}
+			if r.Context().Err() != nil || sttCalls.Load() != 1 || ttsCalls.Load() != 0 {
+				t.Fatalf("err=%v stt calls=%d tts calls=%d", r.Context().Err(), sttCalls.Load(), ttsCalls.Load())
+			}
+		})
+	}
+}
+
+func TestWarmupWorkerTimeoutBeforeTotalDeadlineAllowsLaterOperation(t *testing.T) {
+	var ttsCalls atomic.Int32
+	stt := NewSTTProxy("http://stt.invalid", "", time.Second)
+	stt.Client.Transport = warmupRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusGatewayTimeout, Body: http.NoBody, Header: make(http.Header)}, nil
+	})
+	tts := NewTTSProxy("http://tts.invalid", "", time.Second)
+	tts.Client.Transport = warmupRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		ttsCalls.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"model_state":"loaded","inference_active":false}`)), Header: make(http.Header)}, nil
+	})
+	h := HandlerWithWarmupContext(Foundation{}, 1024, stt, tts, nil, time.Hour, context.Background())
 	w := postWarmup(h, `{"operations":["stt","tts"]}`, "")
-	<-entered
 	got := decodeWarmup(t, w)
-	if w.Code != http.StatusOK || got.Results[0].Status != "warming" || got.Results[1].Status != "not_attempted" || got.Results[1].Code != "deadline_exceeded" {
-		t.Fatalf("status=%d result=%+v", w.Code, got)
+	if w.Code != http.StatusOK || len(got.Results) != 2 || got.Complete || got.Results[0].Status != "timed_out" || got.Results[1].Status != "ready" || ttsCalls.Load() != 1 {
+		t.Fatalf("status=%d result=%+v tts calls=%d", w.Code, got, ttsCalls.Load())
 	}
 }
 
