@@ -6,12 +6,25 @@ info:
     Gateway translates platform aliases using configuration; internal provider selection
     never leaks into public API. Only gateway may reach worker network. Connection
     close stops response delivery but does not forcibly interrupt active native
-    inference; the Gateway propagates its request timeout in X-Request-Timeout-Ms.
+    inference; the Gateway propagates its remaining request budget in X-Request-Timeout-Ms.
+    Ordinary synthesis checks this deadline before loading and between segments;
+    no later work starts after deadline exhaustion or detected disconnection.
+    Missing timeout headers use the configured request_timeout_seconds default (600).
+    Active native calls may finish after cancellation; this does not permit later segments.
     No STT-to-TTS calls. No runtime downloads.
 paths:
   /internal/v1/speech:
     post:
       operationId: internalTTS
+      parameters:
+        - in: header
+          name: X-Request-Timeout-Ms
+          required: false
+          description: Positive remaining milliseconds, capped by the configured worker request timeout.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 9999999999
       x-maxRequestSizeBytes: 65536
       requestBody:
         required: true
@@ -102,6 +115,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '504':
+          description: Synthesis deadline exceeded; native execution may still require completion.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '503':
           description: Provider not ready
           content:
@@ -125,14 +144,32 @@ paths:
     get:
       responses:
         '200':
-          description: Process alive
+          description: TTS control process is alive; this does not imply model readiness
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [alive]
   /readyz:
     get:
       responses:
         '200':
-          description: Model loaded and able to accept work
+          description: Worker can accept bounded on-demand work, including while the model is unloaded or loading
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [ready]
         '503':
-          description: Loading, failed, draining or M01 provider absent
+          description: Worker is draining or has a known permanent artifact/runtime failure. Repair the reported cause; a later warmup or synthesis retries initialization. Transient resource shortages do not latch readiness.
           content:
             application/json:
               schema:
@@ -171,7 +208,7 @@ paths:
       operationId: modelState
       responses:
         '200':
-          description: Model state and active inference flag
+          description: Model state and active inference flag; failure_category is present only for a known permanent failure
   /internal/v1/voices:
     get:
       operationId: listConfiguredVoices

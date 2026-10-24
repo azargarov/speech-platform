@@ -101,7 +101,7 @@ def _run(args: list[str], remaining: float, *, capture_stderr: bool) -> bytes:
     return result.stderr or b""
 
 
-def process_gently(payload: bytes, config: dict) -> bytes:
+def process_gently(payload: bytes, config: dict, *, deadline=None, check=None) -> bytes:
     """Master a complete PCM16 WAV, retaining bounded duration and silence."""
     max_bytes = config["max_output_audio_bytes"]
     if len(payload) > max_bytes:
@@ -130,7 +130,22 @@ def process_gently(payload: bytes, config: dict) -> bytes:
         )
 
     timeout = config["audio_processing_timeout_seconds"]
-    deadline = time.monotonic() + timeout
+    processing_deadline = time.monotonic() + timeout
+    if deadline is not None:
+        processing_deadline = min(processing_deadline, deadline)
+
+    def remaining():
+        if check is not None:
+            check()
+        budget = processing_deadline - time.monotonic()
+        if budget <= 0:
+            raise AudioProcessingError(
+                "audio_processing_timeout",
+                "audio processing exceeded its time limit",
+                504,
+            )
+        return budget
+
     with tempfile.TemporaryDirectory(prefix="speech-tts-audio-") as temp_dir:
         source = Path(temp_dir) / "source.wav"
         output = Path(temp_dir) / "processed.wav"
@@ -158,9 +173,7 @@ def process_gently(payload: bytes, config: dict) -> bytes:
             "null",
             "-",
         ]
-        analysis = _run(
-            analyze_args, max(0.001, deadline - time.monotonic()), capture_stderr=True
-        )
+        analysis = _run(analyze_args, remaining(), capture_stderr=True)
         measured = _measurements(analysis)
         if measured is None:
             raise AudioProcessingError(
@@ -195,7 +208,7 @@ def process_gently(payload: bytes, config: dict) -> bytes:
             "wav",
             str(output),
         ]
-        _run(output_args, max(0.001, deadline - time.monotonic()), capture_stderr=False)
+        _run(output_args, remaining(), capture_stderr=False)
         try:
             result = output.read_bytes()
             output_frames = pcm16_frames(result)

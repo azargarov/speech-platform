@@ -223,6 +223,8 @@ class AdmissionTests(unittest.TestCase):
         thread.join(1)
         self.assertFalse(thread.is_alive())
         self.assertEqual(captured, [FailureCode.DEADLINE_EXCEEDED])
+        # Caller completion no longer implies execution/cleanup completion.
+        self._wait(lambda: not controller.snapshot()["active"])
         self.assertEqual(controller.snapshot()["retained_bytes"], 0)
 
         blocked = threading.Event()

@@ -5,11 +5,19 @@ from __future__ import annotations
 import argparse
 import json
 import signal
+import select
+import socket
+import time
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from services.tts.config import load_config
-from services.tts.lifecycle import ModelLifecycle, TTSFailure, vox_model_factory
+from services.tts.lifecycle import (
+    ModelLifecycle,
+    SynthesisContext,
+    TTSFailure,
+    vox_model_factory,
+)
 
 
 def handler(config: dict, lifecycle: ModelLifecycle):
@@ -27,11 +35,11 @@ def handler(config: dict, lifecycle: ModelLifecycle):
 
         def reply(self, status, value, content_type="application/json"):
             body = value if isinstance(value, bytes) else json.dumps(value).encode()
-            self.send_response(status)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
             try:
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 pass
@@ -40,9 +48,18 @@ def handler(config: dict, lifecycle: ModelLifecycle):
             if self.path == "/healthz":
                 self.reply(200, {"status": "alive"})
             elif self.path == "/readyz":
+                readiness = lifecycle.readiness()
+                body = (
+                    {"status": "ready"}
+                    if readiness["ready"]
+                    else {
+                        "code": readiness["code"],
+                        "message": readiness["message"],
+                    }
+                )
                 self.reply(
-                    200 if lifecycle.ready() else 503,
-                    {"status": "ready" if lifecycle.ready() else "draining"},
+                    200 if readiness["ready"] else 503,
+                    body,
                 )
             elif self.path == "/internal/v1/state":
                 self.reply(200, lifecycle.state())
@@ -62,7 +79,19 @@ def handler(config: dict, lifecycle: ModelLifecycle):
                     404, {"code": "not_found", "message": "endpoint unavailable"}
                 )
 
+        def disconnected(self):
+            try:
+                readable, _, _ = select.select([self.connection], [], [], 0)
+                return bool(readable) and not self.connection.recv(
+                    1, socket.MSG_PEEK | socket.MSG_DONTWAIT
+                )
+            except BlockingIOError:
+                return False
+            except (OSError, ValueError):
+                return True
+
         def do_POST(self):
+            started = time.monotonic()
             if self.path == "/internal/v1/warmup":
                 if not inference_slot.acquire(blocking=False):
                     self.reply(
@@ -124,8 +153,80 @@ def handler(config: dict, lifecycle: ModelLifecycle):
                     },
                 )
                 return
+            raw_timeout = self.headers.get("X-Request-Timeout-Ms")
+            if raw_timeout is not None and (
+                len(raw_timeout) > 10
+                or not raw_timeout.isascii()
+                or not raw_timeout.isdecimal()
+                or int(raw_timeout) < 1
+            ):
+                self.reply(
+                    400,
+                    {
+                        "code": "invalid_request",
+                        "message": "request timeout is invalid",
+                    },
+                )
+                return
+            maximum = config["request_timeout_seconds"]
+            timeout = (
+                maximum
+                if raw_timeout is None
+                else min(int(raw_timeout) / 1000, maximum)
+            )
+            body_complete = False
+            context = SynthesisContext(
+                started + timeout, lambda: body_complete and self.disconnected()
+            )
             try:
-                body = json.loads(self.rfile.read(size))
+                chunks = []
+                remaining_bytes = size
+                while remaining_bytes:
+                    context.check()
+                    remaining = context.deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TTSFailure(
+                            "deadline_exceeded", "speech request deadline exceeded", 504
+                        )
+                    self.connection.settimeout(
+                        min(config["socket_timeout_seconds"], remaining)
+                    )
+                    chunk = self.rfile.read1(min(remaining_bytes, 65536))
+                    if not chunk:
+                        self.reply(
+                            400,
+                            {
+                                "code": "invalid_request",
+                                "message": "request body is incomplete",
+                            },
+                        )
+                        return
+                    chunks.append(chunk)
+                    remaining_bytes -= len(chunk)
+                body_complete = True
+                context.check()
+                body = json.loads(b"".join(chunks))
+            except TTSFailure as error:
+                self.reply(error.status, {"code": error.code, "message": error.message})
+                return
+            except TimeoutError:
+                self.reply(
+                    504,
+                    {
+                        "code": "deadline_exceeded",
+                        "message": "speech request deadline exceeded",
+                    },
+                )
+                return
+            except OSError:
+                self.reply(
+                    400,
+                    {
+                        "code": "invalid_request",
+                        "message": "request body could not be read",
+                    },
+                )
+                return
             except (json.JSONDecodeError, UnicodeDecodeError):
                 self.reply(
                     400,
@@ -245,8 +346,14 @@ def handler(config: dict, lifecycle: ModelLifecycle):
                 return
             try:
                 audio, content_type = lifecycle.synthesize(
-                    text, language, mode, input_format, audio_processing
+                    text,
+                    language,
+                    mode,
+                    input_format,
+                    audio_processing,
+                    context=context,
                 )
+                context.check()
             except TTSFailure as error:
                 self.reply(error.status, {"code": error.code, "message": error.message})
                 return

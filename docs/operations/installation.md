@@ -11,9 +11,15 @@ installer to deploy the current VoxCPM2 worker.
   Compose plugin >=2.24; operator access to the local Unix Docker daemon.
   Remote DOCKER_HOST/DOCKER_CONTEXT endpoints are rejected; no context is switched
   automatically. Deployment overrides must be in `.env`, not a previous shell.
-- NVIDIA GPU/driver and NVIDIA Container Toolkit for STT/TTS. Host `nvidia-smi`
-  is necessary but insufficient: installation runs a disposable, network-disabled
-  CUDA driver/device probe in each selected worker image before service creation.
+- NVIDIA GPU/compatible driver and NVIDIA Container Toolkit for STT/TTS. Host
+  `nvidia-smi` is necessary but insufficient: installation runs a disposable,
+  network-disabled CUDA driver/device probe in each selected worker image before
+  service creation. A free-VRAM check is an observation, not a reservation or a
+  guarantee that models can coexist. SpeechPlatform does not claim exclusive
+  GPU ownership; Ollama remains shared and is never evicted by the installer.
+  The obsolete Python `require_idle_gpu` helper option is retained only as a
+  compatibility check: false/omitted is accepted, while true fails explicitly
+  because the installer does not inspect process ownership.
 - Python >=3.12 virtualenv dependencies from `requirements-dev.txt`, Go compatible
   with `go.mod` (>=1.24.0), Git,
   network access for uncached image builds (registries, PyPI, GitHub). The Gateway
@@ -71,6 +77,25 @@ validates local image identity, uses `--no-build --pull never` for activation,
 then waits for selected health/readiness. Rerunning converges through Compose.
 For the special prebuilt Gateway path, preserve `SERVICE=gateway NO_BUILD=1` plus
 explicit expected image ID and source revision; see `.env.example`.
+
+## Model lifecycle and request admission
+
+STT starts without loading Faster-Whisper. First transcription or internal
+warmup loads the model; after 60 seconds without active or admitted work it is
+unloaded, and a later request reloads it. TTS also loads on demand and retains
+its configurable 60-second idle unload. Both workers keep process liveness
+(`/healthz`) separate from readiness (`/readyz`); an operational unloaded model
+is ready. TTS readiness becomes unavailable for a known permanent artifact or
+runtime failure, and recovery is retried after repairing the cause and issuing
+new work. Readiness probes do not load models.
+
+Gateway speech queues are independent and FIFO: STT has one active local
+Faster-Whisper request plus three waiting requests; TTS has one active plus one
+waiting request. Waiting counts against each request's deadline, and queued STT
+audio is not buffered. A full queue returns 429; an expired request returns 504.
+Groq STT is not implemented: current public STT is local-only. These request
+limits do not reserve GPU memory or guarantee STT/TTS/Ollama coexistence; use
+sequential warmups and observe available resources on constrained GPUs.
 
 ## Optional local text transformation and Ollama
 

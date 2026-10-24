@@ -27,6 +27,32 @@ class TTSFailure(Exception):
         self.status = status
 
 
+class PermanentModelError(Exception):
+    """A validated, non-resource failure in the configured model artifacts."""
+
+    def __init__(self, category: str, message: str):
+        super().__init__(message)
+        self.category = category
+        self.message = message
+
+
+class SynthesisContext:
+    """One ordinary synthesis budget; checkpoints never interrupt native calls."""
+
+    def __init__(self, deadline, disconnected=lambda: False, clock=None):
+        self.deadline = deadline
+        self.disconnected = disconnected
+        self.clock = clock or time.monotonic
+
+    def check(self):
+        if self.clock() >= self.deadline:
+            raise TTSFailure(
+                "deadline_exceeded", "speech request deadline exceeded", 504
+            )
+        if self.disconnected():
+            raise TTSFailure("request_cancelled", "speech request was cancelled", 504)
+
+
 class ModelLifecycle:
     def __init__(self, config: dict, model_factory: Callable[[], object]):
         self.config = config
@@ -37,7 +63,7 @@ class ModelLifecycle:
         self._active = False
         self._stopping = False
         self._last_used = time.monotonic()
-        self._load_error = False
+        self._permanent_failure: tuple[str, str] | None = None
         self._unloader = threading.Thread(
             target=self._idle_loop, name="tts-idle-unloader", daemon=True
         )
@@ -45,11 +71,28 @@ class ModelLifecycle:
 
     def state(self) -> dict:
         with self._condition:
-            return {"model_state": self._state, "inference_active": self._active}
+            state = {"model_state": self._state, "inference_active": self._active}
+            if self._permanent_failure is not None:
+                state["failure_category"] = self._permanent_failure[0]
+            return state
 
     def ready(self) -> bool:
         with self._condition:
-            return not self._stopping
+            return not self._stopping and self._permanent_failure is None
+
+    def readiness(self) -> dict:
+        """Return sanitized readiness details without initializing the model."""
+        with self._condition:
+            if self._stopping:
+                return {
+                    "ready": False,
+                    "code": "worker_draining",
+                    "message": "TTS worker is shutting down",
+                }
+            if self._permanent_failure is not None:
+                code, message = self._permanent_failure
+                return {"ready": False, "code": code, "message": message}
+            return {"ready": True}
 
     def warmup(self) -> None:
         self._with_model(lambda model: None)
@@ -61,6 +104,8 @@ class ModelLifecycle:
         mode: str,
         input_format: str = "text",
         audio_processing: str = "none",
+        *,
+        context: SynthesisContext | None = None,
     ) -> tuple[bytes, str]:
         if audio_processing not in {"none", "gentle"}:
             raise TTSFailure(
@@ -80,10 +125,15 @@ class ModelLifecycle:
                 "mode must be quality, fast, auto, high_quality, or extra_high_quality",
                 400,
             )
+        if context is not None:
+            context.check()
         steps = mode_timesteps(mode)
         if input_format == "text":
             result = self._with_model(
-                lambda model: self._generate(model, text, language, steps)
+                lambda model: self._generate_segment(
+                    model, text, language, steps, context
+                ),
+                context,
             )
         elif input_format == "ssml":
             try:
@@ -91,7 +141,8 @@ class ModelLifecycle:
             except SSMLValidationError as error:
                 raise TTSFailure("invalid_ssml", str(error), 400) from error
             result = self._with_model(
-                lambda model: self._generate_ssml(model, segments, steps)
+                lambda model: self._generate_ssml(model, segments, steps, context),
+                context,
             )
         else:
             raise TTSFailure(
@@ -99,15 +150,32 @@ class ModelLifecycle:
             )
         if audio_processing == "gentle":
             try:
-                return process_gently(result[0], self.config), result[1]
+                if context is not None:
+                    context.check()
+                    processed = process_gently(
+                        result[0],
+                        self.config,
+                        deadline=context.deadline,
+                        check=context.check,
+                    )
+                    context.check()
+                else:
+                    processed = process_gently(result[0], self.config)
+                return processed, result[1]
             except AudioProcessingError as error:
+                if context is not None:
+                    context.check()
                 raise TTSFailure(error.code, error.message, error.status) from error
         return result
 
-    def _generate_ssml(self, model, segments, steps: int) -> tuple[bytes, str]:
+    def _generate_ssml(
+        self, model, segments, steps: int, context=None
+    ) -> tuple[bytes, str]:
         pieces = []
         composed_frame_bytes = 0
         for segment in segments:
+            if context is not None:
+                context.check()
             if isinstance(segment, SilenceSegment):
                 silence_bytes = segment.duration_ms * 48 * 2
                 if (
@@ -122,9 +190,11 @@ class ModelLifecycle:
                 pieces.append(b"\x00" * silence_bytes)
                 composed_frame_bytes += silence_bytes
                 continue
-            audio, content_type = self._generate(
-                model, segment.text, segment.language, steps
+            audio, content_type = self._generate_segment(
+                model, segment.text, segment.language, steps, context
             )
+            if context is not None:
+                context.check()
             if (
                 content_type != "audio/wav"
                 or len(audio) > self.config["max_output_audio_bytes"]
@@ -158,8 +228,13 @@ class ModelLifecycle:
                 "inference_failed", "generated audio is invalid", 500
             ) from error
 
+    def _generate_segment(self, model, text, language, steps, context):
+        if context is None:
+            return self._generate(model, text, language, steps)
+        return self._generate(model, text, language, steps, context=context)
+
     def _generate(
-        self, model, text: str, language: str, steps: int
+        self, model, text: str, language: str, steps: int, *, context=None
     ) -> tuple[bytes, str]:
         hints = {
             "en": "Speak in English with clear, neutral pronunciation.",
@@ -175,12 +250,16 @@ class ModelLifecycle:
             import torch
 
             with torch.inference_mode():
+                if context is not None:
+                    context.check()
                 audio = model.generate(
                     text=prompt,
                     retry_badcase=False,
                     normalize=False,
                     inference_timesteps=steps,
                 )
+            if context is not None:
+                context.check()
             if audio.size == 0 or not np.isfinite(audio).all():
                 raise TTSFailure("inference_failed", "generated audio is invalid", 500)
             output = io.BytesIO()
@@ -212,20 +291,38 @@ class ModelLifecycle:
                 "inference_failed", "speech generation failed", 500
             ) from error
 
-    def _with_model(self, operation):
+    def _with_model(self, operation, context=None):
         with self._condition:
             while self._active and not self._stopping:
-                self._condition.wait()
+                if context is not None:
+                    context.check()
+                self._condition.wait(
+                    min(0.05, max(0, context.deadline - context.clock()))
+                    if context is not None
+                    else 0.05
+                )
+            if context is not None:
+                context.check()
             if self._stopping:
                 raise TTSFailure("worker_draining", "worker is shutting down", 503)
             self._active = True
             self._state = "loading" if self._model is None else "loaded"
         try:
             if self._model is None:
+                if context is not None:
+                    context.check()
                 try:
                     self._model = self.model_factory()
+                except PermanentModelError as error:
+                    with self._condition:
+                        self._permanent_failure = (error.category, error.message)
+                        self._state = "unloaded"
+                    raise TTSFailure(error.category, error.message, 503) from error
                 except Exception as error:
                     with self._condition:
+                        # A retry that reaches a transient failure proves the
+                        # previous permanent condition is no longer established.
+                        self._permanent_failure = None
                         self._state = "unloaded"
                     if _is_oom(error):
                         raise TTSFailure(
@@ -238,12 +335,18 @@ class ModelLifecycle:
                     ) from error
                 with self._condition:
                     self._state = "loaded"
-                    self._load_error = False
+                    self._permanent_failure = None
+            if context is not None:
+                context.check()
             result = operation(self._model)
+            if context is not None:
+                context.check()
             return result
         except TTSFailure as error:
             if error.code == "resource_exhausted":
                 self._unload_locked()
+            if context is not None:
+                context.check()
             raise
         finally:
             with self._condition:
@@ -344,35 +447,52 @@ def vox_model_factory(config: dict):
             or manifest_path.is_symlink()
             or not manifest_path.is_file()
         ):
-            raise RuntimeError("model artifact is unavailable")
+            raise PermanentModelError(
+                "model_artifact_unavailable",
+                "configured TTS model artifacts are unavailable; verify the model mount and files",
+            )
         import yaml
 
         from services.worker.server import StrictLoader
 
-        manifest = yaml.load(manifest_path.read_text(), Loader=StrictLoader)
-        digest = hashlib.sha256(
-            json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        if (
-            digest != config["model_manifest_sha256"]
-            or manifest.get("model", {}).get("revision") != config["model_revision"]
-        ):
-            raise RuntimeError("model artifact identity mismatch")
-        expected = {
-            entry["path"]: entry["size_bytes"] for entry in manifest.get("files", [])
-        }
-        actual = {}
-        for child in path.iterdir():
-            if child.is_symlink() or not child.is_file():
-                raise RuntimeError("model artifact contains an unsupported entry")
-            actual[child.name] = child.stat().st_size
-        if not expected or actual != expected or "model.safetensors" not in expected:
-            raise RuntimeError("model artifact files do not match the manifest")
+        try:
+            manifest = yaml.load(manifest_path.read_text(), Loader=StrictLoader)
+            digest = hashlib.sha256(
+                json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            if not isinstance(manifest, dict) or (
+                digest != config["model_manifest_sha256"]
+                or manifest.get("model", {}).get("revision") != config["model_revision"]
+            ):
+                raise ValueError("manifest identity mismatch")
+            expected = {
+                entry["path"]: entry["size_bytes"]
+                for entry in manifest.get("files", [])
+            }
+            actual = {}
+            for child in path.iterdir():
+                if child.is_symlink() or not child.is_file():
+                    raise ValueError("unsupported artifact entry")
+                actual[child.name] = child.stat().st_size
+            if (
+                not expected
+                or actual != expected
+                or "model.safetensors" not in expected
+            ):
+                raise ValueError("artifact files do not match the manifest")
+        except Exception as error:
+            raise PermanentModelError(
+                "model_artifact_invalid",
+                "configured TTS model artifacts are invalid; restore the pinned model files and manifest",
+            ) from error
         import torch
         from voxcpm import VoxCPM
 
         if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is required for the configured TTS worker")
+            raise PermanentModelError(
+                "cuda_unavailable",
+                "TTS CUDA is unavailable; verify container GPU access and driver configuration",
+            )
         free_mib, _total_mib = torch.cuda.mem_get_info()
         if free_mib < config["min_free_vram_mib"] * 1024 * 1024:
             raise RuntimeError(

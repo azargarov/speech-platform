@@ -362,15 +362,25 @@ async def _wait_for_result(task, context, request):
     while not task.done():
         if _disconnected(request):
             context.cancel()
+            task.add_done_callback(_consume_task_result)
+            raise ConnectionResetError
         if context.cancelled():
             context.cancel()
+            task.add_done_callback(_consume_task_result)
+            context.check()
         await asyncio.wait(
             {task},
             timeout=min(_remaining(context), 0.05) if _remaining(context) > 0 else 0.05,
         )
-    result = await task
     if _disconnected(request):
+        context.cancel()
+        task.add_done_callback(_consume_task_result)
         raise ConnectionResetError
+    if context.cancelled():
+        task.add_done_callback(_consume_task_result)
+        context.check()
+    result = await task
+    context.check()
     return result
 
 
@@ -383,7 +393,7 @@ def _remaining(context):
 def _consume_task_result(task):
     try:
         task.result()
-    except Exception:
+    except (Exception, asyncio.CancelledError):
         pass
 
 

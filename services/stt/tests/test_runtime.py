@@ -826,6 +826,53 @@ class ApplicationTests(unittest.TestCase):
             # Release the test child only after its fake active owner has exited.
             original_shutdown(0.5)
 
+    def test_active_caller_cancellation_returns_without_releasing_admission_ownership(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_application(directory)
+            app.warmup()
+            entered, release = threading.Event(), threading.Event()
+
+            def blocked(_request, _context):
+                entered.set()
+                release.wait(3)
+                return TranscriptionResult("test", "en")
+
+            app.runner.transcribe = blocked
+            context = OperationContext(time.monotonic() + 5)
+            outcomes = []
+            caller = threading.Thread(
+                target=lambda: _capture(
+                    outcomes,
+                    lambda: app.transcribe(
+                        TranscriptionRequest(b"audio", "audio/wav"), context
+                    ),
+                )
+            )
+            try:
+                caller.start()
+                self.assertTrue(entered.wait(1))
+                context.cancel()
+                caller.join(1)
+                self.assertFalse(caller.is_alive())
+                self.assertEqual(outcomes[0].code, FailureCode.CANCELLED)
+                snapshot = app._admission.snapshot()
+                self.assertTrue(snapshot["active"])
+                self.assertEqual(snapshot["retained_bytes"], len(b"audio"))
+                self.assertFalse(
+                    app._admission.run_if_idle(
+                        lambda: True, lambda: self.fail("active inference unloaded")
+                    )
+                )
+                release.set()
+                self._wait_for(lambda: not app._admission.snapshot()["active"])
+                self.assertEqual(app._admission.snapshot()["retained_bytes"], 0)
+            finally:
+                release.set()
+                caller.join(2)
+                app.close()
+
     def test_supervisor_shutdown_lock_wait_is_bounded(self):
         with tempfile.TemporaryDirectory() as directory:
             app = make_application(directory)

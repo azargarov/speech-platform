@@ -16,9 +16,11 @@ from pathlib import Path
 from services.tts.config import load_config
 from services.tts.lifecycle import (
     ModelLifecycle,
+    PermanentModelError,
     TTSFailure,
     language_instruction,
     mode_timesteps,
+    vox_model_factory,
 )
 from services.tts.audio import InvalidAudio, compose_wav, pcm16_frames
 from services.tts.audio_processing import AudioProcessingError, process_gently
@@ -340,6 +342,86 @@ class AudioCompositionTests(unittest.TestCase):
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_model_factory_marks_missing_and_invalid_artifacts_permanent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            missing = test_config()
+            missing["model_path"] = str(Path(temp) / "missing-model")
+            with self.assertRaises(PermanentModelError) as unavailable:
+                vox_model_factory(missing)()
+            self.assertEqual(
+                unavailable.exception.category, "model_artifact_unavailable"
+            )
+
+            model_path = Path(temp) / "model"
+            model_path.mkdir()
+            (Path(temp) / "manifest.yaml").write_text("model: [invalid\n")
+            invalid = test_config()
+            invalid["model_path"] = str(model_path)
+            with self.assertRaises(PermanentModelError) as malformed:
+                vox_model_factory(invalid)()
+            self.assertEqual(malformed.exception.category, "model_artifact_invalid")
+
+    def test_unloaded_worker_is_ready_without_loading(self):
+        calls = []
+        lifecycle = ModelLifecycle(
+            {"idle_unload_seconds": 0}, lambda: calls.append(True) or object()
+        )
+        try:
+            self.assertTrue(lifecycle.ready())
+            self.assertEqual(lifecycle.readiness(), {"ready": True})
+            self.assertEqual(
+                lifecycle.state(),
+                {"model_state": "unloaded", "inference_active": False},
+            )
+            self.assertEqual(calls, [])
+        finally:
+            lifecycle.stop(1)
+
+    def test_permanent_artifact_failure_marks_unready_and_recovers_after_repair(self):
+        attempts = []
+
+        def factory():
+            attempts.append(True)
+            if len(attempts) == 1:
+                raise PermanentModelError(
+                    "model_artifact_invalid",
+                    "configured TTS model artifacts are invalid; restore the pinned model files and manifest",
+                )
+            return object()
+
+        lifecycle = ModelLifecycle({"idle_unload_seconds": 0}, factory)
+        try:
+            self.assertTrue(lifecycle.ready())
+            with self.assertRaises(TTSFailure) as caught:
+                lifecycle.warmup()
+            self.assertEqual(caught.exception.code, "model_artifact_invalid")
+            self.assertFalse(lifecycle.ready())
+            self.assertEqual(
+                lifecycle.readiness(),
+                {
+                    "ready": False,
+                    "code": "model_artifact_invalid",
+                    "message": "configured TTS model artifacts are invalid; restore the pinned model files and manifest",
+                },
+            )
+            self.assertEqual(
+                lifecycle.state(),
+                {
+                    "model_state": "unloaded",
+                    "inference_active": False,
+                    "failure_category": "model_artifact_invalid",
+                },
+            )
+            # A normal subsequent request retries loading; a corrected artifact
+            # clears the latch without restarting the control process.
+            lifecycle.warmup()
+            self.assertTrue(lifecycle.ready())
+            self.assertEqual(lifecycle.state()["model_state"], "loaded")
+            self.assertNotIn("failure_category", lifecycle.state())
+            self.assertEqual(len(attempts), 2)
+        finally:
+            lifecycle.stop(1)
+
     def test_synthesis_selects_steps_for_each_mode(self):
         lifecycle = ModelLifecycle({"idle_unload_seconds": 0}, object)
         observed = []
@@ -364,7 +446,7 @@ class LifecycleTests(unittest.TestCase):
         lifecycle = ModelLifecycle(ssml_config(idle_unload_seconds=0), object)
         source = wav_segment(b"\x01\x00" * 480)
         calls = []
-        lifecycle._generate = lambda *_args: (source, "audio/wav")
+        lifecycle._generate = lambda *_args, **_kwargs: (source, "audio/wav")
 
         def process(audio, config):
             calls.append((audio, config))
@@ -492,6 +574,7 @@ class LifecycleTests(unittest.TestCase):
         try:
             worker.start()
             self.assertTrue(entered.wait(1))
+            self.assertTrue(lifecycle.ready())
             time.sleep(1.2)
             self.assertEqual(
                 lifecycle.state(), {"model_state": "loaded", "inference_active": True}
@@ -516,6 +599,7 @@ class LifecycleTests(unittest.TestCase):
                 lifecycle.warmup()
             self.assertEqual(caught.exception.code, "model_load_failed")
             self.assertEqual(lifecycle.state()["model_state"], "unloaded")
+            self.assertTrue(lifecycle.ready())
             lifecycle.warmup()
             self.assertEqual(lifecycle.state()["model_state"], "loaded")
             self.assertEqual(len(attempts), 2)
@@ -560,6 +644,9 @@ class WorkerHTTPTests(unittest.TestCase):
             def ready(self):
                 return True
 
+            def readiness(self):
+                return {"ready": True}
+
             def state(self):
                 return {"model_state": "unloaded", "inference_active": False}
 
@@ -567,7 +654,14 @@ class WorkerHTTPTests(unittest.TestCase):
                 self.warmups += 1
 
             def synthesize(
-                self, text, language, mode, input_format="text", audio_processing="none"
+                self,
+                text,
+                language,
+                mode,
+                input_format="text",
+                audio_processing="none",
+                *,
+                context=None,
             ):
                 self.requests.append(
                     (text, language, mode, input_format, audio_processing)
@@ -646,7 +740,7 @@ class WorkerHTTPTests(unittest.TestCase):
             lambda: factory_calls.append(object()) or factory_calls[-1],
         )
         generated = []
-        lifecycle._generate = lambda *_args: (
+        lifecycle._generate = lambda *_args, **_kwargs: (
             generated.append(True) or b"synthetic-wav",
             "audio/wav",
         )
@@ -688,6 +782,56 @@ class WorkerHTTPTests(unittest.TestCase):
             thread.join(1)
             lifecycle.stop(1)
 
+    def test_readiness_exposes_sanitized_permanent_failure_and_liveness(self):
+        def permanently_invalid():
+            try:
+                raise RuntimeError("/private/model-store/secret diagnostic")
+            except RuntimeError as error:
+                raise PermanentModelError(
+                    "model_artifact_invalid",
+                    "configured TTS model artifacts are invalid; restore the pinned model files and manifest",
+                ) from error
+
+        lifecycle = ModelLifecycle({"idle_unload_seconds": 60}, permanently_invalid)
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), handler(test_config(), lifecycle)
+        )
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            import urllib.error
+            import urllib.request
+
+            warmup = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/internal/v1/warmup",
+                data=b"",
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as failure:
+                urllib.request.urlopen(warmup, timeout=2)
+            self.assertEqual(failure.exception.code, 503)
+
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/healthz", timeout=2
+            ) as response:
+                self.assertEqual(response.status, 200)
+
+            with self.assertRaises(urllib.error.HTTPError) as unavailable:
+                urllib.request.urlopen(
+                    f"http://127.0.0.1:{server.server_port}/readyz", timeout=2
+                )
+            self.assertEqual(unavailable.exception.code, 503)
+            body = unavailable.exception.read().decode()
+            self.assertIn("model_artifact_invalid", body)
+            self.assertIn("restore the pinned model files and manifest", body)
+            self.assertNotIn("/private/model-store", body)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(1)
+            lifecycle.stop(1)
+
     def test_http_warmup_reports_simulated_insufficient_vram_safely(self):
         def insufficient_resources():
             raise RuntimeError("CUDA out of memory in synthetic test")
@@ -717,6 +861,7 @@ class WorkerHTTPTests(unittest.TestCase):
                 },
             )
             self.assertEqual(lifecycle.state()["model_state"], "unloaded")
+            self.assertTrue(lifecycle.ready())
         finally:
             server.shutdown()
             server.server_close()
@@ -816,6 +961,10 @@ class WorkerHTTPTests(unittest.TestCase):
         )
         client.sendall(body)
         self.assertTrue(self.lifecycle.started.wait(1))
+        import urllib.request
+
+        with urllib.request.urlopen(self.url + "/readyz", timeout=2) as readiness:
+            self.assertEqual(readiness.status, 200)
         rejected = self._request(b'{"text":"second"}')
         self.assertEqual(rejected.code, 429)
         warmup_rejected = self._warmup()

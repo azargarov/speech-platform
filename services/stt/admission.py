@@ -274,6 +274,7 @@ class AdmissionController:
         context: OperationContext,
         upload_lease: UploadLease | None = None,
     ):
+        context.check()
         size = len(request.audio)
         if size == 0:
             raise SpeechFailure(FailureCode.INVALID_INPUT, "audio must not be empty")
@@ -294,6 +295,7 @@ class AdmissionController:
                 FailureCode.INVALID_INPUT, "upload ownership is invalid"
             )
         with self._condition:
+            context.check()
             if not self._accepting:
                 raise SpeechFailure(
                     FailureCode.NOT_READY, "worker is not accepting requests"
@@ -321,11 +323,19 @@ class AdmissionController:
                 job.state = "queued"
             self._condition.notify_all()
 
-        while not job.done.wait(0.02):
+        while not job.done.wait(
+            min(0.02, max(0.0, context.deadline - time.monotonic()))
+            if context.deadline is not None
+            else 0.02
+        ):
             if context.cancelled():
                 self.cancel(job)
+                # Admission, not the caller, retains ownership until execution
+                # and any uncertain cleanup actually complete.
+                raise _cancel_failure(context)
             elif job.state == "queued" and time.monotonic() >= job.queue_deadline:
                 self.expire(job)
+        context.check()
         if job.failure:
             raise job.failure
         return job.result

@@ -9,7 +9,9 @@ For the supported full-stack and service-scoped workflow, follow [installation p
 ## Requirements
 
 - Linux x86_64 with Docker Engine and the Docker Compose plugin.
-- NVIDIA GPU, driver and NVIDIA Container Toolkit configured for Docker.
+- NVIDIA GPU, compatible driver and NVIDIA Container Toolkit configured for
+  Docker. Host `nvidia-smi` is only a host-side check; selected worker installs
+  also run a disposable CUDA check inside the worker image.
 - Python >=3.12, Go >=1.24.0 and Make for local verification; image/CI compilers are separately pinned.
 - The verified `large-v3-turbo` and VoxCPM2 artifacts in a host model store readable by their workers. The default is `/srv/speech-platform/models`; model files are not downloaded at startup.
 - A host port available for the Gateway (default 8080).
@@ -107,11 +109,28 @@ curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:8080/readyz
 ```
 
-`healthz` confirms Gateway process liveness. `readyz` confirms the configured STT and TTS workers are available; the TTS model may be unloaded because it loads on demand. `make logs` shows the last 100 lines of the configured project logs. Docker Compose restarts crashed services. If configuration or model files are unavailable, inspect the logs and restore the expected configuration or artifact permissions.
+`/healthz` confirms Gateway process liveness. Gateway `/readyz` requires both
+configured speech workers to report ready. Worker `/healthz` is process
+liveness; worker `/readyz` is ability to accept bounded on-demand work. An
+unloaded STT or TTS model remains ready and is loaded on the next inference or
+warmup. TTS reports not-ready for a known permanent artifact/runtime failure;
+after correcting the artifact or configuration, a subsequent warmup or
+synthesis can retry loading and clear the condition. Transient resource
+shortages do not permanently latch TTS readiness. Readiness checks never load a
+model. `make logs` shows recent project logs. Compose restarts crashed services;
+configuration and artifact failures need operator repair.
+
+The Gateway has independent bounded FIFO speech admission: STT allows one
+active request and three waiting requests; TTS allows one active request and
+one waiting request. Queue waiting counts against the request deadline. Waiting
+STT uploads are not buffered until admitted. A full queue returns the existing
+429 response; deadline exhaustion returns 504. Public STT currently dispatches
+only to local Faster-Whisper. Groq STT is not implemented, and queue capacity
+does not reserve GPU memory.
 
 ## TTS API
 
-The M03B candidate accepts text and returns a complete WAV PCM16 file. The
+The public TTS endpoint accepts text and returns a complete WAV PCM16 file. The
 default mode is `quality` (10 steps); `auto` currently selects the same mode.
 `fast` uses 8 steps, `high_quality` 16, and `extra_high_quality` 32; optional `audio_processing: gentle` applies bounded FFmpeg mastering. `language`
 defaults to `auto`, which passes multilingual text without language metadata;
@@ -156,5 +175,13 @@ Cloud inference remains explicitly opt-in. Initial release installation and CI
 qualification is in progress; see [evidence](docs/operations/initial-release-qualification.md).
 Historical VoiceService tags v0.1.0–v0.1.2 remain preserved; v0.2.0 is proposed for
 the first full SpeechPlatform product release, subject to operator approval.
+
+Text transformation is separately configured and disabled by default. When
+enabled, configured local Ollama models remain subject to the existing
+`ordered`, `local_first` or `cloud_first` selection policy, explicit model
+selection, `local_only` and global `allow_cloud` authorization. Cloud use is
+opt-in. A local model being cold or warming does not by itself cause cloud
+fallback. Public warmup prepares STT, TTS or the configured local text model;
+it sends no user content and never invokes a cloud model.
 
 See [PLANS.md](PLANS.md) and the [public API contract](api/openapi/public-v1.yaml).

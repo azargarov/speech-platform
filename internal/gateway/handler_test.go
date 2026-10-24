@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -137,7 +139,7 @@ func TestSTTProxyForwardsBoundedRequestAndRequiresConfiguredToken(t *testing.T) 
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		if r.URL.Path != "/internal/v1/transcriptions" || r.Header.Get("X-Request-Timeout-Ms") != "180000" || r.ContentLength <= 0 {
+		if r.URL.Path != "/internal/v1/transcriptions" || !validSpeechTimeoutHeader(r, 180000) || r.ContentLength <= 0 {
 			t.Errorf("bad forwarded request: %#v", r)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -174,7 +176,7 @@ func TestTTSProxyValidationForwardingAndAudioResponse(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		if r.URL.Path != "/internal/v1/speech" || r.Header.Get("X-Request-Timeout-Ms") != "600000" {
+		if r.URL.Path != "/internal/v1/speech" || !validSpeechTimeoutHeader(r, 600000) {
 			t.Errorf("bad forwarded request: path=%s timeout=%s", r.URL.Path, r.Header.Get("X-Request-Timeout-Ms"))
 		}
 		var body map[string]any
@@ -256,5 +258,238 @@ func TestTTSProxyValidationForwardingAndAudioResponse(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func validSpeechTimeoutHeader(r *http.Request, maximum int64) bool {
+	value, err := strconv.ParseInt(r.Header.Get("X-Request-Timeout-Ms"), 10, 64)
+	return err == nil && value > 0 && value <= maximum
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type slowSpeechWriter struct {
+	header     http.Header
+	status     int
+	entered    chan struct{}
+	release    chan struct{}
+	bodyLength int
+	prefix     []byte
+}
+
+func (w *slowSpeechWriter) Header() http.Header    { return w.header }
+func (w *slowSpeechWriter) WriteHeader(status int) { w.status = status }
+func (w *slowSpeechWriter) Write(body []byte) (int, error) {
+	close(w.entered)
+	<-w.release
+	w.bodyLength = len(body)
+	w.prefix = append(w.prefix, body[:min(len(body), 16)]...)
+	return len(body), nil
+}
+
+type zeroAudioReader struct{ remaining int64 }
+
+func (r *zeroAudioReader) Read(buffer []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	n := min(int64(len(buffer)), r.remaining)
+	clear(buffer[:n])
+	r.remaining -= n
+	return int(n), nil
+}
+
+type cancelReadCloser struct {
+	ctx     context.Context
+	entered chan struct{}
+	closed  chan struct{}
+}
+
+func (b *cancelReadCloser) Read([]byte) (int, error) {
+	close(b.entered)
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (b *cancelReadCloser) Close() error {
+	close(b.closed)
+	return nil
+}
+
+func TestSpeechAdmissionBoundsBufferedResponsesAndRecoversAfterSlowClient(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	proxy := NewTTSProxy("http://worker.invalid", "", time.Minute)
+	proxy.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		call := upstreamCalls.Add(1)
+		body := io.ReadCloser(io.NopCloser(strings.NewReader("RIFF synthetic audio")))
+		contentLength := int64(len("RIFF synthetic audio"))
+		if call == 1 {
+			body = io.NopCloser(&zeroAudioReader{remaining: maxTTSResponseBytes})
+			contentLength = maxTTSResponseBytes
+		}
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Header:        http.Header{"Content-Type": []string{"audio/wav"}},
+			Body:          body,
+			ContentLength: contentLength,
+			Request:       r,
+		}, nil
+	})}
+	h := HandlerWithWorkers(Foundation{}, config.PublicMaxRequestBytes, nil, proxy)
+	request := func() *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/v1/tts/speech", strings.NewReader(`{"text":"synthetic"}`))
+		r.Header.Set("Content-Type", "application/json")
+		return r
+	}
+
+	writer := &slowSpeechWriter{header: make(http.Header), entered: make(chan struct{}), release: make(chan struct{})}
+	releaseWriter := releaseAdmissionSignal(writer.release)
+	defer releaseWriter()
+	firstDone := make(chan struct{})
+	go func() {
+		h.ServeHTTP(writer, request())
+		close(firstDone)
+	}()
+	select {
+	case <-writer.entered:
+	case <-time.After(time.Second):
+		releaseWriter()
+		t.Fatal("first response did not reach the slow client")
+	}
+
+	queuedResults := make(chan *httptest.ResponseRecorder, 2)
+	for range 2 {
+		go func() {
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, request())
+			queuedResults <- response
+		}()
+	}
+	var overload *httptest.ResponseRecorder
+	select {
+	case response := <-queuedResults:
+		if response.Code != http.StatusTooManyRequests {
+			releaseWriter()
+			t.Fatalf("one queued request should fill TTS waiting capacity: status=%d body=%s", response.Code, response.Body.String())
+		}
+		overload = response
+	case <-time.After(time.Second):
+		releaseWriter()
+		t.Fatal("excess request was not rejected at the bounded queue")
+	}
+	if upstreamCalls.Load() != 1 {
+		releaseWriter()
+		t.Fatalf("queued request reached worker before active response delivery: calls=%d", upstreamCalls.Load())
+	}
+	var failure map[string]string
+	if err := json.Unmarshal(overload.Body.Bytes(), &failure); err != nil || failure["code"] != "overloaded" {
+		releaseWriter()
+		t.Fatalf("capacity error=%v decode=%v", failure, err)
+	}
+
+	releaseWriter()
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first response did not finish after client resumed")
+	}
+	select {
+	case response := <-queuedResults:
+		if response.Code != http.StatusOK {
+			t.Fatalf("queued request failed after capacity release: status=%d body=%s", response.Code, response.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queued request did not run after delivery completed")
+	}
+	if writer.status != http.StatusOK || writer.bodyLength != maxTTSResponseBytes || len(writer.prefix) != 16 {
+		t.Fatalf("first response status=%d bytes=%d prefix=%x", writer.status, writer.bodyLength, writer.prefix)
+	}
+
+	third := httptest.NewRecorder()
+	h.ServeHTTP(third, request())
+	if third.Code != http.StatusOK || upstreamCalls.Load() != 3 {
+		t.Fatalf("capacity did not recover: response=%d calls=%d", third.Code, upstreamCalls.Load())
+	}
+}
+
+func TestReadBoundedTTSResponseDoesNotGrowPastLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		body          string
+		contentLength int64
+		want          string
+		tooLarge      bool
+		wantError     bool
+	}{
+		{name: "declared_exact", body: "123456", contentLength: 6, want: "123456"},
+		{name: "declared_oversized", body: "1234567", contentLength: 7, tooLarge: true},
+		{name: "unknown_exact", body: "123456", contentLength: -1, want: "123456"},
+		{name: "unknown_oversized", body: "1234567", contentLength: -1, tooLarge: true},
+		{name: "declared_truncated", body: "123", contentLength: 6, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, tooLarge, err := readBoundedTTSResponse(strings.NewReader(tc.body), tc.contentLength, 6)
+			if tooLarge != tc.tooLarge || (err != nil) != tc.wantError || string(got) != tc.want {
+				t.Fatalf("got=%q tooLarge=%t err=%v", got, tooLarge, err)
+			}
+		})
+	}
+}
+
+func TestSpeechClientCancellationClosesResponseAndReleasesCapacity(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	proxy := NewTTSProxy("http://worker.invalid", "", time.Minute)
+	responseRead := make(chan struct{})
+	responseClosed := make(chan struct{})
+	proxy.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if upstreamCalls.Add(1) == 1 {
+			blockedBody := &cancelReadCloser{ctx: r.Context(), entered: responseRead, closed: responseClosed}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"audio/wav"}},
+				Body:       blockedBody, ContentLength: 1, Request: r,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"audio/wav"}},
+			Body:       io.NopCloser(strings.NewReader("RIFF")), ContentLength: 4, Request: r,
+		}, nil
+	})}
+	h := HandlerWithWorkers(Foundation{}, config.PublicMaxRequestBytes, nil, proxy)
+	cancelled, cancel := context.WithCancel(context.Background())
+	firstRequest := httptest.NewRequest(http.MethodPost, "/v1/tts/speech", strings.NewReader(`{"text":"synthetic"}`)).WithContext(cancelled)
+	firstRequest.Header.Set("Content-Type", "application/json")
+	firstDone := make(chan struct{})
+	go func() {
+		h.ServeHTTP(httptest.NewRecorder(), firstRequest)
+		close(firstDone)
+	}()
+	select {
+	case <-responseRead:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("worker response read did not start")
+	}
+	cancel()
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled speech request did not return")
+	}
+	select {
+	case <-responseClosed:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled worker response body was not closed")
+	}
+
+	secondRequest := httptest.NewRequest(http.MethodPost, "/v1/tts/speech", strings.NewReader(`{"text":"synthetic"}`))
+	secondRequest.Header.Set("Content-Type", "application/json")
+	second := httptest.NewRecorder()
+	h.ServeHTTP(second, secondRequest)
+	if second.Code != http.StatusOK || upstreamCalls.Load() != 2 {
+		t.Fatalf("capacity did not recover after cancellation: status=%d calls=%d body=%s", second.Code, upstreamCalls.Load(), second.Body.String())
 	}
 }

@@ -722,6 +722,12 @@ def checks(
     check_port=True,
     service=None,
 ):
+    # Compatibility only: GPU process ownership is no longer inspected. Reject
+    # requests for the obsolete guard rather than implying it was enforced.
+    if require_idle_gpu:
+        raise OperatorError(
+            "GPU process ownership is not inspected; available VRAM is advisory"
+        )
     if __package__:
         from .installation_preflight import collect
     else:
@@ -740,7 +746,9 @@ def checks(
         raise OperatorError(
             "preflight found blocking failures; resolve FAIL entries and retry"
         )
-    return report.values, report.revision, report.compose_version, report.gpu, 0
+    # Keep the legacy fifth return value for existing Python callers, but make
+    # its unmeasured status explicit instead of fabricating a process count.
+    return report.values, report.revision, report.compose_version, report.gpu, None
 
 
 def verify_service_images(values, revision, services):
@@ -995,7 +1003,7 @@ def main() -> int:
             no_build_identity if no_build_identity is not None else (None, None)
         )
         if args.command in {"preflight", "plan"}:
-            values, revision, compose_version, gpu, active_gpu_processes = checks(
+            values, revision, compose_version, gpu, _gpu_processes = checks(
                 service=args.service
             )
             if args.command == "preflight":
@@ -1017,7 +1025,7 @@ def main() -> int:
             print(
                 f"Plan: project={values.get('COMPOSE_PROJECT_NAME', 'speech-platform')} API={endpoint} model={values['MODEL_STORE']}/{DIGEST}"
             )
-            print(f"Selected GPU compute processes: {active_gpu_processes}")
+            print("GPU process inventory: not inspected; available VRAM is advisory.")
             if verified_image:
                 print(
                     "No-build mode: enabled; local Gateway image "
@@ -1040,7 +1048,7 @@ def main() -> int:
                 print("Local Ollama: disabled; no Ollama network changes are needed.")
             print("No containers were started or changed.")
         elif args.command == "install":
-            values, revision, _version, _gpu, _processes = checks(
+            values, revision, _version, _gpu, _gpu_processes = checks(
                 require_clean=True, service=args.service
             )
             if args.no_build:

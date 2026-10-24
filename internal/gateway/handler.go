@@ -16,9 +16,13 @@ import (
 )
 
 const (
-	maxTTSRequestBytes   int64 = 64 * 1024
-	maxTextRequestBytes  int64 = 64 * 1024
-	maxSSMLDocumentBytes       = 48 * 1024
+	maxTTSRequestBytes      int64 = 64 * 1024
+	maxTextRequestBytes     int64 = 64 * 1024
+	maxSSMLDocumentBytes          = 48 * 1024
+	maxTTSResponseBytes           = 64 * 1024 * 1024
+	maxSTTResponseBytes     int64 = 2 * 1024 * 1024
+	sttRequestQueueCapacity       = 3 // one active request plus three FIFO waiters
+	ttsRequestQueueCapacity       = 1 // one active request plus one FIFO waiter
 )
 
 func requestBodyLimit(path string, configured int64) int64 {
@@ -51,7 +55,7 @@ type TTSProxy struct {
 }
 
 func NewTTSProxy(baseURL, token string, timeout time.Duration) *TTSProxy {
-	return &TTSProxy{BaseURL: strings.TrimRight(baseURL, "/"), Token: token, Timeout: timeout, Client: &http.Client{Timeout: timeout + 5*time.Second}}
+	return &TTSProxy{BaseURL: strings.TrimRight(baseURL, "/"), Token: token, Timeout: timeout, Client: &http.Client{Timeout: timeout}}
 }
 
 func (p *TTSProxy) Ready() bool {
@@ -67,7 +71,7 @@ func (p *TTSProxy) Ready() bool {
 }
 
 func NewSTTProxy(baseURL, token string, timeout time.Duration) *STTProxy {
-	return &STTProxy{BaseURL: strings.TrimRight(baseURL, "/"), Token: token, Timeout: timeout, Client: &http.Client{Timeout: timeout + 5*time.Second}}
+	return &STTProxy{BaseURL: strings.TrimRight(baseURL, "/"), Token: token, Timeout: timeout, Client: &http.Client{Timeout: timeout}}
 }
 
 func (p *STTProxy) Ready() bool {
@@ -130,7 +134,14 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 	if warmupRoot == nil {
 		warmupRoot = context.Background()
 	}
-	requestSlots := make(chan struct{}, 4)
+	sttAdmission := newSTTAdmission(sttRequestQueueCapacity)
+	ttsAdmission := newSpeechAdmission(ttsRequestQueueCapacity)
+	if warmupRoot.Done() != nil {
+		context.AfterFunc(warmupRoot, func() {
+			sttAdmission.shutdown()
+			ttsAdmission.shutdown()
+		})
+	}
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		ready := 0
@@ -186,17 +197,43 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 			transport.JSON(w, 415, transport.Error{Code: "unsupported_media_type", Message: "multipart/form-data is required"})
 			return
 		}
-		select {
-		case requestSlots <- struct{}{}:
-			defer func() { <-requestSlots }()
-		default:
+		bodyLimit := requestBodyLimit(r.URL.Path, maxBytes)
+		if r.ContentLength > bodyLimit {
+			transport.JSON(w, 413, transport.Error{Code: "request_too_large", Message: "request size limit exceeded"})
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
+		timeout := time.Duration(0)
+		if stt != nil {
+			timeout = stt.Timeout
+		}
+		ctx, finish, beginDelivery := speechContext(w, r, timeout)
+		defer finish()
+		if speechStopped(w, ctx) {
+			return
+		}
+		admissionLease, full, admissionErr := sttAdmission.acquire(ctx, localWhisperProvider)
+		if admissionErr != nil {
+			writeAdmissionError(w, ctx, admissionErr)
+			return
+		}
+		if full {
+			if speechStopped(w, ctx) {
+				return
+			}
 			w.Header().Set("Retry-After", "2")
 			transport.JSON(w, 429, transport.Error{Code: "overloaded", Message: "Gateway request capacity is full"})
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, requestBodyLimit(r.URL.Path, maxBytes))
+		defer admissionLease.Release()
+		if speechStopped(w, ctx) {
+			return
+		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
+			if speechStopped(w, ctx) {
+				return
+			}
 			var tooLarge *http.MaxBytesError
 			if errors.As(err, &tooLarge) {
 				transport.JSON(w, 413, transport.Error{Code: "request_too_large", Message: "request size limit exceeded"})
@@ -205,30 +242,52 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 			transport.JSON(w, 400, transport.Error{Code: "invalid_request_body", Message: "request body could not be read"})
 			return
 		}
+		if speechStopped(w, ctx) {
+			return
+		}
 		if stt == nil {
 			transport.JSON(w, 503, transport.Error{Code: "not_ready", Message: "STT worker is unavailable"})
 			return
 		}
-		upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost, stt.BaseURL+"/internal/v1/transcriptions", bytes.NewReader(body))
+		if speechStopped(w, ctx) {
+			return
+		}
+		budget := speechBudget(ctx)
+		if budget == "" {
+			transport.JSON(w, 504, transport.Error{Code: "deadline_exceeded", Message: "speech request deadline exceeded"})
+			return
+		}
+		upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, stt.BaseURL+"/internal/v1/transcriptions", bytes.NewReader(body))
 		if err != nil {
 			transport.JSON(w, 400, transport.Error{Code: "invalid_request", Message: "request could not be forwarded"})
 			return
 		}
 		upstream.Header.Set("Content-Type", r.Header.Get("Content-Type"))
-		upstream.Header.Set("X-Request-Timeout-Ms", fmt.Sprint(stt.Timeout.Milliseconds()))
+		upstream.Header.Set("X-Request-Timeout-Ms", budget)
+		if speechStopped(w, ctx) {
+			return
+		}
 		response, err := stt.Client.Do(upstream)
 		if err != nil {
-			transport.JSON(w, 503, transport.Error{Code: "worker_unavailable", Message: "STT worker could not complete the request"})
+			speechWorkerFailure(w, ctx, err)
 			return
 		}
 		defer response.Body.Close()
-		responseBody, err := io.ReadAll(io.LimitReader(response.Body, 2*1024*1024+1))
-		if err != nil || len(responseBody) > 2*1024*1024 {
+		responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxSTTResponseBytes+1))
+		if speechStopped(w, ctx) {
+			return
+		}
+		if speechTimedOut(ctx, err) {
+			speechWorkerFailure(w, ctx, err)
+			return
+		}
+		if err != nil || int64(len(responseBody)) > maxSTTResponseBytes {
 			transport.JSON(w, 502, transport.Error{Code: "invalid_worker_response", Message: "STT worker returned an invalid response"})
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(response.StatusCode)
+		beginDelivery()
 		_, _ = w.Write(responseBody)
 	})
 	mux.HandleFunc("/v1/tts/speech", func(w http.ResponseWriter, r *http.Request) {
@@ -244,23 +303,52 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 			transport.JSON(w, 415, transport.Error{Code: "unsupported_media_type", Message: "application/json is required"})
 			return
 		}
-		select {
-		case requestSlots <- struct{}{}:
-			defer func() { <-requestSlots }()
-		default:
+		bodyLimit := requestBodyLimit(r.URL.Path, maxBytes)
+		if r.ContentLength > bodyLimit {
+			transport.JSON(w, 413, transport.Error{Code: "request_too_large", Message: "request size limit exceeded"})
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
+		timeout := time.Duration(0)
+		if tts != nil {
+			timeout = tts.Timeout
+		}
+		ctx, finish, beginDelivery := speechContext(w, r, timeout)
+		defer finish()
+		if speechStopped(w, ctx) {
+			return
+		}
+		admissionLease, full, admissionErr := ttsAdmission.acquire(ctx, defaultSpeechProvider)
+		if admissionErr != nil {
+			writeAdmissionError(w, ctx, admissionErr)
+			return
+		}
+		if full {
+			if speechStopped(w, ctx) {
+				return
+			}
 			w.Header().Set("Retry-After", "2")
 			transport.JSON(w, 429, transport.Error{Code: "overloaded", Message: "Gateway request capacity is full"})
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, requestBodyLimit(r.URL.Path, maxBytes))
+		defer admissionLease.Release()
+		if speechStopped(w, ctx) {
+			return
+		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
+			if speechStopped(w, ctx) {
+				return
+			}
 			var tooLarge *http.MaxBytesError
 			if errors.As(err, &tooLarge) {
 				transport.JSON(w, 413, transport.Error{Code: "request_too_large", Message: "request size limit exceeded"})
 			} else {
 				transport.JSON(w, 400, transport.Error{Code: "invalid_request_body", Message: "request body could not be read"})
 			}
+			return
+		}
+		if speechStopped(w, ctx) {
 			return
 		}
 		var request struct {
@@ -360,22 +448,39 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 			transport.JSON(w, 400, transport.Error{Code: "invalid_request", Message: "request could not be forwarded"})
 			return
 		}
-		upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost, tts.BaseURL+"/internal/v1/speech", bytes.NewReader(encoded))
+		if speechStopped(w, ctx) {
+			return
+		}
+		budget := speechBudget(ctx)
+		if budget == "" {
+			transport.JSON(w, 504, transport.Error{Code: "deadline_exceeded", Message: "speech request deadline exceeded"})
+			return
+		}
+		upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, tts.BaseURL+"/internal/v1/speech", bytes.NewReader(encoded))
 		if err != nil {
 			transport.JSON(w, 400, transport.Error{Code: "invalid_request", Message: "request could not be forwarded"})
 			return
 		}
 		upstream.Header.Set("Content-Type", "application/json")
-		upstream.Header.Set("X-Request-Timeout-Ms", fmt.Sprint(tts.Timeout.Milliseconds()))
+		upstream.Header.Set("X-Request-Timeout-Ms", budget)
+		if speechStopped(w, ctx) {
+			return
+		}
 		response, err := tts.Client.Do(upstream)
 		if err != nil {
-			transport.JSON(w, 503, transport.Error{Code: "worker_unavailable", Message: "TTS worker could not complete the request"})
+			speechWorkerFailure(w, ctx, err)
 			return
 		}
 		defer response.Body.Close()
-		maxAudio := 64 * 1024 * 1024
-		responseBody, err := io.ReadAll(io.LimitReader(response.Body, int64(maxAudio+1)))
-		if err != nil || len(responseBody) > maxAudio {
+		responseBody, tooLarge, err := readBoundedTTSResponse(response.Body, response.ContentLength, maxTTSResponseBytes)
+		if speechStopped(w, ctx) {
+			return
+		}
+		if speechTimedOut(ctx, err) {
+			speechWorkerFailure(w, ctx, err)
+			return
+		}
+		if err != nil || tooLarge {
 			transport.JSON(w, 502, transport.Error{Code: "invalid_worker_response", Message: "TTS worker returned an invalid response"})
 			return
 		}
@@ -386,6 +491,7 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 		}
 		w.Header().Set("Content-Type", contentType)
 		w.WriteHeader(response.StatusCode)
+		beginDelivery()
 		_, _ = w.Write(responseBody)
 	})
 	mux.HandleFunc("GET /v1/tts/voices", func(w http.ResponseWriter, r *http.Request) {
@@ -427,6 +533,42 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 		}
 		mux.ServeHTTP(w, r)
 	})
+}
+
+func writeAdmissionError(w http.ResponseWriter, ctx context.Context, err error) {
+	if speechStopped(w, ctx) {
+		return
+	}
+	if errors.Is(err, ErrAdmissionClosed) {
+		transport.JSON(w, http.StatusServiceUnavailable, transport.Error{Code: "not_ready", Message: "Gateway is shutting down"})
+		return
+	}
+	transport.JSON(w, http.StatusServiceUnavailable, transport.Error{Code: "worker_unavailable", Message: "no eligible speech provider is available"})
+}
+
+// readBoundedTTSResponse avoids io.ReadAll growth overshooting the configured
+// audio ceiling. Workers send Content-Length; unknown-length responses use one
+// fixed max+1 buffer so chunked or malformed workers remain bounded too.
+func readBoundedTTSResponse(body io.Reader, contentLength, maxBytes int64) ([]byte, bool, error) {
+	if contentLength > maxBytes {
+		return nil, true, nil
+	}
+	if contentLength >= 0 {
+		buffer := make([]byte, int(contentLength))
+		if _, err := io.ReadFull(body, buffer); err != nil {
+			return nil, false, err
+		}
+		return buffer, false, nil
+	}
+	buffer := make([]byte, int(maxBytes)+1)
+	n, err := io.ReadFull(body, buffer)
+	if int64(n) > maxBytes {
+		return nil, true, nil
+	}
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, false, err
+	}
+	return buffer[:n], false, nil
 }
 
 func validBearer(header, token string) bool {

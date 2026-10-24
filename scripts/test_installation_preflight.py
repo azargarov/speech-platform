@@ -283,7 +283,7 @@ class ServiceScopeTests(unittest.TestCase):
                     patch.object(
                         product,
                         "checks",
-                        return_value=(values, "a" * 40, "compose", "gpu", 0),
+                        return_value=(values, "a" * 40, "compose", "gpu", None),
                     ),
                     patch.object(
                         product,
@@ -336,6 +336,35 @@ class ServiceScopeTests(unittest.TestCase):
 
 
 class PreflightCLITests(unittest.TestCase):
+    def test_removed_gpu_ownership_guard_fails_instead_of_claiming_enforcement(self):
+        with self.assertRaisesRegex(
+            product.OperatorError, "process ownership is not inspected"
+        ):
+            product.checks(require_idle_gpu=True)
+
+    def test_plan_does_not_claim_gpu_process_count(self):
+        values = {
+            "SPEECH_BIND_IP": "127.0.0.1",
+            "SPEECH_PORT": "8080",
+            "MODEL_STORE": "/models",
+        }
+        output = io.StringIO()
+        with (
+            patch("sys.argv", ["product", "plan", "--service", "stt"]),
+            patch.object(product, "load_env", return_value=values),
+            patch.object(
+                product,
+                "checks",
+                return_value=(values, "a" * 40, "compose", "GPU 0", None),
+            ),
+            patch.object(product, "gateway_uses_local_ollama", return_value=False),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(product.main(), 0)
+        self.assertIn("GPU process inventory: not inspected", output.getvalue())
+        self.assertNotIn("Selected GPU compute processes: 0", output.getvalue())
+        self.assertIn("No containers were started or changed.", output.getvalue())
+
     def test_blocked_preflight_returns_nonzero_and_ends_with_readiness(self):
         r = preflight.Report()
         r.add("Host", "FAIL", "Configuration", "Copy .env.example and chmod 600 .env.")
@@ -496,8 +525,8 @@ class InstallDriftTests(unittest.TestCase):
     def test_source_change_during_build_blocks_activation(self):
         values = {"SPEECH_BIND_IP": "127.0.0.1", "SPEECH_PORT": "8080"}
         observations = [
-            (values, "a" * 40, "compose", "gpu", 0),
-            (values, "b" * 40, "compose", "gpu", 0),
+            (values, "a" * 40, "compose", "gpu", None),
+            (values, "b" * 40, "compose", "gpu", None),
         ]
         with (
             patch("sys.argv", ["product", "install", "--service", "tts"]),

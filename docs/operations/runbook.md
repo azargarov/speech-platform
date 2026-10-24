@@ -1,14 +1,52 @@
 # Operations
 
-Use the repository README commands and dedicated speech-platform Compose project. Do not use host-wide prune, network changes or restart unrelated services. All deployments remain operator actions; development verification never starts Compose services.
+Use the installation guide and the dedicated root Compose project. Do not use
+host-wide prune, restart unrelated services, or remove persistent model data.
+The current Gateway, STT and TTS services are inference-capable; historical
+M01/M02 milestone records retain their original skeleton descriptions as
+historical evidence, not as current runtime instructions.
 
-Override SPEECH_BIND_IP, SPEECH_PORT, SPEECH_LISTEN_PORT, GATEWAY_MEMORY, GATEWAY_CPUS, GATEWAY_PIDS, STT_MEMORY, STT_CPUS, STT_PIDS, TTS_MEMORY, TTS_CPUS and TTS_PIDS in the environment or a private Compose env file. `SPEECH_LISTEN_PORT` overrides the Gateway YAML port for both the process and Compose container target; `make compose-check` rejects a mismatch between the YAML default, rendered process environment and published target. `SPEECH_PORT` controls only the host port. Gateway request-size and header/time limits are enforced by the Go server. Worker socket timeouts apply to socket inactivity; `poll_interval_seconds` bounds how long the process waits for its next request before observing a stop signal. Worker request-size limits, model paths and active-inference drain deadlines are deferred until inference handlers are introduced in M02/M03. `make verify` checks the currently rendered Compose configuration and active environment overrides. Readiness failure is expected in M01.
+Gateway `/healthz` reports process liveness. Gateway `/readyz` requires its
+configured STT and TTS workers to report ready. Worker `/healthz` reports
+process liveness, while `/readyz` reports ability to accept bounded on-demand
+work. An unloaded STT or TTS model is an operational ready state. STT loads
+Faster-Whisper on first request or internal warmup and unloads after its
+configured idle period (60 seconds by default); TTS uses its existing lazy
+loading and configurable 60-second idle unload. TTS readiness is false after a
+known permanent artifact/runtime failure; repair the cause and retry through
+warmup or synthesis. Readiness probes do not initialize models.
 
-No audio is written by skeletons. Inference providers must use bounded in-memory buffers where practical; future temporary files require private directories, restrictive permissions, deterministic cleanup on success/error/cancellation, and tmpfs mounts sized by configuration. No host audio mount is present. Runtime network downloads are prohibited; build/provisioning network access is separate.
+Gateway speech admission is bounded and independent: STT is one active local
+request plus three FIFO waiters; TTS is one active request plus one waiter.
+Queue time counts against the request deadline. Queued STT uploads are not
+buffered. Full queues return 429, and request deadline exhaustion returns 504.
+Current public STT is local-only; Groq STT is not implemented. Text
+transformation retains its configured provider ordering, explicit model,
+`local_only`, and `allow_cloud` rules. Cloud remains opt-in and a cold or
+warming local model does not by itself trigger cloud fallback.
 
-Stop via Compose down to signal processes. Go drains with its configured timeout. Python closes its listener after the configured polling interval (0.5 seconds in sample configs); active worker-request draining is deferred to M02/M03. Authentication configuration and enforcement are M04. Do not treat the reserved OpenAPI bearer scheme as enforced authentication.
+GPU preflight validates the selected device/runtime and observes free VRAM
+headroom. The value can change immediately and reserves no memory. SpeechPlatform
+does not have exclusive GPU ownership, does not guarantee arbitrary STT/TTS/
+Ollama model coexistence, and never evicts a shared Ollama model. Observe
+resource use and qualify the specific workload; preserve bounded worker
+admission and cleanup behavior.
 
-GET /metrics exposes a Prometheus readiness gauge. Inspect structured startup logs and health manually; do not log request bodies. GPU sizing and model cache mounts belong to inference milestones.
+Normal shutdown sends SIGTERM through Compose. Gateway cancels its root context,
+closes admission to new/queued speech work, then calls `http.Server.Shutdown`
+with its configured deadline. Go's server shutdown does not forcibly cancel
+active request contexts; active inference or response delivery may continue
+until its request deadline or completion. If the shutdown deadline expires,
+the process can be terminated by its supervisor while worker-side native
+cleanup remains uncertain. Do not interpret a timeout as proof that CUDA
+resources were released. Use the service-scoped install/status/logs/stop/remove
+commands in the installation guide; removal preserves volumes, images and
+external Ollama resources.
+
+`/metrics` exposes readiness and text-transformation counters. Inspect sanitized
+logs and health manually; request bodies, audio and transcripts must not be
+logged. Runtime model downloads are disabled; provisioning is a separate
+operator action.
 
 ## GHCR image publication
 
@@ -27,10 +65,12 @@ Publication defaults STT to CUDA; use `make publish SERVICE=stt VARIANT=cpu
 VERSION=vX.Y.Z` only for an explicitly requested CPU publication. The variant
 is part of the repository name, not inferred from a mutable tag.
 
-Published repositories are `ghcr.io/azargarov/voiceservice-gateway`,
-`voiceservice-stt-cpu`, `voiceservice-stt-cuda`, and
-`voiceservice-tts-health-only`. The TTS image remains health-only. Each
-successful publish writes minimal metadata to `dist/release-metadata/`; retain
+Historical published repositories include
+`ghcr.io/azargarov/voiceservice-gateway`, `voiceservice-stt-cpu`,
+`voiceservice-stt-cuda`, and `voiceservice-tts-health-only`. The last name is a
+historical health-only artifact and is not the current root-Compose VoxCPM2
+worker. Each successful publish writes minimal metadata to
+`dist/release-metadata/`; retain
 that record with the actual `repository@digest` reference. Metadata includes
 service, runtime variant and applicable dependency-lock SHA-256. The publisher
 pulls that exact digest to verify `linux/amd64`, source revision, service,

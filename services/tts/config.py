@@ -12,11 +12,14 @@ from services.worker.server import StrictLoader, valid_host
 
 def load_config(path: str | Path) -> dict:
     data = yaml.load(Path(path).read_text(), Loader=StrictLoader)
+    if isinstance(data, dict):
+        data.setdefault("request_timeout_seconds", 600)
     fields = {
         "kind",
         "listen_host",
         "listen_port",
         "socket_timeout_seconds",
+        "request_timeout_seconds",
         "audio_processing_timeout_seconds",
         "poll_interval_seconds",
         "model_path",
@@ -49,6 +52,7 @@ def load_config(path: str | Path) -> dict:
     for name, low, high in (
         ("listen_port", 1, 65535),
         ("socket_timeout_seconds", 1, 86400),
+        ("request_timeout_seconds", 1, 86400),
         ("audio_processing_timeout_seconds", 1, 60),
         ("max_text_characters", 1, 10000),
         ("max_request_bytes", 1, 26214400),

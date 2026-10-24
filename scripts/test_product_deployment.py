@@ -334,7 +334,7 @@ class ProductDeploymentTests(unittest.TestCase):
             patch.object(
                 product_deployment,
                 "checks",
-                return_value=(values, self.REVISION, "compose", "gpu", 0),
+                return_value=(values, self.REVISION, "compose", "gpu", None),
             ),
             patch.object(
                 product_deployment,
@@ -394,7 +394,7 @@ class ProductDeploymentTests(unittest.TestCase):
             patch.object(
                 product_deployment,
                 "checks",
-                return_value=(values, self.REVISION, "compose", "gpu", 0),
+                return_value=(values, self.REVISION, "compose", "gpu", None),
             ) as checks,
             patch.object(
                 product_deployment,
@@ -464,7 +464,7 @@ class ProductDeploymentTests(unittest.TestCase):
             patch.object(
                 product_deployment,
                 "checks",
-                return_value=(values, self.REVISION, "compose", "gpu", 0),
+                return_value=(values, self.REVISION, "compose", "gpu", None),
             ),
             patch.object(product_deployment, "require_existing_workers_healthy"),
             patch.object(
@@ -516,7 +516,7 @@ class ProductDeploymentTests(unittest.TestCase):
                 patch.object(
                     product_deployment,
                     "checks",
-                    return_value=(values, "revision", "compose", "gpu", 0),
+                    return_value=(values, "revision", "compose", "gpu", None),
                 ),
                 patch.object(product_deployment, "load_env", return_value=values),
                 patch.object(
