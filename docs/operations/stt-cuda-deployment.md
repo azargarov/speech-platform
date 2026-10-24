@@ -1,3 +1,5 @@
+> Historical M01 deployment evidence: Make plan/install examples below now correspond to `legacy-plan`/`legacy-install`. For current STT/TTS/Gateway installation, use [the canonical product workflow](installation.md). Do not deploy inference TTS through the health-only foundation profile.
+
 # Persistent CUDA STT deployment profile — C.6A
 
 Status: **regular production profile not ready**. This C.6A profile and Compose policy remain design/offline validated; target image-store evidence is now present and passes the existing offline identity validator, but no regular production profile has been prepared. The separate M01E experimental deployment has since passed its bounded real-host acceptance; that does not constitute production-profile acceptance. See [M01E verification](../milestones/M01E/verification.md).

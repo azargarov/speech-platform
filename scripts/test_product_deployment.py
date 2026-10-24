@@ -424,6 +424,7 @@ class ProductDeploymentTests(unittest.TestCase):
                 "wait_ready",
                 side_effect=lambda *_args: events.append(("ready", None)),
             ),
+            patch.object(product_deployment, "verify_running_images"),
             patch("builtins.print"),
         ):
             self.assertEqual(product_deployment.main(), 0)
@@ -478,12 +479,17 @@ class ProductDeploymentTests(unittest.TestCase):
                 **_kwargs: compose_calls.append(args) or SimpleNamespace(stdout=""),
             ),
             patch.object(product_deployment, "wait_ready"),
+            patch.object(product_deployment, "verify_service_images"),
+            patch.object(product_deployment, "gpu_check"),
+            patch.object(product_deployment, "verify_running_images"),
             patch("builtins.print"),
         ):
             self.assertEqual(product_deployment.main(), 0)
         self.assertIn(("build", "gateway"), compose_calls)
         up = next(args for args in compose_calls if args[0] == "up")
-        self.assertEqual(up, ("up", "-d", "--no-deps", "gateway"))
+        self.assertEqual(
+            up, ("up", "-d", "--no-build", "--pull", "never", "--no-deps", "gateway")
+        )
 
     def test_plan_reports_local_ollama_requirement_from_selected_config(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -780,6 +786,15 @@ class ProductDeploymentTests(unittest.TestCase):
         ]
         self.assertEqual(
             product_deployment.parse_compose_readiness(json.dumps(services)), services
+        )
+
+    def test_single_selected_service_json_object_is_accepted(self):
+        body = json.dumps({"Service": "tts", "State": "running", "Health": "healthy"})
+        self.assertEqual(
+            product_deployment.parse_compose_readiness(body, expected={"tts"})[0][
+                "Service"
+            ],
+            "tts",
         )
 
     def test_compose_readiness_accepts_newline_delimited_json_objects(self):

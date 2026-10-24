@@ -62,7 +62,7 @@ class PublishImageValidation(unittest.TestCase):
         )
         self.assertEqual(
             image_identity("tts", "cuda"),
-            ("voiceservice-tts-health-only", "tts-health-only", "health-only", None),
+            ("voiceservice-tts-cuda", "tts-worker", "cuda", "tts-lock-sha256"),
         )
 
     def test_cuda_lock_digest_matches_the_locked_file(self):
@@ -88,9 +88,15 @@ class PublishImageValidation(unittest.TestCase):
         release = Path(".github/workflows/release.yaml").read_text()
         self.assertIn("$(strip $(VARIANT)),cpu", makefile)
         self.assertIn("$(strip $(VARIANT)),cuda", makefile)
-        self.assertIn("make image VARIANT=cuda", verify)
-        self.assertIn("make image VARIANT=cuda", release)
-        self.assertIn('make publish VERSION="$GITHUB_REF_NAME" VARIANT=cuda', release)
+        self.assertIn(
+            "make image SERVICE=${{ matrix.service }} VARIANT=${{ matrix.variant }}",
+            verify,
+        )
+        self.assertIn("service: [gateway, stt, tts]", release)
+        self.assertIn(
+            'make publish SERVICE=${{ matrix.service }} VERSION="$GITHUB_REF_NAME" VARIANT=cuda',
+            release,
+        )
 
     def test_dirty_worktree_is_rejected_before_revision_resolution(self):
         with patch("publish_images.command", return_value=" M Makefile") as run_command:
@@ -116,12 +122,12 @@ class PublishImagePipelineRegression(unittest.TestCase):
     local_refs = {
         "gateway": "speech-platform-gateway:local",
         "stt": "speech-platform-stt-cuda:local",
-        "tts": "speech-platform-tts-health-only:local",
+        "tts": "speech-platform-tts:local",
     }
     identities = {
         "gateway": ("gateway", "foundation"),
         "stt": ("stt-worker", "cuda"),
-        "tts": ("tts-health-only", "health-only"),
+        "tts": ("tts-worker", "cuda"),
     }
 
     def details(self, service, *, wrong_label=None):
@@ -136,6 +142,10 @@ class PublishImagePipelineRegression(unittest.TestCase):
             labels["com.speech-platform.cuda-lock-sha256"] = (
                 publish_images.dependency_lock_digest("cuda")
             )
+        if service == "tts":
+            labels["com.speech-platform.tts-lock-sha256"] = (
+                publish_images.dependency_lock_digest("tts")
+            )
         if wrong_label and service == "stt":
             labels[wrong_label] = "incorrect"
         return json.dumps(
@@ -147,6 +157,8 @@ class PublishImagePipelineRegression(unittest.TestCase):
 
         def fake_command(args, *, capture=False, env=None):
             calls.append(args)
+            if args[:2] == ["git", "rev-parse"]:
+                return self.revision
             if args[:2] == ["docker", "compose"]:
                 # Simulate a fresh Docker daemon: Compose config is available,
                 # but no containers have been created.
@@ -224,7 +236,7 @@ class PublishImagePipelineRegression(unittest.TestCase):
             {
                 "ghcr.io/azargarov/voiceservice-gateway:v0.1.2",
                 "ghcr.io/azargarov/voiceservice-stt-cuda:v0.1.2",
-                "ghcr.io/azargarov/voiceservice-tts-health-only:v0.1.2",
+                "ghcr.io/azargarov/voiceservice-tts-cuda:v0.1.2",
             },
         )
         self.assertEqual(len(pushes), 3)
@@ -304,3 +316,19 @@ class PublishImagePipelineRegression(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReleaseTagProvenanceTests(unittest.TestCase):
+    def test_mismatched_release_tag_blocks_before_build_or_registry_write(self):
+        with (
+            patch.object(
+                publish_images, "docker_auth_is_configured", return_value=True
+            ),
+            patch.object(publish_images, "current_revision", return_value="a" * 40),
+            patch.object(publish_images, "command", return_value="b" * 40) as command,
+            tempfile.TemporaryDirectory() as temp,
+        ):
+            with self.assertRaisesRegex(PublishError, "release tag"):
+                publish_images.publish("v0.2.0", ["tts"], "cuda", Path(temp))
+        self.assertEqual(len(command.call_args_list), 1)
+        self.assertEqual(command.call_args.args[0][0], "git")

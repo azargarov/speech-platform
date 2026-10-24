@@ -24,6 +24,7 @@ LABEL org.opencontainers.image.revision=${SOURCE_REVISION} \
       com.speech-platform.service-role="tts-worker" \
       com.speech-platform.service="tts" \
       com.speech-platform.runtime-variant="cuda" \
+      com.speech-platform.tts-lock-sha256=${TTS_LOCK_SHA256} \
       com.speech-platform.model-revision=${TTS_MODEL_REVISION} \
       com.speech-platform.source-provider-revision=${TTS_SOURCE_REVISION}
 USER 65532:65532

@@ -190,3 +190,24 @@ class ReleaseManifestValidation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CurrentTTSReleaseTests(unittest.TestCase):
+    def test_cuda_tts_descriptor_can_bind_real_pinned_artifact_without_publishing(self):
+        from scripts.tts_model import _model
+        from scripts.release_manifest import REPOSITORY_ROOT
+
+        release = copy.deepcopy(
+            load_release(REPOSITORY_ROOT / "releases/voiceservice-v0.1.2.yaml")
+        )
+        tts = release["services"]["tts"]
+        tts["runtime_variant"] = "cuda"
+        tts["image"] = tts["image"].replace(
+            "voiceservice-tts-health-only@", "voiceservice-tts-cuda@"
+        )
+        tts["capabilities"] = ["health", "synthesis", "ssml", "warmup"]
+        tts["required_model_artifacts"] = [_model()]
+        self.assertIs(validate_release(release), release)
+        tts["required_model_artifacts"] = []
+        with self.assertRaisesRegex(ReleaseManifestError, "pinned model"):
+            validate_release(release)

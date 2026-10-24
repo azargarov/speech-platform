@@ -59,7 +59,7 @@ ifneq ($(IMAGE_VARIANT),cpu)
 IMAGE_COMPOSE_FILE := deployments/compose/compose.stt-cuda-build.yaml
 endif
 ifeq ($(IMAGE_SERVICE),)
-IMAGE_SELECTION := $(IMAGE_SERVICES)
+IMAGE_SELECTION := gateway stt
 else ifeq ($(IMAGE_SERVICE),gateway)
 IMAGE_SELECTION := gateway
 else ifeq ($(IMAGE_SERVICE),stt)
@@ -86,7 +86,7 @@ else
 $(error Unknown publish service '$(SERVICE)'; choose gateway, stt, or tts)
 endif
 endif
-.PHONY: verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check tts-lock-check release-check model-check model-fetch tts-model-check tts-model-fetch tts-warmup tts-state plan install legacy-plan legacy-install status logs test-stt stt-cpu-integration stt-cuda-http-integration
+.PHONY: preflight gpu-check stop remove verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check tts-lock-check release-check model-check model-fetch tts-model-check tts-model-fetch tts-warmup tts-state plan install legacy-plan legacy-install status logs test-stt stt-cpu-integration stt-cuda-http-integration
 bootstrap:
 	$(PYTHON) -m pip install -r requirements-dev.txt
 	$(PYTHON) -m pip install --require-hashes -r services/requirements-stt-cpu.lock
@@ -117,6 +117,7 @@ test:
 	go test -race ./...
 	$(PYTHON) -m unittest discover -s scripts -p 'test_*.py' -v
 	$(PYTHON) -m unittest discover -s services/stt/tests -p 'test_*.py' -v
+	$(PYTHON) -m unittest discover -s services/tts/tests -p 'test_*.py' -v
 build:
 	go build ./...
 	$(PYTHON) -c 'import ast,pathlib; [ast.parse(p.read_text()) for p in pathlib.Path("services").rglob("*.py")]'
@@ -141,14 +142,18 @@ tts-warmup:
 	docker compose --env-file .env -f compose.yaml exec -T tts python -c 'import urllib.request; print(urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8082/internal/v1/warmup", data=b"", method="POST"), timeout=600).read().decode())'
 tts-state:
 	docker compose --env-file .env -f compose.yaml exec -T tts python -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8082/internal/v1/state", timeout=3).read().decode())'
+preflight:
+	$(PYTHON) scripts/product_deployment.py preflight $(if $(SERVICE),--service "$(SERVICE)")
+gpu-check stop remove:
+	$(PYTHON) scripts/product_deployment.py $@ $(if $(SERVICE),--service "$(SERVICE)")
 plan:
-	$(PYTHON) scripts/product_deployment.py plan $(if $(NO_BUILD),--service "$(SERVICE)") $(NO_BUILD_ARGS)
+	$(PYTHON) scripts/product_deployment.py plan $(if $(SERVICE),--service "$(SERVICE)") $(NO_BUILD_ARGS)
 install:
 	$(PYTHON) scripts/product_deployment.py install $(if $(SERVICE),--service "$(SERVICE)") $(NO_BUILD_ARGS)
 status:
-	$(PYTHON) scripts/product_deployment.py status
+	$(PYTHON) scripts/product_deployment.py status $(if $(SERVICE),--service "$(SERVICE)")
 logs:
-	$(PYTHON) scripts/product_deployment.py logs
+	$(PYTHON) scripts/product_deployment.py logs $(if $(SERVICE),--service "$(SERVICE)")
 test-stt:
 	$(PYTHON) scripts/product_deployment.py test-stt $(if $(AUDIO),--audio "$(AUDIO)") $(if $(SOURCE_LANGUAGE),--source-language "$(SOURCE_LANGUAGE)") $(if $(OUTPUT_LANGUAGE),--output-language "$(OUTPUT_LANGUAGE)")
 legacy-plan:

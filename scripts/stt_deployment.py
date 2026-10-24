@@ -1,4 +1,4 @@
-"""Plan or install a service-scoped, release-pinned Compose project."""
+"""Historical VoiceService foundation installer; current product uses product_deployment."""
 
 from __future__ import annotations
 
@@ -1272,6 +1272,13 @@ def run_deployment(
     if enabled_services is None:
         enabled_services = ["stt"]
     selected = resolve_services(release["services"], enabled_services, service)
+    if (
+        "tts" in selected
+        and release["services"]["tts"]["runtime_variant"] != "health-only"
+    ):
+        raise ValueError(
+            "legacy installer only supports foundation TTS; use make install SERVICE=tts for current CUDA TTS"
+        )
     unsupported = [name for name in selected if name not in SUPPORTED_SERVICES]
     if unsupported:
         raise ValueError("unsupported selected service(s): " + ", ".join(unsupported))

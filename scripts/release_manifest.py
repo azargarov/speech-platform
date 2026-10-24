@@ -32,7 +32,7 @@ PLATFORMS = frozenset({"linux/amd64"})
 VARIANTS_BY_SERVICE = {
     "gateway": frozenset({"foundation"}),
     "stt": frozenset({"cpu", "cuda"}),
-    "tts": frozenset({"health-only"}),
+    "tts": frozenset({"health-only", "cuda"}),
 }
 MODEL_SOURCES = frozenset({"huggingface_hub"})
 MODEL_FIELDS = {
@@ -262,7 +262,7 @@ def validate_release(data, repository_root: Path = REPOSITORY_ROOT) -> dict:
         expected_repository_suffix = {
             "gateway": "voiceservice-gateway",
             "stt": f"voiceservice-stt-{variant}",
-            "tts": "voiceservice-tts-health-only",
+            "tts": f"voiceservice-tts-{variant}",
         }.get(service)
         if expected_repository_suffix and not repository.endswith(
             "/" + expected_repository_suffix
@@ -276,7 +276,11 @@ def validate_release(data, repository_root: Path = REPOSITORY_ROOT) -> dict:
             for capability in capabilities
         ):
             raise ReleaseManifestError(f"{service} capability name is invalid")
-        if service == "tts" and set(capabilities) != {"health"}:
+        if (
+            service == "tts"
+            and variant == "health-only"
+            and set(capabilities) != {"health"}
+        ):
             raise ReleaseManifestError("the current TTS release is health-only")
         dependencies = _unique_strings(
             entry["dependencies"], f"{service} dependencies", nonempty=False
@@ -287,6 +291,17 @@ def validate_release(data, repository_root: Path = REPOSITORY_ROOT) -> dict:
         if not isinstance(entry["required_model_artifacts"], list):
             raise ReleaseManifestError(
                 f"{service} required_model_artifacts must be a list"
+            )
+        if (
+            service == "tts"
+            and variant == "cuda"
+            and (
+                not {"health", "synthesis"}.issubset(capabilities)
+                or not entry["required_model_artifacts"]
+            )
+        ):
+            raise ReleaseManifestError(
+                "CUDA TTS requires synthesis/health capabilities and pinned model artifacts"
             )
         model_ids = set()
         for model in entry["required_model_artifacts"]:

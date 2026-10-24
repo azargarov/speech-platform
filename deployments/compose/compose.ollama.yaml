@@ -1,5 +1,5 @@
 # Include only when configs/gateway.yaml enables a local Ollama-backed model.
-# scripts/product_deployment.py prepares this external internal network first.
+# The Ollama owner prepares the existing external network; the installer only reuses it.
 services:
   gateway:
     networks:

@@ -13,8 +13,14 @@ services:
     environment:
       SPEECH_LISTEN_PORT: "8080"
       SPEECH_API_TOKEN: "${SPEECH_API_TOKEN:-}"
+    env_file:
+      - path: ${GATEWAY_SECRETS_FILE:-./private/cloud.env}
+        required: false
     volumes:
-      - ${GATEWAY_CONFIG:-./configs/gateway.yaml}:/config/gateway.yaml:ro
+      - type: bind
+        source: ${GATEWAY_CONFIG:-./configs/gateway.yaml}
+        target: /config/gateway.yaml
+        read_only: true
     depends_on:
       stt:
         condition: service_healthy

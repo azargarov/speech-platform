@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ipaddress
 import json
 import os
 import re
-import shutil
 import socket
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.error import URLError
@@ -25,6 +26,8 @@ else:
     import ollama_network
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 DIGEST = "86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6"
 TTS_DIGEST = "04d6e05b69b22568030ac21f494e406ffdf2d06efeeab43cfdb4c21ba8c9bd41"
 IMAGE_ID_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -67,6 +70,8 @@ ALLOWED_ENV = {
     "GATEWAY_EXPECTED_SOURCE_REVISION",
     "OLLAMA_CONTAINER_NAME",
     "OLLAMA_NETWORK_NAME",
+    "GATEWAY_SECRETS_FILE",
+    "INSTALL_MIN_FREE_GIB",
 }
 
 
@@ -74,8 +79,13 @@ class OperatorError(Exception):
     pass
 
 
-def run(args: list[str], *, check=True, capture=False, cwd=ROOT):
-    result = subprocess.run(args, cwd=cwd, text=True, capture_output=capture)
+def run(args: list[str], *, check=True, capture=False, cwd=None, timeout=60):
+    try:
+        result = subprocess.run(
+            args, cwd=cwd or ROOT, text=True, capture_output=capture, timeout=timeout
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise OperatorError(f"{args[0]} exceeded its bounded command deadline") from exc
     if check and result.returncode:
         details = (result.stderr or result.stdout or "").strip()
         raise OperatorError(
@@ -111,9 +121,28 @@ def load_env() -> dict[str, str]:
 def set_compose_env(
     values: dict[str, str], source_revision: str, gateway_image: str | None = None
 ) -> None:
+    for key in ALLOWED_ENV | {
+        "COMPOSE_FILE",
+        "COMPOSE_PROFILES",
+        "COMPOSE_PATH_SEPARATOR",
+        "GATEWAY_IMAGE",
+        "SOURCE_REVISION",
+    }:
+        os.environ.pop(key, None)
     os.environ.update(values)
+    os.environ["COMPOSE_PROJECT_NAME"] = values.get(
+        "COMPOSE_PROJECT_NAME", "speech-platform"
+    )
     os.environ["SOURCE_REVISION"] = source_revision
     os.environ["GATEWAY_CONFIG"] = str(gateway_config_path(values))
+    os.environ["GATEWAY_SECRETS_FILE"] = str(gateway_secrets_path(values))
+    document = yaml.safe_load(gateway_config_path(values).read_text()) or {}
+    transform = document.get("text_transform") or {}
+    if (
+        transform.get("enabled") is not True
+        or transform.get("selection", {}).get("allow_cloud") is not True
+    ):
+        os.environ["GATEWAY_SECRETS_FILE"] = "/dev/null"
     os.environ.pop("GATEWAY_IMAGE", None)
     if gateway_image is not None:
         os.environ["GATEWAY_IMAGE"] = gateway_image
@@ -124,7 +153,15 @@ def compose(values, revision, *args, capture=False, gateway_image=None):
     command = list(COMPOSE)
     if gateway_uses_local_ollama(gateway_config_path(values)):
         command.extend(["-f", str(ROOT / "deployments/compose/compose.ollama.yaml")])
-    return run([*command, *args], capture=capture)
+    return run(
+        [*command, *args],
+        capture=capture,
+        timeout=1800
+        if args and args[0] == "build"
+        else 300
+        if args and args[0] in {"up", "run", "stop", "down"}
+        else 60,
+    )
 
 
 def validate_no_build_options(
@@ -321,6 +358,26 @@ def gateway_config_path(values: dict[str, str]) -> Path:
     return resolved
 
 
+def gateway_secrets_path(values):
+    configured = Path(values.get("GATEWAY_SECRETS_FILE", "private/cloud.env"))
+    path = configured if configured.is_absolute() else ROOT / configured
+    root = ROOT.resolve()
+    try:
+        relative = path.absolute().relative_to(root)
+    except ValueError as exc:
+        raise OperatorError("GATEWAY_SECRETS_FILE must be inside private/") from exc
+    if ".." in relative.parts or not path.resolve().is_relative_to(root / "private"):
+        raise OperatorError(
+            "GATEWAY_SECRETS_FILE must be inside private/, without traversal"
+        )
+    current = root
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise OperatorError("GATEWAY_SECRETS_FILE must not traverse symlinks")
+    return path.absolute()
+
+
 def gateway_uses_local_ollama(config_path: Path | None = None) -> bool:
     """Select the optional Ollama network only for an enabled local model."""
     path = config_path or gateway_config_path({})
@@ -379,13 +436,44 @@ def gateway_uses_local_ollama(config_path: Path | None = None) -> bool:
 
 
 def prepare_local_ollama(values: dict[str, str]) -> dict[str, str]:
-    try:
-        return ollama_network.prepare_network(
-            values.get("OLLAMA_NETWORK_NAME", ollama_network.DEFAULT_NETWORK),
-            values.get("OLLAMA_CONTAINER_NAME", ollama_network.DEFAULT_CONTAINER),
+    """Reuse external infrastructure; never attach, stop, or recreate shared Ollama."""
+    network = values.get("OLLAMA_NETWORK_NAME", ollama_network.DEFAULT_NETWORK)
+    container = values.get("OLLAMA_CONTAINER_NAME", ollama_network.DEFAULT_CONTAINER)
+    info = json.loads(run(["docker", "inspect", container], capture=True).stdout)[0]
+    attachment = info.get("NetworkSettings", {}).get("Networks", {}).get(network)
+    if (
+        not info.get("State", {}).get("Running")
+        or not attachment
+        or "ollama" not in (attachment.get("Aliases") or [])
+    ):
+        raise OperatorError(
+            "shared Ollama must already be attached to its configured private network with alias ollama; ask its owner to prepare it"
         )
-    except ollama_network.NetworkError as exc:
-        raise OperatorError(str(exc)) from exc
+    return {
+        "network": "reused",
+        "network_name": network,
+        "attachment": "reused",
+        "container_name": container,
+    }
+
+
+def require_local_docker():
+    # Docker gives DOCKER_CONTEXT precedence over DOCKER_HOST.
+    context = os.environ.get("DOCKER_CONTEXT")
+    endpoint = None if context else os.environ.get("DOCKER_HOST")
+    if not endpoint:
+        args = ["docker", "context", "inspect", *([context] if context else [])]
+        try:
+            data = json.loads(run(args, capture=True).stdout)
+            endpoint = data[0].get("Endpoints", {}).get("docker", {}).get("Host", "")
+        except (ValueError, IndexError, KeyError, TypeError) as exc:
+            raise OperatorError(
+                "could not inspect the active Docker context; explicitly select a local Unix context"
+            ) from exc
+    if not isinstance(endpoint, str) or not endpoint.startswith("unix://"):
+        raise OperatorError(
+            "this installer requires the local Unix Docker endpoint; explicitly select a local Docker context/unset remote DOCKER_HOST"
+        )
 
 
 def verify_project_ownership(values):
@@ -489,6 +577,8 @@ def parse_compose_readiness(output: str, expected=None) -> list[dict]:
             raise OperatorError(
                 "Compose readiness response was not valid JSON"
             ) from exc
+    if isinstance(services, dict):
+        services = [services]
     if not isinstance(services, list) or any(
         not isinstance(item, dict) for item in services
     ):
@@ -516,17 +606,7 @@ def require_existing_workers_healthy(values, revision) -> None:
         )
 
 
-def checks(
-    *,
-    model=True,
-    compose_config=True,
-    require_clean=False,
-    hardware=True,
-    release=True,
-    require_idle_gpu=False,
-    check_port=True,
-):
-    values = load_env()
+def validate_environment(values):
     required = {
         "MODEL_STORE",
         "MODEL_MANIFEST_SHA256",
@@ -621,242 +701,251 @@ def checks(
         if parsed_api.scheme not in {"http", "https"} or not parsed_api.hostname:
             raise OperatorError("SPEECH_API_URL must be an HTTP(S) origin")
 
-    if shutil.which("docker") is None:
-        raise OperatorError("Docker CLI is not installed")
-    run(["docker", "info"], capture=True)
-    compose_version = run(["docker", "compose", "version"], capture=True).stdout.strip()
-    owns_project = verify_project_ownership(values)
-    if check_port:
-        check_gateway_port(ip, port, values, owns_project)
-    rows = []
-    active_gpu_processes = 0
-    if hardware:
-        if shutil.which("nvidia-smi") is None:
-            raise OperatorError("nvidia-smi is required for CUDA STT")
-        gpu_query = run(
-            [
-                "nvidia-smi",
-                "--query-gpu=index,uuid,memory.free,memory.total",
-                "--format=csv,noheader",
-            ],
-            capture=True,
-        )
-        rows = [line.strip() for line in gpu_query.stdout.splitlines() if line.strip()]
-        if gpu >= len(rows) or tts_gpu >= len(rows):
-            raise OperatorError(
-                f"configured STT/TTS GPU device is unavailable; detected {len(rows)} GPU(s)"
-            )
-        try:
-            free_mib = int(rows[gpu].split(",")[2].strip().split()[0])
-            tts_free_mib = int(rows[tts_gpu].split(",")[2].strip().split()[0])
-        except (IndexError, ValueError) as exc:
-            raise OperatorError("could not parse selected GPU free memory") from exc
-        if free_mib < 6144:
-            raise OperatorError(
-                f"selected GPU has {free_mib} MiB free; at least 6144 MiB is required by the STT model profile"
-            )
-        if tts_free_mib < 8192:
-            raise OperatorError(
-                f"selected TTS GPU has {tts_free_mib} MiB free; at least 8192 MiB is required at model load"
-            )
-        runtime = run(
-            ["docker", "info", "--format", "{{json .Runtimes}}"], capture=True
-        ).stdout.strip()
-        if not runtime or "nvidia" not in runtime.lower():
-            raise OperatorError("Docker does not report the NVIDIA container runtime")
-        processes = run(
-            [
-                "nvidia-smi",
-                "--query-compute-apps=gpu_uuid,pid",
-                "--format=csv,noheader",
-            ],
-            capture=True,
-        )
-        selected_uuids = {rows[index].split(",")[1].strip() for index in {gpu, tts_gpu}}
-        active_gpu_processes = {
-            line.split(",")[0].strip()
-            for line in processes.stdout.splitlines()
-            if "," in line and line.split(",")[0].strip() in selected_uuids
-        }
-        allowed_processes = 1 if owns_project and gpu == tts_gpu else 0
-        if require_idle_gpu and len(active_gpu_processes) > allowed_processes:
-            raise OperatorError(
-                f"safe installation requires selected GPU(s) idle (or only the existing canonical STT worker); found {len(active_gpu_processes)} active compute process(es). Existing workloads were left untouched."
-            )
+    gateway_secrets_path(values)
+    try:
+        minimum_disk = int(values.get("INSTALL_MIN_FREE_GIB", "20"))
+        if not 1 <= minimum_disk <= 1024:
+            raise ValueError
+    except ValueError as exc:
+        raise OperatorError("INSTALL_MIN_FREE_GIB must be in 1..1024") from exc
+    return ip, port, gpu, tts_gpu
 
-    revision = run(["git", "rev-parse", "HEAD"], capture=True).stdout.strip()
-    if (
-        require_clean
-        and run(["git", "status", "--porcelain"], capture=True).stdout.strip()
-    ):
+
+def checks(
+    *,
+    model=True,
+    compose_config=True,
+    require_clean=False,
+    hardware=True,
+    release=True,
+    require_idle_gpu=False,
+    check_port=True,
+    service=None,
+):
+    if __package__:
+        from .installation_preflight import collect
+    else:
+        from installation_preflight import collect
+    report = collect(
+        sys.modules[__name__],
+        service=service,
+        model=model,
+        compose_config=compose_config,
+        require_clean=require_clean,
+        hardware=hardware,
+        check_port=check_port,
+    )
+    report.display()
+    if report.failed:
         raise OperatorError(
-            "install requires a clean Git checkout; commit or discard local changes first"
+            "preflight found blocking failures; resolve FAIL entries and retry"
         )
-    run(
-        [
-            "go",
-            "run",
-            "./cmd/gateway",
-            "--config",
-            str(gateway_config_path(values)),
-            "--check-config",
-        ]
-    )
-    run(
-        [
-            sys.executable,
-            "-m",
-            "services.stt.main",
-            "--config",
-            "configs/stt.yaml",
-            "--application-config",
-            "configs/stt-product-application.yaml",
-            "--deployment-config",
-            "configs/stt-product-deployment.yaml",
-            "--check-config",
-        ]
-    )
-    run(
-        [
-            sys.executable,
-            "-m",
-            "services.tts.main",
-            "--config",
-            "configs/tts.yaml",
-            "--check-config",
-        ]
-    )
-    if release:
-        run(
-            [
-                sys.executable,
-                "-m",
-                "scripts.check_release",
-                "--release",
-                "releases/voiceservice-v0.1.2.yaml",
-            ]
-        )
-    if model:
-        model_command = [
-            sys.executable,
-            "-m",
-            "scripts.provision_models",
-            "check",
-            "--release",
-            "releases/voiceservice-v0.1.2.yaml",
-            "--store",
-            values["MODEL_STORE"],
-        ]
-        check = run(model_command, check=False, capture=True)
-        if (
-            check.returncode
-            and "Permission denied" in (check.stderr or "")
-            and shutil.which("sudo")
-        ):
-            privileged = run(["sudo", "-n", *model_command], check=False, capture=True)
-            if privileged.returncode == 0:
-                check = privileged
-            else:
-                raise OperatorError(
-                    "model store is root-owned; run `sudo -v` to authorize the read-only integrity check, then retry make plan. No artifact changes are performed."
-                )
-        if check.returncode:
-            message = (check.stderr or check.stdout).strip()
-            raise OperatorError(
-                "persistent model verification failed; preserve the current artifact and correct MODEL_STORE permissions/configuration. "
-                + message
-            )
-        tts_model_command = [
-            sys.executable,
-            "-m",
-            "scripts.tts_model",
-            "check",
-            "--store",
-            values.get("TTS_MODEL_STORE") or values["MODEL_STORE"],
-        ]
-        tts_check = run(tts_model_command, check=False, capture=True)
-        if (
-            tts_check.returncode
-            and "Permission denied" in (tts_check.stderr or "")
-            and shutil.which("sudo")
-        ):
-            privileged = run(
-                ["sudo", "-n", *tts_model_command], check=False, capture=True
-            )
-            if privileged.returncode == 0:
-                tts_check = privileged
-            else:
-                raise OperatorError(
-                    "TTS model store is root-owned; run `sudo -v` to authorize the read-only integrity check"
-                )
-        if tts_check.returncode:
-            message = (tts_check.stderr or tts_check.stdout).strip()
-            raise OperatorError(
-                "pinned VoxCPM2 artifact is not available or failed verification; run `make tts-model-fetch` after reviewing the artifact terms. "
-                + message
-            )
-        if DIGEST not in check.stdout:
-            raise OperatorError(
-                "model checker did not verify the pinned large-v3-turbo manifest"
-            )
-        print(check.stdout.strip())
-    if compose_config:
-        compose(values, revision, "config", "--quiet")
-    return (
-        values,
-        revision,
-        compose_version,
-        rows[gpu] if rows else "not checked",
-        active_gpu_processes,
-    )
+    return report.values, report.revision, report.compose_version, report.gpu, 0
 
 
-def wait_ready(port: int, bind_address: str, timeout=240):
+def verify_service_images(values, revision, services):
+    rendered = json.loads(
+        compose(values, revision, "config", "--format", "json", capture=True).stdout
+    )
+    identities = {}
+    for service in services:
+        reference = rendered["services"][service]["image"]
+        image = json.loads(
+            run(["docker", "image", "inspect", reference], capture=True).stdout
+        )[0]
+        labels = image.get("Config", {}).get("Labels") or {}
+        expected = {
+            "org.opencontainers.image.revision": revision,
+            "com.speech-platform.service": service,
+            "com.speech-platform.service-role": "gateway"
+            if service == "gateway"
+            else service + "-worker",
+            "com.speech-platform.runtime-variant": "foundation"
+            if service == "gateway"
+            else "cuda",
+        }
+        if (
+            image.get("Os") != "linux"
+            or image.get("Architecture") != "amd64"
+            or any(labels.get(k) != v for k, v in expected.items())
+        ):
+            raise OperatorError(
+                f"{service} image platform/source/role validation failed"
+            )
+        identities[service] = {"reference": reference, "image_id": image["Id"]}
+    return identities
+
+
+def verify_running_images(values, revision, identities):
+    for service, identity in identities.items():
+        cid = compose(
+            values, revision, "ps", "-q", service, capture=True
+        ).stdout.strip()
+        if not cid or "\n" in cid:
+            raise OperatorError(f"{service} has no unique running container")
+        reference = identity["reference"]
+        image = json.loads(
+            run(["docker", "image", "inspect", reference], capture=True).stdout
+        )[0]
+        if image["Id"] != identity["image_id"]:
+            raise OperatorError(f"{service} image tag changed after verification")
+        container = json.loads(run(["docker", "inspect", cid], capture=True).stdout)[0]
+        descriptor = image.get("Descriptor") or {}
+        if "index" in descriptor.get(
+            "mediaType", ""
+        ) or "manifest.list" in descriptor.get("mediaType", ""):
+            # Containerd stores index/attestation identity separately from executable platform content.
+            platform = json.loads(
+                run(
+                    [
+                        "docker",
+                        "image",
+                        "inspect",
+                        "--platform",
+                        "linux/amd64",
+                        reference,
+                    ],
+                    capture=True,
+                ).stdout
+            )[0]
+            expected = platform["Id"]
+            actual = (container.get("ImageManifestDescriptor") or {}).get("digest")
+        else:
+            expected = image["Id"]
+            actual = container.get("Image")
+        if actual != expected:
+            raise OperatorError(
+                f"{service} running platform image differs from the verified build"
+            )
+
+
+def gpu_check(values, revision, services):
+    rendered = json.loads(
+        compose(values, revision, "config", "--format", "json", capture=True).stdout
+    )
+    for service in services:
+        if service not in {"stt", "tts"}:
+            continue
+        image = rendered["services"][service]["image"]
+        device = values.get(service.upper() + "_GPU_DEVICE", "0")
+        # Explicit qualification action, not part of read-only preflight. No model import/load.
+        probe = "import ctypes; c=ctypes.CDLL('libcuda.so.1'); assert c.cuInit(0)==0; n=ctypes.c_int(); assert c.cuDeviceGetCount(ctypes.byref(n))==0 and n.value>0; print('PASS: container CUDA driver device access')"
+        probe_name = "speech-platform-gpu-check-" + uuid.uuid4().hex
+        try:
+            run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--name",
+                    probe_name,
+                    "--pull",
+                    "never",
+                    "--network",
+                    "none",
+                    "--read-only",
+                    "--cap-drop",
+                    "ALL",
+                    "--security-opt",
+                    "no-new-privileges:true",
+                    "--gpus",
+                    f"device={device}",
+                    "--entrypoint",
+                    "python",
+                    image,
+                    "-c",
+                    probe,
+                ],
+                timeout=60,
+            )
+        except (OperatorError, OSError) as error:
+            try:
+                cleanup = run(
+                    ["docker", "rm", "-f", probe_name],
+                    check=False,
+                    capture=True,
+                    timeout=15,
+                )
+                absent = "No such container" in (
+                    getattr(cleanup, "stderr", "") or ""
+                ) or "No such object" in (getattr(cleanup, "stderr", "") or "")
+                if cleanup.returncode and not absent:
+                    raise OperatorError("cleanup unconfirmed")
+            except (OperatorError, OSError) as cleanup_error:
+                raise OperatorError(
+                    f"CUDA probe failed; cleanup unconfirmed for {probe_name}; inspect that probe before retrying"
+                ) from cleanup_error
+            raise OperatorError(
+                "CUDA probe failed; selected services were not started"
+            ) from error
+
+
+def wait_ready(port: int, bind_address: str, services=None, timeout=240):
+    selected = set(services or ("gateway", "stt", "tts"))
+    values = load_env()
+    revision = run(["git", "rev-parse", "HEAD"], capture=True).stdout.strip()
     address = "127.0.0.1" if bind_address == "0.0.0.0" else bind_address
-    endpoint = f"http://{address}:{port}/readyz"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        api_ready = False
         try:
-            with urlopen(endpoint, timeout=2) as response:
-                api_ready = response.status == 200
-        except (OSError, URLError):
-            pass
-        project = run(
-            [
-                "docker",
-                "compose",
-                "--env-file",
-                str(ROOT / ".env"),
-                "-f",
-                str(ROOT / "compose.yaml"),
+            result = compose(
+                values,
+                revision,
                 "ps",
                 "--format",
                 "json",
-            ],
-            capture=True,
-        )
-        services = parse_compose_readiness(project.stdout)
-        healthy = {
-            item.get("Service")
-            for item in services
-            if item.get("State") == "running" and item.get("Health") == "healthy"
-        }
-        if api_ready and healthy >= {"gateway", "stt", "tts"}:
-            return
+                *sorted(selected),
+                capture=True,
+            )
+            entries = parse_compose_readiness(result.stdout, expected=selected)
+            healthy = {
+                s["Service"]
+                for s in entries
+                if s.get("State") == "running" and s.get("Health") == "healthy"
+            }
+            if healthy == selected:
+                if "gateway" not in selected:
+                    return
+                with urlopen(f"http://{address}:{port}/readyz", timeout=2) as response:
+                    if response.status == 200:
+                        return
+        except (OSError, URLError, OperatorError):
+            pass
         time.sleep(2)
     raise OperatorError(
-        f"Gateway did not become ready within {timeout}s; inspect: make logs"
+        f"selected services did not become ready within {timeout}s; inspect make logs"
     )
+
+
+def operational_values():
+    values = load_env()
+    validate_environment(values)
+    require_local_docker()
+    verify_project_ownership(values)
+    revision = run(["git", "rev-parse", "HEAD"], capture=True).stdout.strip()
+    return values, revision
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "command", choices=("plan", "install", "status", "logs", "test-stt")
+        "command",
+        choices=(
+            "preflight",
+            "plan",
+            "install",
+            "status",
+            "logs",
+            "test-stt",
+            "gpu-check",
+            "stop",
+            "remove",
+        ),
     )
     parser.add_argument(
-        "--service", choices=("gateway",), help="limit install to Gateway"
+        "--service",
+        choices=("gateway", "stt", "tts"),
+        help="operate only on the selected service",
     )
     parser.add_argument(
         "--no-build",
@@ -880,6 +969,18 @@ def main() -> int:
     )
     args = parser.parse_args()
     try:
+        if args.command == "preflight":
+            if args.no_build or args.expected_image_id or args.expected_source_revision:
+                parser.error(
+                    "preflight is read-only; use plan/install for Gateway --no-build identity options"
+                )
+            if __package__:
+                from .installation_preflight import collect
+            else:
+                from installation_preflight import collect
+            report = collect(sys.modules[__name__], service=args.service)
+            report.display()
+            return 2 if report.failed else 0
         values = load_env()
         no_build_identity = validate_no_build_options(
             args.command,
@@ -893,8 +994,12 @@ def main() -> int:
         expected_image_id, expected_source_revision = (
             no_build_identity if no_build_identity is not None else (None, None)
         )
-        if args.command == "plan":
-            values, revision, compose_version, gpu, active_gpu_processes = checks()
+        if args.command in {"preflight", "plan"}:
+            values, revision, compose_version, gpu, active_gpu_processes = checks(
+                service=args.service
+            )
+            if args.command == "preflight":
+                return 0
             verified_image = (
                 verify_gateway_image(
                     values, revision, expected_image_id, expected_source_revision
@@ -903,7 +1008,7 @@ def main() -> int:
                 else None
             )
             print(
-                f"PASS: Docker Compose {compose_version}; source {revision}; GPU {gpu}; model release v0.1.2; manifest {DIGEST}"
+                f"PASS: Docker Compose {compose_version}; source {revision}; GPU {gpu}; pinned model manifests; STT {DIGEST}"
             )
             endpoint = values.get(
                 "SPEECH_API_URL",
@@ -921,12 +1026,14 @@ def main() -> int:
                     f"{verified_image['runtime_variant']}"
                 )
             else:
-                print("No-build mode: disabled; Gateway image build remains selected.")
+                print(
+                    "No-build mode: disabled; selected service image builds remain enabled."
+                )
             if gateway_uses_local_ollama(gateway_config_path(values)):
                 print(
-                    "Local Ollama: enabled; install will prepare network "
+                    "Local Ollama: enabled; requires existing private network "
                     f"{values.get('OLLAMA_NETWORK_NAME', ollama_network.DEFAULT_NETWORK)} "
-                    "and attach container "
+                    "and attached shared container "
                     f"{values.get('OLLAMA_CONTAINER_NAME', ollama_network.DEFAULT_CONTAINER)}."
                 )
             else:
@@ -934,7 +1041,7 @@ def main() -> int:
             print("No containers were started or changed.")
         elif args.command == "install":
             values, revision, _version, _gpu, _processes = checks(
-                require_clean=True, require_idle_gpu=True
+                require_clean=True, service=args.service
             )
             if args.no_build:
                 verified_image = verify_gateway_image(
@@ -949,7 +1056,9 @@ def main() -> int:
                 )
             if args.service == "gateway":
                 require_existing_workers_healthy(values, revision)
-            if gateway_uses_local_ollama(gateway_config_path(values)):
+            if (args.service in (None, "gateway")) and gateway_uses_local_ollama(
+                gateway_config_path(values)
+            ):
                 network_result = prepare_local_ollama(values)
                 print(
                     "Ollama network: "
@@ -958,9 +1067,35 @@ def main() -> int:
                     f"{network_result['container_name']}"
                 )
             services = (args.service,) if args.service else ("gateway", "stt", "tts")
+            config_hash = hashlib.sha256(
+                gateway_config_path(values).read_bytes()
+            ).digest()
+            identities = (
+                {
+                    "gateway": {
+                        "reference": verified_image["reference"],
+                        "image_id": expected_image_id,
+                    }
+                }
+                if args.no_build
+                else {}
+            )
             if not args.no_build:
                 compose(values, revision, "build", *services)
-            checks(require_clean=True, require_idle_gpu=True)
+                identities = verify_service_images(values, revision, services)
+                gpu_check(values, revision, services)
+            current_values, current_revision, *_ = checks(
+                require_clean=True, service=args.service
+            )
+            if (
+                current_values != values
+                or current_revision != revision
+                or hashlib.sha256(gateway_config_path(values).read_bytes()).digest()
+                != config_hash
+            ):
+                raise OperatorError(
+                    "source or deployment configuration changed during build; review and retry before service creation"
+                )
             if args.service == "gateway":
                 if args.no_build:
                     # Recheck after all preflight/network work and directly before
@@ -984,11 +1119,36 @@ def main() -> int:
                         gateway_image=verified_image["reference"],
                     )
                 else:
-                    compose(values, revision, "up", "-d", "--no-deps", "gateway")
+                    compose(
+                        values,
+                        revision,
+                        "up",
+                        "-d",
+                        "--no-build",
+                        "--pull",
+                        "never",
+                        "--no-deps",
+                        "gateway",
+                    )
+            elif args.service:
+                compose(
+                    values,
+                    revision,
+                    "up",
+                    "-d",
+                    "--no-build",
+                    "--pull",
+                    "never",
+                    "--no-deps",
+                    args.service,
+                )
             else:
-                compose(values, revision, "up", "-d")
-            wait_ready(int(values["SPEECH_PORT"]), values["SPEECH_BIND_IP"])
-            if gateway_uses_local_ollama(gateway_config_path(values)):
+                compose(values, revision, "up", "-d", "--no-build", "--pull", "never")
+            wait_ready(int(values["SPEECH_PORT"]), values["SPEECH_BIND_IP"], services)
+            verify_running_images(values, revision, identities)
+            if (args.service in (None, "gateway")) and gateway_uses_local_ollama(
+                gateway_config_path(values)
+            ):
                 compose(
                     values,
                     revision,
@@ -1010,32 +1170,39 @@ def main() -> int:
                 f"http://{values['SPEECH_BIND_IP']}:{values['SPEECH_PORT']}",
             )
             print(f"Ready: {endpoint}")
+        elif args.command in {"gpu-check", "stop", "remove"}:
+            revision = run(["git", "rev-parse", "HEAD"], capture=True).stdout.strip()
+            validate_environment(values)
+            require_local_docker()
+            verify_project_ownership(values)
+            services = (args.service,) if args.service else ("gateway", "stt", "tts")
+            if args.command == "gpu-check":
+                verify_service_images(values, revision, services)
+                gpu_check(values, revision, services)
+            elif args.command == "stop":
+                compose(values, revision, "stop", *services)
+            elif args.service:
+                compose(values, revision, "stop", args.service)
+                compose(values, revision, "rm", "-f", args.service)
+            else:
+                compose(
+                    values, revision, "down"
+                )  # no volumes/images or external networks removed
         elif args.command == "status":
-            values, revision, *_ = checks(
-                model=False,
-                compose_config=False,
-                hardware=False,
-                release=False,
-                check_port=False,
-            )
-            compose(values, revision, "ps")
+            values, revision = operational_values()
+            compose(values, revision, "ps", *((args.service,) if args.service else ()))
         elif args.command == "logs":
-            values, revision, *_ = checks(
-                model=False,
-                compose_config=False,
-                hardware=False,
-                release=False,
-                check_port=False,
+            values, revision = operational_values()
+            compose(
+                values,
+                revision,
+                "logs",
+                "--tail",
+                "100",
+                *((args.service,) if args.service else ()),
             )
-            compose(values, revision, "logs", "--tail", "100", "-f")
         elif args.command == "test-stt":
-            values, _revision, *_ = checks(
-                model=False,
-                compose_config=False,
-                hardware=False,
-                release=False,
-                check_port=False,
-            )
+            values, _revision = operational_values()
             if args.audio is None or not args.audio.is_file():
                 raise OperatorError(
                     "provide an existing local --audio file; audio remains on this machine"

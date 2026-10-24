@@ -14,7 +14,7 @@ from pathlib import Path
 
 SERVICES = {
     "gateway": ("voiceservice-gateway", "gateway", "foundation", None),
-    "tts": ("voiceservice-tts-health-only", "tts-health-only", "health-only", None),
+    "tts": ("voiceservice-tts-cuda", "tts-worker", "cuda", "tts-lock-sha256"),
 }
 SERVICE_NAMES = frozenset({"gateway", "stt", "tts"})
 STT_VARIANTS = {
@@ -194,6 +194,13 @@ def publish(
             "GHCR authentication is not configured; log in with `docker login ghcr.io` first"
         )
     revision = current_revision()
+    tagged_revision = command(
+        ["git", "rev-parse", f"refs/tags/{version}^{{commit}}"], capture=True
+    )
+    if tagged_revision != revision:
+        raise PublishError(
+            "release tag must already exist and resolve to the clean checked-out source revision"
+        )
     identity = workflow_identity()
     metadata_dir.mkdir(parents=True, exist_ok=True)
 
@@ -270,7 +277,7 @@ def prepare_image(
     }
     if lock_label:
         expected_labels[f"com.speech-platform.{lock_label}"] = dependency_lock_digest(
-            runtime_variant
+            "tts" if service == "tts" else runtime_variant
         )
     if labels.get(LABEL_REVISION) != revision:
         raise PublishError(
@@ -306,6 +313,26 @@ def prepare_image(
 
 
 def compose_image_reference(service: str, variant: str, revision: str) -> str:
+    if service == "tts":
+        env = os.environ.copy()
+        env["SOURCE_REVISION"] = revision
+        args = [
+            "docker",
+            "compose",
+            "--env-file",
+            ".env.example",
+            "-f",
+            "compose.yaml",
+            "config",
+            "--format",
+            "json",
+        ]
+        try:
+            return json.loads(command(args, env=env, capture=True))["services"]["tts"][
+                "image"
+            ]
+        except (KeyError, TypeError, json.JSONDecodeError) as error:
+            raise PublishError("canonical Compose TTS image is unavailable") from error
     compose_files = [
         "deployments/compose/compose.yaml",
         "deployments/compose/compose.stt-cuda-build.yaml"
@@ -345,7 +372,11 @@ def compose_image_reference(service: str, variant: str, revision: str) -> str:
 
 def dependency_lock_digest(variant: str) -> str:
     return hashlib.sha256(
-        Path(f"services/requirements-stt-{variant}.lock").read_bytes()
+        Path(
+            "services/requirements-tts.lock"
+            if variant == "tts"
+            else f"services/requirements-stt-{variant}.lock"
+        ).read_bytes()
     ).hexdigest()
 
 

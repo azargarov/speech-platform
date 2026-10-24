@@ -1,0 +1,20 @@
+title = "SpeechPlatform: defaults with two exact reviewed non-secret exclusions"
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Test APIKeyEnv is an environment-variable identifier"
+condition = "AND"
+paths = ['(?:^|/)internal/texttransform/service_test\.go$']
+regexTarget = "secret"
+regexes = ['^M05B_TEST_MISSING_KEY$']
+
+[[rules.allowlists]]
+description = "Exact public Git commit ID in the historical baseline api_source_revision"
+condition = "AND"
+paths = ['(?:^|/)releases/stt-cuda-baseline-001\.yaml$']
+regexTarget = "secret"
+regexes = ['^7356dda0b650f757a842f498e080acca5d2ddf81$']

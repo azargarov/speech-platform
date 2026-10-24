@@ -1,0 +1,132 @@
+# Install SpeechPlatform
+
+The supported path is root `compose.yaml` through `scripts/product_deployment.py`.
+`legacy-plan`/`legacy-install` and `releases/voiceservice-v0.1.2.yaml` describe the
+historical VoiceService foundation, including health-only TTS. Do not use that
+installer to deploy the current VoxCPM2 worker.
+
+## Prerequisites
+
+- Linux amd64; Ubuntu 24.04 is the qualified distribution. Docker Engine and
+  Compose plugin >=2.24; operator access to the local Unix Docker daemon.
+  Remote DOCKER_HOST/DOCKER_CONTEXT endpoints are rejected; no context is switched
+  automatically. Deployment overrides must be in `.env`, not a previous shell.
+- NVIDIA GPU/driver and NVIDIA Container Toolkit for STT/TTS. Host `nvidia-smi`
+  is necessary but insufficient: installation runs a disposable, network-disabled
+  CUDA driver/device probe in each selected worker image before service creation.
+- Python >=3.12 virtualenv dependencies from `requirements-dev.txt`, Go compatible
+  with `go.mod` (>=1.24.0), Git,
+  network access for uncached image builds (registries, PyPI, GitHub). The Gateway
+  image and CI pin Go 1.27.2; host Go is used for config validation. Ordinary
+  CI builds do not load models. FFmpeg on the host is useful for audio inspection;
+  the TTS image includes its own FFmpeg.
+- At least `INSTALL_MIN_FREE_GIB` free on the build and Docker storage filesystems
+  (20 GiB default; Docker storage is checked when host-visible),
+  plus capacity for pinned STT/TTS artifacts. Allow more disk for uncached CUDA
+  wheels/layers. Model provisioning is explicit and never performed by preflight.
+- Model-store ownership and configured reader GIDs must let the operator verify
+  artifacts and container UID 65532 read them. Ask the store administrator to add
+  the operator to the model-reader group, then start a new login session. Runtime
+  mounts remain read-only; existing complete stores need not be writable.
+
+## Configure, check and install
+
+```sh
+python3 -m venv .venv
+make bootstrap PYTHON=.venv/bin/python
+cp .env.example .env
+chmod 600 .env
+# Review model paths, reader GIDs, GPU indices, project name, bind IP and port.
+make preflight PYTHON=.venv/bin/python
+make install PYTHON=.venv/bin/python
+make status PYTHON=.venv/bin/python
+```
+
+Provision missing artifacts separately with `make model-fetch` and
+`make tts-model-fetch`, after reviewing paths, ownership and model terms. These
+commands may need the store owner's privileges; preflight never invokes sudo,
+pulls images, downloads models, creates containers/networks or loads GPU models.
+Its configuration checks may populate ordinary Go/Python build caches.
+
+The report groups Host, GPU, Models, Networking, External Providers and Deployment
+results. PASS is satisfied, WARN permits installation with the stated limitation,
+FAIL blocks it, SKIP is disabled/not applicable. Every WARN/FAIL gives a corrective
+next step. Summary counts end with READY TO INSTALL or NOT READY TO INSTALL;
+blocking failures return nonzero. Dirty source is WARN during inspection and FAIL
+during install. Installation requires reviewed changes committed first.
+
+Single-service operations use the same configuration and preserve other services:
+
+```sh
+make preflight SERVICE=stt PYTHON=.venv/bin/python
+make install SERVICE=stt PYTHON=.venv/bin/python
+make install SERVICE=tts PYTHON=.venv/bin/python
+make install SERVICE=gateway PYTHON=.venv/bin/python
+make gpu-check SERVICE=tts PYTHON=.venv/bin/python  # explicit disposable GPU probe
+```
+
+Gateway-only install requires healthy STT/TTS workers because its readiness checks
+both. Default install builds/starts all three. It builds only selected services,
+validates local image identity, uses `--no-build --pull never` for activation,
+then waits for selected health/readiness. Rerunning converges through Compose.
+For the special prebuilt Gateway path, preserve `SERVICE=gateway NO_BUILD=1` plus
+explicit expected image ID and source revision; see `.env.example`.
+
+## Optional local text transformation and Ollama
+
+Default Gateway config disables LLM use and requires no Ollama/cloud service.
+Copy `configs/gateway-text.example.yaml` into ignored `private/`, adapt its
+listener to `0.0.0.0` and worker URLs to `http://stt:8081` / `http://tts:8082`, then
+set `GATEWAY_CONFIG=private/<name>.yaml` in `.env`. Paths are canonicalized; root
+Compose also uses a bind-mount object so relative names cannot become named volumes.
+
+An enabled local model requires the externally owned running Ollama container,
+its existing internal bridge network and alias `ollama`, endpoint
+`http://ollama:11434/api/generate`, and the exact configured model already present.
+The Ollama owner prepares these prerequisites explicitly. SpeechPlatform only
+inspects/reuses them: it never creates, restarts, upgrades or attaches shared Ollama.
+Preflight queries `/api/version` and `/api/tags` without loading a model; missing
+model/unreachable required local provider is FAIL. Gateway DNS is tested from an
+existing container when possible and checked after first installation.
+
+Cloud stays opt-in through `selection.allow_cloud: true`. No credentials are
+required while false, and cold/unavailable local models do not change routing.
+For enabled cloud models, use an HTTPS endpoint and an `api_key_env` identifier;
+put the matching KEY=value entries in `private/cloud.env` (0600), or set
+`GATEWAY_SECRETS_FILE` to another private file. Do not quote values, use whitespace,
+or add unrelated keys. That optional file is passed only to Gateway. Preflight
+validates it without contacting paid provider inference endpoints. Public errors
+and reports never include credential values.
+
+## Smoke test, upgrade and remove
+
+`make test` is the deterministic offline test suite. Live smoke tests are explicit:
+
+```sh
+# Add Authorization: Bearer ... for token-protected deployments.
+curl --fail-with-body -H 'Content-Type: application/json' \
+  -d '{"operations":["stt","tts"]}' http://127.0.0.1:8080/v1/models/warmup
+curl --fail-with-body -H 'Content-Type: application/json' \
+  -d '{"text":"This is a synthetic speech test.","language":"en","mode":"extra_high_quality","audio_processing":"gentle"}' \
+  http://127.0.0.1:8080/v1/tts/speech -o private/synthetic.wav
+make test-stt PYTHON=.venv/bin/python AUDIO=private/synthetic.wav SOURCE_LANGUAGE=en
+```
+
+Use the [public contract](../../api/openapi/public-v1.yaml) for SSML and text
+transformation. Wait for STT/TTS idle unloading before local LLM experiments on
+small GPUs; no deployment lock reserves VRAM. Translation unsupported by the pinned
+large-v3-turbo model returns an explicit error, not a fabricated translation.
+
+For an upgrade, check out the approved tag, review `.env` compatibility, then run
+preflight/install again. For recovery, select the previous known-good source/image
+and matching configuration. No volumes or model stores need deletion.
+
+```sh
+make stop SERVICE=tts PYTHON=.venv/bin/python
+make remove SERVICE=tts PYTHON=.venv/bin/python
+make remove PYTHON=.venv/bin/python  # project containers/internal networks only
+```
+
+Removal never uses `-v`, `--rmi` or global cleanup and preserves shared/external
+Ollama, models and persistent volumes. Verify the project name belongs to this
+checkout before changing resources. Private reports and audio must stay ignored.
