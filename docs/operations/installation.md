@@ -125,7 +125,9 @@ put the matching KEY=value entries in `private/cloud.env` (0600), or set
 `GATEWAY_SECRETS_FILE` to another private file. Do not quote values, use whitespace,
 or add unrelated keys. That optional file is passed only to Gateway. Preflight
 validates it without contacting paid provider inference endpoints. Public errors
-and reports never include credential values.
+and reports never include credential values. Groq STT credentials are checked
+independently when `groq_stt.enabled` is true; they do not depend on text
+`allow_cloud`. Cloud audio still requires per-request `X-Allow-Cloud-Audio: true`.
 
 ## Smoke test, upgrade and remove
 

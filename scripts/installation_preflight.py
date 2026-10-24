@@ -87,26 +87,11 @@ def probe_ollama(origin: str, models: list[str], *, timeout=5, opener=None):
     return documents[0]["version"]
 
 
-def cloud_credentials(root: Path, values: dict, transform: dict):
+def cloud_credentials(root: Path, values: dict, gateway_config: dict, credential_names):
     """Validate the optional, private runtime env file without displaying secrets."""
-    if (
-        transform.get("enabled") is not True
-        or transform.get("selection", {}).get("allow_cloud") is not True
-    ):
+    names = credential_names(gateway_config)
+    if not names:
         return False
-    enabled = {
-        m.get("provider")
-        for m in transform.get("models", [])
-        if m.get("enabled") is True
-    }
-    providers = [
-        p
-        for p in transform.get("providers", [])
-        if p.get("locality") == "cloud" and p.get("id") in enabled
-    ]
-    if not providers:
-        return False
-    names = {p.get("api_key_env") for p in providers}
     if any(
         not isinstance(n, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]*", n) for n in names
     ):
@@ -641,19 +626,13 @@ def collect(
             "Use mapping entries in provider/model lists and a selection mapping; run Gateway --check-config.",
         )
         return r
-    if transform.get("enabled") is not True:
-        r.add(
-            "External Providers",
-            "SKIP",
-            "Ollama and cloud",
-            "Text transformation disabled; credentials and models not required.",
-        )
-        return r
     cloud = check(
         "External Providers",
-        "Cloud configuration (no inference)",
-        lambda: cloud_credentials(product.ROOT, values, transform),
-        "For enabled cloud processing, set HTTPS endpoints/api_key_env and supply matching nonempty credentials in private/cloud.env (0600). No token values are printed.",
+        "Enabled provider credentials (no inference)",
+        lambda: cloud_credentials(
+            product.ROOT, values, document, product.gateway_credential_env_names
+        ),
+        "For each enabled cloud provider, configure its api_key_env and matching nonempty credential in a private/cloud.env file with mode 0600. No token values are printed.",
     )
     if cloud is True:
         r.add(
@@ -670,6 +649,14 @@ def collect(
             "Cloud inference",
             "Disabled or no enabled cloud model; credentials not required.",
         )
+    if transform.get("enabled") is not True:
+        r.add(
+            "External Providers",
+            "SKIP",
+            "Ollama and text transformation",
+            "Text transformation disabled; local endpoint and text credentials are not required.",
+        )
+        return r
     local = check(
         "External Providers",
         "Local endpoint eligibility",

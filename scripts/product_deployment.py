@@ -137,15 +137,35 @@ def set_compose_env(
     os.environ["GATEWAY_CONFIG"] = str(gateway_config_path(values))
     os.environ["GATEWAY_SECRETS_FILE"] = str(gateway_secrets_path(values))
     document = yaml.safe_load(gateway_config_path(values).read_text()) or {}
-    transform = document.get("text_transform") or {}
-    if (
-        transform.get("enabled") is not True
-        or transform.get("selection", {}).get("allow_cloud") is not True
-    ):
+    if not gateway_credential_env_names(document):
         os.environ["GATEWAY_SECRETS_FILE"] = "/dev/null"
     os.environ.pop("GATEWAY_IMAGE", None)
     if gateway_image is not None:
         os.environ["GATEWAY_IMAGE"] = gateway_image
+
+
+def gateway_credential_env_names(document: dict) -> set[str | None]:
+    """Return credential variables used by currently enabled cloud providers."""
+    names: set[str | None] = set()
+    groq = document.get("groq_stt") or {}
+    if groq.get("enabled") is True:
+        names.add(groq.get("api_key_env", "GROQ_STT_API_KEY"))
+
+    transform = document.get("text_transform") or {}
+    selection = transform.get("selection") or {}
+    if transform.get("enabled") is True and selection.get("allow_cloud") is True:
+        enabled_provider_ids = {
+            model.get("provider")
+            for model in transform.get("models", [])
+            if model.get("enabled") is True
+        }
+        names.update(
+            provider.get("api_key_env")
+            for provider in transform.get("providers", [])
+            if provider.get("locality") == "cloud"
+            and provider.get("id") in enabled_provider_ids
+        )
+    return names
 
 
 def compose(values, revision, *args, capture=False, gateway_image=None):

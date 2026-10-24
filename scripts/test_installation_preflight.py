@@ -76,6 +76,7 @@ class PreflightTests(unittest.TestCase):
             verify_project_ownership=lambda _: False,
             check_gateway_port=lambda *_: None,
             gateway_config_path=lambda _: config,
+            gateway_credential_env_names=product.gateway_credential_env_names,
             set_compose_env=lambda *_: None,
             compose=lambda *_, **__: SimpleNamespace(returncode=0, stdout=""),
             require_existing_workers_healthy=lambda *_: None,
@@ -188,7 +189,14 @@ class PreflightTests(unittest.TestCase):
             preflight.cloud_credentials(
                 Path("/not-present"),
                 {},
-                {"enabled": True, "selection": {"allow_cloud": False}},
+                {
+                    "groq_stt": {"enabled": False},
+                    "text_transform": {
+                        "enabled": True,
+                        "selection": {"allow_cloud": False},
+                    },
+                },
+                product.gateway_credential_env_names,
             )
         )
 
@@ -206,20 +214,98 @@ class PreflightTests(unittest.TestCase):
             (root / "private").mkdir()
             secret = root / "private/cloud.env"
             with self.assertRaises(OSError):
-                preflight.cloud_credentials(root, {}, t)
+                preflight.cloud_credentials(
+                    root,
+                    {},
+                    {"text_transform": t},
+                    product.gateway_credential_env_names,
+                )
             secret.write_text("TEST_KEY=synthetic-test-credential\n")
             secret.chmod(0o600)
-            self.assertTrue(preflight.cloud_credentials(root, {}, t))
+            self.assertTrue(
+                preflight.cloud_credentials(
+                    root,
+                    {},
+                    {"text_transform": t},
+                    product.gateway_credential_env_names,
+                )
+            )
             secret.chmod(0o644)
             with self.assertRaises(ValueError):
-                preflight.cloud_credentials(root, {}, t)
+                preflight.cloud_credentials(
+                    root,
+                    {},
+                    {"text_transform": t},
+                    product.gateway_credential_env_names,
+                )
             secret.chmod(0o600)
             secret.write_text("TEST_KEY=bad whitespace\n")
             with self.assertRaises(ValueError):
-                preflight.cloud_credentials(root, {}, t)
+                preflight.cloud_credentials(
+                    root,
+                    {},
+                    {"text_transform": t},
+                    product.gateway_credential_env_names,
+                )
             secret.write_text("OTHER_KEY=synthetic-test-credential\n")
             with self.assertRaises(ValueError):
-                preflight.cloud_credentials(root, {}, t)
+                preflight.cloud_credentials(
+                    root,
+                    {},
+                    {"text_transform": t},
+                    product.gateway_credential_env_names,
+                )
+
+    def test_groq_and_cloud_text_credentials_are_independent(self):
+        cloud_text = {
+            "enabled": True,
+            "selection": {"allow_cloud": True},
+            "models": [{"provider": "text-cloud", "enabled": True}],
+            "providers": [
+                {
+                    "id": "text-cloud",
+                    "locality": "cloud",
+                    "api_key_env": "TEXT_API_KEY",
+                }
+            ],
+        }
+        groq = {"enabled": True, "api_key_env": "GROQ_STT_API_KEY"}
+        combinations = {
+            "groq only": (
+                {"groq_stt": groq, "text_transform": {"enabled": False}},
+                "GROQ_STT_API_KEY=synthetic-groq-credential\n",
+            ),
+            "cloud text only": (
+                {"groq_stt": {"enabled": False}, "text_transform": cloud_text},
+                "TEXT_API_KEY=synthetic-text-credential\n",
+            ),
+            "both": (
+                {"groq_stt": groq, "text_transform": cloud_text},
+                "GROQ_STT_API_KEY=synthetic-groq-credential\nTEXT_API_KEY=synthetic-text-credential\n",
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "private").mkdir()
+            secret = root / "private/cloud.env"
+            for name, (document, contents) in combinations.items():
+                with self.subTest(name=name):
+                    secret.write_text(contents)
+                    secret.chmod(0o600)
+                    self.assertTrue(
+                        preflight.cloud_credentials(
+                            root, {}, document, product.gateway_credential_env_names
+                        )
+                    )
+            secret.write_text("GROQ_STT_API_KEY=synthetic-groq-credential\n")
+            secret.chmod(0o600)
+            with self.assertRaisesRegex(ValueError, "every enabled"):
+                preflight.cloud_credentials(
+                    root,
+                    {},
+                    combinations["both"][0],
+                    product.gateway_credential_env_names,
+                )
 
 
 class OllamaMetadataTests(unittest.TestCase):
@@ -407,7 +493,12 @@ class AdditionalBoundaryTests(unittest.TestCase):
             ],
         }
         with self.assertRaisesRegex(ValueError, "reserved"):
-            preflight.cloud_credentials(Path("/unused"), {}, t)
+            preflight.cloud_credentials(
+                Path("/unused"),
+                {},
+                {"text_transform": t},
+                product.gateway_credential_env_names,
+            )
 
     def test_ollama_request_has_bounded_timeout(self):
         release = threading.Event()
@@ -438,6 +529,53 @@ class AdditionalBoundaryTests(unittest.TestCase):
 
 
 class CloudComposeForwardingTests(unittest.TestCase):
+    def test_compose_secret_file_selection_is_provider_independent(self):
+        import os
+        import yaml
+
+        groq_only = {"groq_stt": {"enabled": True}}
+        text_only = {
+            "text_transform": {
+                "enabled": True,
+                "selection": {"allow_cloud": True},
+                "models": [{"provider": "cloud", "enabled": True}],
+                "providers": [
+                    {"id": "cloud", "locality": "cloud", "api_key_env": "TEXT_KEY"}
+                ],
+            }
+        }
+        both = {
+            **groq_only,
+            **text_only,
+        }
+        disabled = {
+            "groq_stt": {"enabled": False},
+            "text_transform": {"enabled": False},
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "gateway.yaml"
+            secret = Path(temp) / "private" / "cloud.env"
+            secret.parent.mkdir()
+            for document, expected in (
+                (groq_only, str(secret)),
+                (text_only, str(secret)),
+                (both, str(secret)),
+                (disabled, "/dev/null"),
+            ):
+                with self.subTest(document=document):
+                    config.write_text(yaml.safe_dump(document))
+                    with (
+                        patch.dict(os.environ, {}, clear=True),
+                        patch.object(
+                            product, "gateway_config_path", return_value=config
+                        ),
+                        patch.object(
+                            product, "gateway_secrets_path", return_value=secret
+                        ),
+                    ):
+                        product.set_compose_env({}, "a" * 40)
+                        self.assertEqual(os.environ["GATEWAY_SECRETS_FILE"], expected)
+
     def test_private_credentials_forward_only_to_gateway(self):
         import os
         import shutil
