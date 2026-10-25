@@ -2,19 +2,21 @@
 
 ## Status
 
-Offline qualification PASS. Live regression is pending the authorized
-implementation commit and production install. D04 is not closed.
+**PASS; COMPLETE (operator accepted 2026-10-25).**
 
 ## Acceptance
 
 Legacy installer and network mutator dependencies are removed. The Make +
-Compose path, preflight safeguards and independent authenticated STT/TTS smoke
-commands passed offline verification. Production services remain healthy on
-the previous committed revision; deployment of the D04 source changes has not
-been tested.
+Compose path and preflight safeguards passed offline verification and live
+installation. Authenticated local STT and synthetic TTS smoke requests passed
+through the independent API client. The initial direct-script CLI attempt
+failed before HTTP due to an import-path error; the client was corrected to
+module execution in a separate commit and the live checks then passed.
 
 ## Limitations
 
-Production deployment of the D04 source and live STT/TTS smoke tests have not
-yet been executed. No runtime regression is established until those checks
-pass.
+Semantic quality of STT output was not independently evaluated; its transcript
+remains private. TTS output is retained privately for operator review. These
+smokes establish API operation on the tested input and do not qualify sustained
+load, concurrent GPU inference or cloud-provider behavior. Cloud inference
+remained disabled.

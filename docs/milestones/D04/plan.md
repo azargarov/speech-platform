@@ -29,7 +29,9 @@ safeguards, rollback behavior and independent authenticated API smoke checks.
 
 ## Status
 
-Offline qualification passed. The operator has authorized the implementation
-commit and live regression. The clean committed source safeguard requires the
-implementation commit before installation. D04 remains open pending production
-regression and operator acceptance.
+**PASS; COMPLETE (operator accepted 2026-10-25).** Offline verification, live
+installation, authenticated local STT/TTS smoke tests, service identity checks
+and preservation checks passed. A direct-script import-path defect discovered
+during the first smoke attempt was fixed in separate commit
+`fd0518e75a96f94390fdd7c049043f0bb59f5de4`; no inference was sent by that
+failed attempt. Final evidence is in [verification](verification.md).
