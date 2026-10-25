@@ -45,7 +45,7 @@ Configure these values in `.env` when needed:
 - `SPEECH_API_URL`: optional HTTPS URL for the TLS reverse proxy used by `make test-stt`; configure it for non-loopback exposure. The Gateway itself serves HTTP, so keep its host port loopback-only unless a firewall permits access only from the TLS proxy.
 - `MODEL_READ_GID`: supplementary group allowed to read model artifacts (default 988).
 
-`make plan` validates Docker/Compose, NVIDIA GPU selection, the pinned release and model artifact, API exposure settings and rendered Compose configuration. It does not start or change containers. `make install` requires a clean Git checkout, builds the pinned-source images, starts the canonical Compose project, waits for readiness and prints the API endpoint. Re-running it is safe. It acts only on the configured Compose project name (`speech-platform` by default).
+`make preflight` validates configuration and host prerequisites without changing Docker state. `make install` requires a clean committed checkout, retains currently used images by immutable image ID, builds all three images from that revision, verifies source/role labels and CUDA visibility, then starts the fixed `speech-platform` Compose project and waits for health/readiness. It never removes volumes, model data, images, networks or shared Ollama. `make status`, `make logs` and `make stop` are scoped to that project.
 
 Preflight does not invoke sudo. The operator needs read/traverse access through the configured model-reader group to verify artifacts; ask the model-store administrator to arrange that access.
 

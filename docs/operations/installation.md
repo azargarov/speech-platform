@@ -1,8 +1,11 @@
 # Install SpeechPlatform
 
-The supported runtime is root `compose.yaml`. `make preflight` runs the independent,
-read-only `scripts/preflight.py`; `make install` still uses
-`scripts/product_deployment.py` for build and deployment orchestration.
+The supported runtime is root `compose.yaml`. `make preflight` runs independent,
+read-only `scripts/preflight.py`. `make install`, `status`, `logs`, and `stop` use
+Make and Docker Compose. Focused helpers sanitize Compose invocation, retain
+existing image IDs, verify built-image labels and run CUDA visibility probes.
+`scripts/product_deployment.py` remains a fallback during D02 migration, not the
+canonical operator path.
 The historical VoiceService installer has been retired. The descriptor
 `releases/voiceservice-v0.1.2.yaml` remains as historical model and image
 provenance; it does not describe the current VoxCPM2 deployment.
@@ -11,17 +14,17 @@ provenance; it does not describe the current VoxCPM2 deployment.
 
 - Linux amd64; Ubuntu 24.04 is the qualified distribution. Docker Engine and
   Compose plugin >=2.24; operator access to the local Unix Docker daemon.
-  Remote DOCKER_HOST/DOCKER_CONTEXT endpoints are rejected; no context is switched
-  automatically. Deployment overrides must be in `.env`, not a previous shell.
+  Installation explicitly uses the `default` Docker context and requires its
+  endpoint to be local Unix. Deployment overrides belong in `.env`, not a prior
+  shell. The Compose project is fixed to `speech-platform`.
 - NVIDIA GPU/compatible driver and NVIDIA Container Toolkit for STT/TTS. Host
   `nvidia-smi` is necessary but insufficient: installation runs a disposable,
   network-disabled CUDA driver/device probe in each selected worker image before
   service creation. A free-VRAM check is an observation, not a reservation or a
   guarantee that models can coexist. SpeechPlatform does not claim exclusive
   GPU ownership; Ollama remains shared and is never evicted by the installer.
-  The obsolete Python `require_idle_gpu` helper option is retained only as a
-  compatibility check: false/omitted is accepted, while true fails explicitly
-  because the installer does not inspect process ownership.
+  A legacy Python installer option named `require_idle_gpu` is not an active
+  guarantee; it fails explicitly because process ownership is not inspected.
 - Python >=3.12 virtualenv dependencies from `requirements-dev.txt`, Go compatible
   with `go.mod` (>=1.24.0), Git,
   network access for uncached image builds (registries, PyPI, GitHub). The Gateway
@@ -43,7 +46,7 @@ provenance; it does not describe the current VoxCPM2 deployment.
 python3 -m venv .venv
 make bootstrap PYTHON=.venv/bin/python
 make init
-# Review model paths, reader GIDs, GPU indices, project name, bind IP and port.
+# Review model paths, reader GIDs, GPU indices, bind IP and port.
 # Do not print or paste SPEECH_API_TOKEN into logs or reports.
 ${EDITOR:-vi} .env
 make preflight PYTHON=.venv/bin/python
@@ -76,22 +79,26 @@ next step. Summary counts end with READY TO INSTALL or NOT READY TO INSTALL;
 blocking failures return nonzero. Dirty source is WARN during inspection and FAIL
 during install. Installation requires reviewed changes committed first.
 
-Single-service operations use the same configuration and preserve other services:
+Installation always builds and updates the complete three-service stack.
+Inspection, logs and stop may select one service:
 
 ```sh
 make preflight SERVICE=stt PYTHON=.venv/bin/python
-make install SERVICE=stt PYTHON=.venv/bin/python
-make install SERVICE=tts PYTHON=.venv/bin/python
-make install SERVICE=gateway PYTHON=.venv/bin/python
-make gpu-check SERVICE=tts PYTHON=.venv/bin/python  # explicit disposable GPU probe
+make status SERVICE=tts PYTHON=.venv/bin/python
+make logs SERVICE=tts PYTHON=.venv/bin/python
+make stop SERVICE=tts PYTHON=.venv/bin/python
 ```
 
-Gateway-only install requires healthy STT/TTS workers because its readiness checks
-both. Default install builds/starts all three. It builds only selected services,
-validates local image identity, uses `--no-build --pull never` for activation,
-then waits for selected health/readiness. Rerunning converges through Compose.
-For the special prebuilt Gateway path, preserve `SERVICE=gateway NO_BUILD=1` plus
-explicit expected image ID and source revision; see `.env.example`.
+Before service replacement, install checks the clean Git source, read-only
+preflight, fixed Compose ownership, and retains current container image IDs under
+revision-specific local rollback tags. It builds all services through Compose,
+checks source/role/platform labels, runs network-disabled CUDA visibility probes
+for STT and TTS, then calls `compose up --no-build --pull never`. Compose waits
+for health; bounded readiness requests then check all three services. Installation
+never rotates `.env`, downloads models or makes cloud inference requests.
+`GATEWAY_EXPECTED_IMAGE_ID` and `GATEWAY_EXPECTED_SOURCE_REVISION` are obsolete;
+preflight rejects them with a migration message. Remove those reviewed lines from
+`.env` manually before install. The installer never edits private configuration.
 
 ## Model lifecycle and request admission
 
@@ -163,16 +170,19 @@ transformation. Wait for STT/TTS idle unloading before local LLM experiments on
 small GPUs; no deployment lock reserves VRAM. Translation unsupported by the pinned
 large-v3-turbo model returns an explicit error, not a fabricated translation.
 
-For an upgrade, check out the approved tag, review `.env` compatibility, then run
-preflight/install again. For recovery, select the previous known-good source/image
-and matching configuration. No volumes or model stores need deletion.
+For an upgrade, check out the approved clean revision, review `.env` compatibility,
+then run preflight/install. Before building, the installer retains current container
+image IDs as local `speech-platform-rollback-<service>:<image-id>` tags. To roll
+back, check out the previously qualified source revision with its matching private
+configuration and run preflight/install; Compose rebuilds that revision. If its
+source or compatible configuration is unavailable, stop and recover those inputs
+before replacing services. Model stores and private files are not removed.
 
 ```sh
 make stop SERVICE=tts PYTHON=.venv/bin/python
-make remove SERVICE=tts PYTHON=.venv/bin/python
-make remove PYTHON=.venv/bin/python  # project containers/internal networks only
 ```
 
-Removal never uses `-v`, `--rmi` or global cleanup and preserves shared/external
-Ollama, models and persistent volumes. Verify the project name belongs to this
-checkout before changing resources. Private reports and audio must stay ignored.
+`make stop` stops only the selected SpeechPlatform service, or all three when no
+service is selected. It preserves containers, images, volumes, networks, models,
+private files and shared Ollama. Do not use the legacy `remove` target for normal
+operation. Private reports and audio must stay ignored.

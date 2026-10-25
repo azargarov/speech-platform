@@ -67,6 +67,19 @@ $(error Unknown publish service '$(SERVICE)'; choose gateway, stt, or tts)
 endif
 endif
 .PHONY: init preflight gpu-check stop remove verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check tts-lock-check release-check model-check model-fetch tts-model-check tts-model-fetch tts-warmup tts-state plan install status logs test-stt stt-cpu-integration stt-cuda-http-integration
+DEPLOY_SERVICES := gateway stt tts
+ifneq ($(filter status logs stop,$(MAKECMDGOALS)),)
+ifneq ($(strip $(SERVICE)),)
+ifeq ($(filter $(SERVICE),$(DEPLOY_SERVICES)),)
+$(error SERVICE must be gateway, stt, or tts)
+endif
+endif
+endif
+ifneq ($(filter install,$(MAKECMDGOALS)),)
+ifneq ($(strip $(SERVICE)),)
+$(error make install deploys the complete SpeechPlatform stack; omit SERVICE)
+endif
+endif
 bootstrap:
 	$(PYTHON) -m pip install -r requirements-dev.txt
 	$(PYTHON) -m pip install --require-hashes -r services/requirements-stt-cpu.lock
@@ -126,16 +139,30 @@ init:
 	sh scripts/init.sh
 preflight:
 	$(PYTHON) scripts/preflight.py $(if $(SERVICE),--service "$(SERVICE)")
-gpu-check stop remove:
+gpu-check remove:
 	$(PYTHON) scripts/product_deployment.py $@ $(if $(SERVICE),--service "$(SERVICE)")
 plan:
 	$(PYTHON) scripts/product_deployment.py plan $(if $(SERVICE),--service "$(SERVICE)") $(NO_BUILD_ARGS)
 install:
-	$(PYTHON) scripts/product_deployment.py install $(if $(SERVICE),--service "$(SERVICE)") $(NO_BUILD_ARGS)
+	@set -eu; \
+	$(PYTHON) scripts/deploy_images.py source; \
+	$(PYTHON) scripts/preflight.py; \
+	$(PYTHON) scripts/deploy_images.py retain; \
+	$(PYTHON) scripts/compose.py build gateway stt tts; \
+	$(PYTHON) scripts/deploy_images.py verify; \
+	$(PYTHON) scripts/deploy_images.py cuda; \
+	$(PYTHON) scripts/compose.py up -d --no-build --pull never --wait --wait-timeout 240; \
+	$(PYTHON) scripts/deploy_images.py running; \
+	$(PYTHON) scripts/compose.py exec -T gateway /healthcheck http://127.0.0.1:8080/readyz; \
+	$(PYTHON) scripts/compose.py exec -T stt python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8081/readyz", timeout=3)'; \
+	$(PYTHON) scripts/compose.py exec -T tts python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8082/readyz", timeout=3)'; \
+	echo "PASS: Gateway, STT, and TTS are healthy and ready"
 status:
-	$(PYTHON) scripts/product_deployment.py status $(if $(SERVICE),--service "$(SERVICE)")
+	$(PYTHON) scripts/deploy_images.py status $(SERVICE)
 logs:
-	$(PYTHON) scripts/product_deployment.py logs $(if $(SERVICE),--service "$(SERVICE)")
+	$(PYTHON) scripts/compose.py logs --tail 100 $(if $(SERVICE),"$(SERVICE)")
+stop:
+	$(PYTHON) scripts/compose.py stop $(if $(SERVICE),"$(SERVICE)")
 test-stt:
 	$(PYTHON) scripts/product_deployment.py test-stt $(if $(AUDIO),--audio "$(AUDIO)") $(if $(SOURCE_LANGUAGE),--source-language "$(SOURCE_LANGUAGE)") $(if $(OUTPUT_LANGUAGE),--output-language "$(OUTPUT_LANGUAGE)")
 governance-check:

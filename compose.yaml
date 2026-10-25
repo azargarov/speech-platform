@@ -1,4 +1,4 @@
-name: ${COMPOSE_PROJECT_NAME:-speech-platform}
+name: speech-platform
 services:
   gateway:
     image: ${GATEWAY_IMAGE:-speech-platform-gateway:${SOURCE_REVISION:-local}}

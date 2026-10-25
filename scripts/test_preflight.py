@@ -402,6 +402,8 @@ class PreflightTests(unittest.TestCase):
                     "SOURCE_REVISION": "deadbeef",
                     "SPEECH_PORT": "9",
                     "COMPOSE_FILE": "unrelated.yaml",
+                    "DOCKER_CONTEXT": "remote",
+                    "DOCKER_HOST": "tcp://remote.invalid:2375",
                 },
             ):
                 env = preflight._compose_environment(values, "a" * 40, config, root)
@@ -409,6 +411,61 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(env["SOURCE_REVISION"], "a" * 40)
         self.assertEqual(env["SPEECH_PORT"], values["SPEECH_PORT"])
         self.assertNotIn("COMPOSE_FILE", env)
+        self.assertNotIn("DOCKER_CONTEXT", env)
+        self.assertNotIn("DOCKER_HOST", env)
+
+    def test_obsolete_gateway_image_pins_fail_with_migration_message(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(temp)
+            values = preflight.load_env(root)
+            values["GATEWAY_EXPECTED_IMAGE_ID"] = "sha256:old-pin"
+            with self.assertRaisesRegex(
+                preflight.PreflightError, "obsolete Gateway image pin"
+            ):
+                preflight.validate_environment(values, root)
+
+    def test_preflight_reports_actionable_legacy_pin_migration_without_values(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(temp)
+            env = root / ".env"
+            with env.open("a") as stream:
+                stream.write("GATEWAY_EXPECTED_IMAGE_ID=private-old-image-id\n")
+            report = preflight.run_checks(root=root)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            report.display()
+        self.assertIn(
+            "Remove the reviewed GATEWAY_EXPECTED_IMAGE_ID", output.getvalue()
+        )
+        self.assertNotIn("private-old-image-id", output.getvalue())
+
+    def test_compose_project_override_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(temp)
+            values = preflight.load_env(root)
+            values["COMPOSE_PROJECT_NAME"] = "another-project"
+            with self.assertRaisesRegex(
+                preflight.PreflightError, "fixed to speech-platform"
+            ):
+                preflight.validate_environment(values, root)
+
+    def test_docker_commands_use_default_context_and_ignore_context_overrides(self):
+        result = SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DOCKER_CONTEXT": "remote",
+                    "DOCKER_HOST": "tcp://remote.invalid:2375",
+                },
+            ),
+            patch.object(preflight.subprocess, "run", return_value=result) as run,
+        ):
+            self.assertEqual(preflight.run_command(["docker", "info"]), "ok")
+        args = run.call_args.args[0]
+        self.assertEqual(args[:3], ["docker", "--context", "default"])
+        self.assertNotIn("DOCKER_CONTEXT", run.call_args.kwargs["env"])
+        self.assertNotIn("DOCKER_HOST", run.call_args.kwargs["env"])
 
     def test_preflight_issues_only_read_only_docker_commands(self):
         with tempfile.TemporaryDirectory() as temp:

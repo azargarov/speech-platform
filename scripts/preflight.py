@@ -73,8 +73,24 @@ class PreflightError(ValueError):
 
 def run_command(args, *, root=ROOT, timeout=60, env=None):
     """Run a bounded inspection/configuration command without shell expansion."""
+    command = list(args)
+    safe_env = dict(os.environ if env is None else env)
+    for key in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG_COUNT",
+    ):
+        safe_env.pop(key, None)
+    if command and command[0] == "docker":
+        command[1:1] = ["--context", "default"]
+        safe_env.pop("DOCKER_CONTEXT", None)
+        safe_env.pop("DOCKER_HOST", None)
     result = subprocess.run(
-        args, cwd=root, text=True, capture_output=True, timeout=timeout, env=env
+        command, cwd=root, text=True, capture_output=True, timeout=timeout, env=safe_env
     )
     if result.returncode:
         raise PreflightError("command rejected")
@@ -236,6 +252,20 @@ def validate_environment(values, root=ROOT):
         raise PreflightError(
             ".env is missing required keys: " + ", ".join(sorted(missing))
         )
+    legacy_pins = values.keys() & {
+        "GATEWAY_EXPECTED_IMAGE_ID",
+        "GATEWAY_EXPECTED_SOURCE_REVISION",
+    }
+    if legacy_pins:
+        raise PreflightError(
+            "obsolete Gateway image pin(s) found: "
+            + ", ".join(sorted(legacy_pins))
+            + "; remove these reviewed lines from .env because installation now builds and verifies images from the clean Git revision"
+        )
+    if values.get("COMPOSE_PROJECT_NAME", "speech-platform") != "speech-platform":
+        raise PreflightError(
+            "COMPOSE_PROJECT_NAME is fixed to speech-platform; remove the override from .env"
+        )
     if values["MODEL_MANIFEST_SHA256"] != STT_MANIFEST_SHA256:
         raise PreflightError("MODEL_MANIFEST_SHA256 must match the pinned STT model")
     if values["TTS_MODEL_MANIFEST_SHA256"] != TTS_MANIFEST_SHA256:
@@ -324,11 +354,23 @@ def _base_environment(values):
         "GATEWAY_IMAGE",
         "GATEWAY_CONFIG",
         "GATEWAY_SECRETS_FILE",
+        "DOCKER_CONTEXT",
+        "DOCKER_HOST",
+        "DOCKER_DEFAULT_PLATFORM",
+        "COMPOSE_BAKE",
+        "COMPOSE_PARALLEL_LIMIT",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG_COUNT",
     }
     for key in controlled:
         env.pop(key, None)
     env.update(values)
-    env["COMPOSE_PROJECT_NAME"] = values.get("COMPOSE_PROJECT_NAME", "speech-platform")
+    env["COMPOSE_PROJECT_NAME"] = "speech-platform"
     return env
 
 
@@ -612,7 +654,39 @@ def run_checks(
         lambda: load_env(root),
         "Run make init; keep .env mode 0600 and correct unsupported or duplicate keys.",
     )
-    report.values = values or {}
+    values = values or {}
+    report.values = values
+    legacy_pins = values.keys() & {
+        "GATEWAY_EXPECTED_IMAGE_ID",
+        "GATEWAY_EXPECTED_SOURCE_REVISION",
+    }
+    if legacy_pins:
+        report.add(
+            "Deployment",
+            "FAIL",
+            "Obsolete Gateway image pins",
+            "Remove the reviewed GATEWAY_EXPECTED_IMAGE_ID and GATEWAY_EXPECTED_SOURCE_REVISION lines from .env; install now verifies images built from the clean Git revision.",
+        )
+        for group in ("GPU", "Models", "Networking", "External Providers"):
+            report.add(
+                group,
+                "SKIP",
+                "Dependent checks",
+                "Remove obsolete .env settings first.",
+            )
+        return report
+    if values.get("COMPOSE_PROJECT_NAME", "speech-platform") != "speech-platform":
+        report.add(
+            "Deployment",
+            "FAIL",
+            "Compose project override",
+            "Remove COMPOSE_PROJECT_NAME from .env; the supported project name is fixed to speech-platform.",
+        )
+        for group in ("GPU", "Models", "Networking", "External Providers"):
+            report.add(
+                group, "SKIP", "Dependent checks", "Remove the project override first."
+            )
+        return report
     validated = (
         check(
             "Deployment",
@@ -639,15 +713,8 @@ def run_checks(
     )
 
     def local_endpoint():
-        context = os.environ.get("DOCKER_CONTEXT")
-        endpoint = os.environ.get("DOCKER_HOST") if not context else None
-        if not endpoint:
-            data = json.loads(
-                command(
-                    ["docker", "context", "inspect", *([context] if context else [])]
-                )
-            )
-            endpoint = data[0].get("Endpoints", {}).get("docker", {}).get("Host", "")
+        data = json.loads(command(["docker", "context", "inspect", "default"]))
+        endpoint = data[0].get("Endpoints", {}).get("docker", {}).get("Host", "")
         if not isinstance(endpoint, str) or not endpoint.startswith("unix://"):
             raise PreflightError("remote Docker endpoint")
 
@@ -782,7 +849,7 @@ def run_checks(
             else "",
         )
 
-    project = values.get("COMPOSE_PROJECT_NAME", "speech-platform")
+    project = "speech-platform"
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project):
         report.add(
             "Deployment",
