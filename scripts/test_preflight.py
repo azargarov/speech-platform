@@ -17,17 +17,16 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts import preflight as preflight
-from scripts import product_deployment as product
 
 
 class FirstTimeSetupTests(unittest.TestCase):
     def make_checkout(self, root):
         root = Path(root)
-        shutil.copy(product.ROOT / ".env.example", root / ".env.example")
-        shutil.copy(product.ROOT / "Makefile", root / "Makefile")
+        shutil.copy(preflight.ROOT / ".env.example", root / ".env.example")
+        shutil.copy(preflight.ROOT / "Makefile", root / "Makefile")
         scripts = root / "scripts"
         scripts.mkdir(exist_ok=True)
-        shutil.copy(product.ROOT / "scripts/init.sh", scripts / "init.sh")
+        shutil.copy(preflight.ROOT / "scripts/init.sh", scripts / "init.sh")
         return root
 
     def run_init(self, root, *, env=None):
@@ -62,9 +61,8 @@ class FirstTimeSetupTests(unittest.TestCase):
             for relative in ("private", "private/audio", "private/deployment"):
                 self.assertEqual(stat.S_IMODE((root / relative).stat().st_mode), 0o700)
             self.assertNotIn("GROQ_STT_API_KEY", values)
-            with patch.object(product, "ROOT", root):
-                loaded = product.load_env()
-                product.validate_environment(loaded)
+            loaded = preflight.load_env(root)
+            preflight.validate_environment(loaded, root)
             self.assertEqual(loaded["SPEECH_API_TOKEN"], token)
 
     def test_tokens_are_independent_and_repeated_init_preserves_existing_env(self):
@@ -240,10 +238,10 @@ class PreflightTests(unittest.TestCase):
         (root / "configs").mkdir()
         (root / "go.mod").write_text("module fixture\n\ngo 1.24.0\n")
         shutil.copy(
-            product.ROOT / "configs/stt-product-deployment.yaml",
+            preflight.ROOT / "configs/stt-product-deployment.yaml",
             root / "configs/stt-product-deployment.yaml",
         )
-        shutil.copy(product.ROOT / "configs/tts.yaml", root / "configs/tts.yaml")
+        shutil.copy(preflight.ROOT / "configs/tts.yaml", root / "configs/tts.yaml")
         config = root / "private/deployment/gateway.yaml"
         config.write_text(
             yaml.safe_dump({"text_transform": transform} if transform else {})
@@ -289,6 +287,31 @@ class PreflightTests(unittest.TestCase):
                 )
             if args[:2] == ["docker", "compose"] and "ls" in args:
                 return "[]"
+            if args[:3] == ["docker", "inspect", "ollama"]:
+                return json.dumps(
+                    [
+                        {
+                            "State": {"Running": True},
+                            "NetworkSettings": {
+                                "Networks": {
+                                    preflight.OLLAMA_DEFAULT_NETWORK: {
+                                        "Aliases": ["ollama"],
+                                        "IPAddress": "172.31.0.2",
+                                    }
+                                }
+                            },
+                        }
+                    ]
+                )
+            if args[:4] == [
+                "docker",
+                "network",
+                "inspect",
+                preflight.OLLAMA_DEFAULT_NETWORK,
+            ]:
+                return json.dumps([{"Internal": True}])
+            if "--probe-ollama" in args:
+                return "synthetic-version"
             if "{{json .Runtimes}}" in args:
                 return '{"nvidia":{}}'
             if args and args[0] == "nvidia-smi":
@@ -491,6 +514,39 @@ class PreflightTests(unittest.TestCase):
                 continue
             self.assertFalse(any(part in mutating for part in args[1:]), args)
 
+    def test_local_ollama_preflight_only_inspects_shared_resources(self):
+        transform = {
+            "enabled": True,
+            "selection": {"allow_cloud": False},
+            "providers": [
+                {
+                    "id": "ollama",
+                    "type": "ollama",
+                    "locality": "local",
+                    "endpoint": "http://ollama:11434/api/generate",
+                }
+            ],
+            "models": [{"provider": "ollama", "model": "local:test", "enabled": True}],
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            root, calls = self.fixture(temp, transform=transform)
+            preflight.run_checks(root=root, service="gateway")
+        self.assertTrue(
+            any(args[:3] == ["docker", "inspect", "ollama"] for args in calls)
+        )
+        self.assertTrue(
+            any(
+                args[:2] == ["docker", "network"] and "inspect" in args
+                for args in calls
+            )
+        )
+        self.assertTrue(any("--probe-ollama" in args for args in calls))
+        for args in calls:
+            if args and args[0] == "docker":
+                self.assertNotIn("create", args)
+                self.assertNotIn("connect", args)
+                self.assertNotIn("disconnect", args)
+
     def test_conflicting_compose_project_is_blocking(self):
         with tempfile.TemporaryDirectory() as temp:
             root, _ = self.fixture(temp)
@@ -627,20 +683,6 @@ class PreflightTests(unittest.TestCase):
                     root, {}, config, preflight.credential_env_names
                 )
 
-    def test_failure_exits_nonzero_before_install_side_effects(self):
-        with (
-            patch.object(
-                product,
-                "checks",
-                side_effect=product.OperatorError("blocking prerequisites"),
-            ),
-            patch.object(product, "load_env", return_value={}),
-            patch.object(product, "compose") as compose,
-            patch("sys.argv", ["product", "install", "--service", "tts"]),
-        ):
-            self.assertEqual(product.main(), 2)
-        compose.assert_not_called()
-
     def test_report_requires_remediation_and_counts_all_statuses(self):
         r = preflight.Report()
         with self.assertRaises(ValueError):
@@ -666,7 +708,7 @@ class PreflightTests(unittest.TestCase):
                         "selection": {"allow_cloud": False},
                     },
                 },
-                product.credential_env_names,
+                preflight.credential_env_names,
             )
         )
 
@@ -688,7 +730,7 @@ class PreflightTests(unittest.TestCase):
                     root,
                     {},
                     {"text_transform": t},
-                    product.credential_env_names,
+                    preflight.credential_env_names,
                 )
             secret.write_text("TEST_KEY=synthetic-test-credential\n")
             secret.chmod(0o600)
@@ -697,7 +739,7 @@ class PreflightTests(unittest.TestCase):
                     root,
                     {},
                     {"text_transform": t},
-                    product.credential_env_names,
+                    preflight.credential_env_names,
                 )
             )
             secret.chmod(0o644)
@@ -706,7 +748,7 @@ class PreflightTests(unittest.TestCase):
                     root,
                     {},
                     {"text_transform": t},
-                    product.credential_env_names,
+                    preflight.credential_env_names,
                 )
             secret.chmod(0o600)
             secret.write_text("TEST_KEY=bad whitespace\n")
@@ -715,7 +757,7 @@ class PreflightTests(unittest.TestCase):
                     root,
                     {},
                     {"text_transform": t},
-                    product.credential_env_names,
+                    preflight.credential_env_names,
                 )
             secret.write_text("OTHER_KEY=synthetic-test-credential\n")
             with self.assertRaises(ValueError):
@@ -723,7 +765,7 @@ class PreflightTests(unittest.TestCase):
                     root,
                     {},
                     {"text_transform": t},
-                    product.credential_env_names,
+                    preflight.credential_env_names,
                 )
 
     def test_groq_and_cloud_text_credentials_are_independent(self):
@@ -764,7 +806,7 @@ class PreflightTests(unittest.TestCase):
                     secret.chmod(0o600)
                     self.assertTrue(
                         preflight.cloud_credentials(
-                            root, {}, document, product.credential_env_names
+                            root, {}, document, preflight.credential_env_names
                         )
                     )
             secret.write_text("GROQ_STT_API_KEY=synthetic-groq-credential\n")
@@ -774,7 +816,7 @@ class PreflightTests(unittest.TestCase):
                     root,
                     {},
                     combinations["both"][0],
-                    product.credential_env_names,
+                    preflight.credential_env_names,
                 )
 
 
@@ -827,70 +869,6 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class ServiceScopeTests(unittest.TestCase):
-    def test_worker_install_builds_and_recreates_only_selected_service(self):
-        for service in ("stt", "tts"):
-            with self.subTest(service=service):
-                values = {"SPEECH_BIND_IP": "127.0.0.1", "SPEECH_PORT": "8080"}
-                calls = []
-                with (
-                    patch("sys.argv", ["product", "install", "--service", service]),
-                    patch.object(product, "load_env", return_value=values),
-                    patch.object(
-                        product,
-                        "checks",
-                        return_value=(values, "a" * 40, "compose", "gpu", None),
-                    ),
-                    patch.object(
-                        product,
-                        "compose",
-                        side_effect=lambda *a, **kw: calls.append(a[2:])
-                        or SimpleNamespace(stdout=""),
-                    ),
-                    patch.object(product, "verify_service_images"),
-                    patch.object(product, "verify_running_images"),
-                    patch.object(product, "gpu_check"),
-                    patch.object(product, "wait_ready") as ready,
-                    patch.object(product, "prepare_local_ollama") as external,
-                    patch("builtins.print"),
-                ):
-                    self.assertEqual(product.main(), 0)
-                self.assertIn(("build", service), calls)
-                up = next(c for c in calls if c[0] == "up")
-                self.assertEqual(up[-1], service)
-                self.assertIn("--no-deps", up)
-                ready.assert_called_once_with(8080, "127.0.0.1", (service,))
-                external.assert_not_called()
-
-    def test_remove_never_deletes_volumes_images_or_external_infrastructure(self):
-        for service in (None, "tts"):
-            values = {"COMPOSE_PROJECT_NAME": "isolated"}
-            argv = ["product", "remove"] + (["--service", service] if service else [])
-            with (
-                patch("sys.argv", argv),
-                patch.object(product, "load_env", return_value=values),
-                patch.object(product, "validate_environment"),
-                patch.object(product, "verify_project_ownership"),
-                patch.object(product, "require_local_docker"),
-                patch.object(
-                    product, "run", return_value=SimpleNamespace(stdout="a" * 40)
-                ),
-                patch.object(product, "compose") as compose,
-            ):
-                self.assertEqual(product.main(), 0)
-            actions = [c.args[2:] for c in compose.call_args_list]
-            if service:
-                self.assertEqual(actions, [("stop", "tts"), ("rm", "-f", "tts")])
-            else:
-                self.assertEqual(actions, [("down",)])
-            self.assertFalse(
-                any(
-                    "-v" in a or "--rmi" in a or "--remove-orphans" in a
-                    for a in actions
-                )
-            )
-
-
 class ModelStoreAccessTests(unittest.TestCase):
     def test_store_parent_requires_traverse_but_not_directory_listing(self):
         with patch.object(
@@ -901,6 +879,20 @@ class ModelStoreAccessTests(unittest.TestCase):
             self.assertTrue(preflight._model_store_traversable("/model-store"))
         access.assert_called_once_with("/model-store", os.X_OK)
 
+
+class OllamaNameValidationTests(unittest.TestCase):
+    def test_read_only_ollama_names_accept_defaults_and_reject_invalid_values(self):
+        preflight.validate_ollama_names(
+            preflight.OLLAMA_DEFAULT_NETWORK, preflight.OLLAMA_DEFAULT_CONTAINER
+        )
+        for network, container in (
+            ("bad/name", "ollama"),
+            (preflight.OLLAMA_DEFAULT_NETWORK, "bad name"),
+        ):
+            with self.subTest(network=network, container=container):
+                with self.assertRaises(preflight.PreflightError):
+                    preflight.validate_ollama_names(network, container)
+
     def test_store_without_traverse_permission_is_rejected(self):
         with patch.object(preflight.os, "access", return_value=False) as access:
             self.assertFalse(preflight._model_store_traversable("/model-store"))
@@ -908,47 +900,16 @@ class ModelStoreAccessTests(unittest.TestCase):
 
 
 class PreflightCLITests(unittest.TestCase):
-    def test_removed_gpu_ownership_guard_fails_instead_of_claiming_enforcement(self):
-        with self.assertRaisesRegex(
-            product.OperatorError, "process ownership is not inspected"
-        ):
-            product.checks(require_idle_gpu=True)
-
-    def test_plan_does_not_claim_gpu_process_count(self):
-        values = {
-            "SPEECH_BIND_IP": "127.0.0.1",
-            "SPEECH_PORT": "8080",
-            "MODEL_STORE": "/models",
-        }
-        output = io.StringIO()
-        with (
-            patch("sys.argv", ["product", "plan", "--service", "stt"]),
-            patch.object(product, "load_env", return_value=values),
-            patch.object(
-                product,
-                "checks",
-                return_value=(values, "a" * 40, "compose", "GPU 0", None),
-            ),
-            patch.object(product, "uses_local_ollama", return_value=False),
-            contextlib.redirect_stdout(output),
-        ):
-            self.assertEqual(product.main(), 0)
-        self.assertIn("GPU process inventory: not inspected", output.getvalue())
-        self.assertNotIn("Selected GPU compute processes: 0", output.getvalue())
-        self.assertIn("No containers were started or changed.", output.getvalue())
-
     def test_blocked_preflight_returns_nonzero_and_ends_with_readiness(self):
-        r = preflight.Report()
-        r.add("Host", "FAIL", "Configuration", "Copy .env.example and chmod 600 .env.")
+        report = preflight.Report()
+        report.add("Host", "FAIL", "Configuration", "Correct the configuration.")
         output = io.StringIO()
         with (
-            patch("sys.argv", ["product", "preflight"]),
-            patch.object(preflight, "run_checks", return_value=r),
-            patch.object(product, "load_env") as load,
+            patch("sys.argv", ["preflight"]),
+            patch.object(preflight, "run_checks", return_value=report),
             contextlib.redirect_stdout(output),
         ):
-            self.assertEqual(product.main(), 2)
-        load.assert_not_called()
+            self.assertEqual(preflight.main(), 2)
         self.assertTrue(output.getvalue().endswith("NOT READY TO INSTALL\n"))
 
 
@@ -985,7 +946,7 @@ class AdditionalBoundaryTests(unittest.TestCase):
                 Path("/unused"),
                 {},
                 {"text_transform": t},
-                product.credential_env_names,
+                preflight.credential_env_names,
             )
 
     def test_ollama_request_has_bounded_timeout(self):
@@ -1014,280 +975,3 @@ class AdditionalBoundaryTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(2)
-
-
-class CloudComposeForwardingTests(unittest.TestCase):
-    def test_compose_secret_file_selection_is_provider_independent(self):
-        import os
-        import yaml
-
-        groq_only = {"groq_stt": {"enabled": True}}
-        text_only = {
-            "text_transform": {
-                "enabled": True,
-                "selection": {"allow_cloud": True},
-                "models": [{"provider": "cloud", "enabled": True}],
-                "providers": [
-                    {"id": "cloud", "locality": "cloud", "api_key_env": "TEXT_KEY"}
-                ],
-            }
-        }
-        both = {
-            **groq_only,
-            **text_only,
-        }
-        disabled = {
-            "groq_stt": {"enabled": False},
-            "text_transform": {"enabled": False},
-        }
-        with tempfile.TemporaryDirectory() as temp:
-            config = Path(temp) / "gateway.yaml"
-            secret = Path(temp) / "private" / "cloud.env"
-            secret.parent.mkdir()
-            for document, expected in (
-                (groq_only, str(secret)),
-                (text_only, str(secret)),
-                (both, str(secret)),
-                (disabled, "/dev/null"),
-            ):
-                with self.subTest(document=document):
-                    config.write_text(yaml.safe_dump(document))
-                    with (
-                        patch.dict(os.environ, {}, clear=True),
-                        patch.object(
-                            product, "gateway_config_path", return_value=config
-                        ),
-                        patch.object(
-                            product, "gateway_secrets_path", return_value=secret
-                        ),
-                    ):
-                        product.set_compose_env({}, "a" * 40)
-                        self.assertEqual(os.environ["GATEWAY_SECRETS_FILE"], expected)
-
-    def test_private_credentials_forward_only_to_gateway(self):
-        import os
-        import shutil
-        import subprocess
-
-        if not shutil.which("docker"):
-            self.skipTest("Docker Compose CLI unavailable")
-        with tempfile.TemporaryDirectory() as temp:
-            secret = Path(temp) / "cloud.env"
-            secret.write_text("TEST_API_KEY=synthetic-private-credential\n")
-            secret.chmod(0o600)
-            env = os.environ.copy()
-            env["GATEWAY_SECRETS_FILE"] = str(secret)
-            env["GATEWAY_CONFIG"] = str(Path("configs/gateway.yaml").resolve())
-            result = subprocess.run(
-                [
-                    "docker",
-                    "compose",
-                    "--env-file",
-                    ".env.example",
-                    "-f",
-                    "compose.yaml",
-                    "config",
-                    "--format",
-                    "json",
-                ],
-                env=env,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            services = json.loads(result.stdout)["services"]
-            self.assertEqual(
-                services["gateway"]["environment"]["TEST_API_KEY"],
-                "synthetic-private-credential",
-            )
-            self.assertNotIn("TEST_API_KEY", services["stt"]["environment"])
-            self.assertNotIn("TEST_API_KEY", services["tts"]["environment"])
-
-
-class RunningImageIdentityTests(unittest.TestCase):
-    def test_containerd_platform_digest_and_classic_id(self):
-        for containerd in (False, True):
-            image = {"Id": "sha256:index" if containerd else "sha256:config"}
-            container = {"Image": "sha256:config"}
-            if containerd:
-                image["Descriptor"] = {
-                    "mediaType": "application/vnd.oci.image.index.v1+json"
-                }
-                container["ImageManifestDescriptor"] = {"digest": "sha256:platform"}
-
-            def run(args, **kw):
-                value = (
-                    ({"Id": "sha256:platform"} if "--platform" in args else image)
-                    if args[:3] == ["docker", "image", "inspect"]
-                    else container
-                )
-                return SimpleNamespace(stdout=json.dumps([value]))
-
-            with (
-                patch.object(product, "run", side_effect=run),
-                patch.object(
-                    product,
-                    "compose",
-                    return_value=SimpleNamespace(stdout="container-id"),
-                ),
-            ):
-                product.verify_running_images(
-                    {},
-                    "revision",
-                    {"gateway": {"reference": "ref", "image_id": image["Id"]}},
-                )
-                container["Image"] = "sha256:other"
-                container["ImageManifestDescriptor"] = {"digest": "sha256:other"}
-                with self.assertRaisesRegex(product.OperatorError, "running platform"):
-                    product.verify_running_images(
-                        {},
-                        "revision",
-                        {"gateway": {"reference": "ref", "image_id": image["Id"]}},
-                    )
-
-
-class InstallDriftTests(unittest.TestCase):
-    def test_source_change_during_build_blocks_activation(self):
-        values = {"SPEECH_BIND_IP": "127.0.0.1", "SPEECH_PORT": "8080"}
-        observations = [
-            (values, "a" * 40, "compose", "gpu", None),
-            (values, "b" * 40, "compose", "gpu", None),
-        ]
-        with (
-            patch("sys.argv", ["product", "install", "--service", "tts"]),
-            patch.object(product, "load_env", return_value=values),
-            patch.object(product, "checks", side_effect=observations),
-            patch.object(product, "compose") as compose,
-            patch.object(product, "verify_service_images", return_value={}),
-            patch.object(product, "gpu_check"),
-            contextlib.redirect_stderr(io.StringIO()),
-        ):
-            self.assertEqual(product.main(), 2)
-        self.assertTrue(any(c.args[2] == "build" for c in compose.call_args_list))
-        self.assertFalse(any(c.args[2] == "up" for c in compose.call_args_list))
-
-
-class OperatorEnvironmentTests(unittest.TestCase):
-    def test_deployment_values_do_not_inherit_shell_overrides(self):
-        import os
-        from unittest.mock import patch
-
-        with patch.dict(
-            os.environ,
-            {
-                "COMPOSE_PROJECT_NAME": "unrelated",
-                "TTS_MODEL_STORE": "/unexpected",
-                "COMPOSE_FILE": "unrelated.yaml",
-                "SPEECH_API_TOKEN": "unexpected-secret",
-                "GATEWAY_IMAGE": "unrelated",
-            },
-        ):
-            product.set_compose_env({}, "a" * 40)
-            self.assertEqual(os.environ["COMPOSE_PROJECT_NAME"], "speech-platform")
-            for key in (
-                "TTS_MODEL_STORE",
-                "COMPOSE_FILE",
-                "SPEECH_API_TOKEN",
-                "GATEWAY_IMAGE",
-            ):
-                self.assertNotIn(key, os.environ)
-
-    def test_remote_docker_endpoint_rejected_without_modifying_context(self):
-        import os
-
-        with (
-            patch.dict(os.environ, {"DOCKER_HOST": "ssh://remote"}),
-            patch.object(product, "run") as run,
-        ):
-            with self.assertRaisesRegex(product.OperatorError, "local Unix"):
-                product.require_local_docker()
-        run.assert_not_called()
-
-    def test_selected_status_is_forwarded_to_compose(self):
-        with (
-            patch("sys.argv", ["product", "status", "--service", "tts"]),
-            patch.object(product, "load_env", return_value={}),
-            patch.object(product, "operational_values", return_value=({}, "a" * 40)),
-            patch.object(product, "compose") as compose,
-        ):
-            self.assertEqual(product.main(), 0)
-        self.assertEqual(compose.call_args.args[2:], ("ps", "tts"))
-
-
-class DockerContextPrecedenceTests(unittest.TestCase):
-    def test_remote_context_cannot_hide_behind_local_docker_host(self):
-        import os
-
-        with (
-            patch.dict(
-                os.environ,
-                {
-                    "DOCKER_HOST": "unix:///var/run/docker.sock",
-                    "DOCKER_CONTEXT": "remote",
-                },
-            ),
-            patch.object(
-                product,
-                "run",
-                return_value=SimpleNamespace(
-                    stdout=json.dumps(
-                        [{"Endpoints": {"docker": {"Host": "ssh://remote"}}}]
-                    )
-                ),
-            ) as run,
-        ):
-            with self.assertRaises(product.OperatorError):
-                product.require_local_docker()
-        self.assertEqual(
-            run.call_args.args[0], ["docker", "context", "inspect", "remote"]
-        )
-
-
-class GPUProbeCleanupTests(unittest.TestCase):
-    def test_failed_probe_only_cleans_its_unique_container(self):
-        rendered = {"services": {"tts": {"image": "qualified-image"}}}
-        calls = []
-
-        def run(args, **kw):
-            calls.append(args)
-            if args[:2] == ["docker", "run"]:
-                raise product.OperatorError("deadline")
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-        with (
-            patch.object(
-                product,
-                "compose",
-                return_value=SimpleNamespace(stdout=json.dumps(rendered)),
-            ),
-            patch.object(product, "run", side_effect=run),
-        ):
-            with self.assertRaisesRegex(
-                product.OperatorError, "services were not started"
-            ):
-                product.gpu_check({}, "revision", ["tts"])
-        name = calls[0][calls[0].index("--name") + 1]
-        self.assertTrue(name.startswith("speech-platform-gpu-check-"))
-        self.assertEqual(calls[1], ["docker", "rm", "-f", name])
-
-    def test_unconfirmed_probe_cleanup_is_explicit(self):
-        def run(args, **kw):
-            if args[:2] == ["docker", "run"]:
-                raise product.OperatorError("deadline")
-            return SimpleNamespace(returncode=1, stdout="", stderr="daemon unavailable")
-
-        with (
-            patch.object(
-                product,
-                "compose",
-                return_value=SimpleNamespace(
-                    stdout=json.dumps(
-                        {"services": {"stt": {"image": "qualified-image"}}}
-                    )
-                ),
-            ),
-            patch.object(product, "run", side_effect=run),
-        ):
-            with self.assertRaisesRegex(product.OperatorError, "cleanup unconfirmed"):
-                product.gpu_check({}, "revision", ["stt"])

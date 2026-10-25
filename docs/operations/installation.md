@@ -4,8 +4,7 @@ The supported runtime is root `compose.yaml`. `make preflight` runs independent,
 read-only `scripts/preflight.py`. `make install`, `status`, `logs`, and `stop` use
 Make and Docker Compose. Focused helpers sanitize Compose invocation, retain
 existing image IDs, verify built-image labels and run CUDA visibility probes.
-`scripts/product_deployment.py` remains a fallback during D02 migration, not the
-canonical operator path.
+Make and Docker Compose are the supported deployment path.
 The historical VoiceService installer has been retired. The descriptor
 `releases/voiceservice-v0.1.2.yaml` remains as historical model and image
 provenance; it does not describe the current VoxCPM2 deployment.
@@ -163,7 +162,13 @@ curl --fail-with-body -H 'Authorization: Bearer <SPEECH_API_TOKEN>' \
   -d '{"text":"This is a synthetic speech test.","language":"en","mode":"extra_high_quality","audio_processing":"gentle"}' \
   http://127.0.0.1:8080/v1/tts/speech -o private/synthetic.wav
 make test-stt PYTHON=.venv/bin/python AUDIO=private/synthetic.wav SOURCE_LANGUAGE=en
+make test-tts PYTHON=.venv/bin/python OUTPUT=private/audio/tts-smoke.wav
 ```
+
+The independent API smoke client reads the configured token without displaying
+it. STT prints response metadata and transcript to the invoking terminal. TTS
+uses a short synthetic phrase and creates a new mode-0600 WAV under `private/`;
+it refuses to overwrite an existing output.
 
 Use the [public contract](../../api/openapi/public-v1.yaml) for SSML and text
 transformation. Wait for STT/TTS idle unloading before local LLM experiments on

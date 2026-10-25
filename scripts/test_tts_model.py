@@ -6,7 +6,6 @@ from pathlib import Path
 import yaml
 
 from scripts.model_artifacts import model_directory
-from scripts.product_deployment import TTS_DIGEST
 from scripts.tts_model import MANIFEST_SHA256, _model
 from services.stt.artifacts import canonical_manifest_digest, load_artifact_manifest
 
@@ -34,7 +33,6 @@ class TTSModelArtifactTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         config = yaml.safe_load((root / "configs/tts.yaml").read_text())
         self.assertEqual(config["model_manifest_sha256"], MANIFEST_SHA256)
-        self.assertEqual(TTS_DIGEST, MANIFEST_SHA256)
         env_example = (root / ".env.example").read_text()
         self.assertIn(f"TTS_MODEL_MANIFEST_SHA256={MANIFEST_SHA256}", env_example)
 

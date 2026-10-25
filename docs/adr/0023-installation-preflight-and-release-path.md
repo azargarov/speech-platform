@@ -1,6 +1,6 @@
 # ADR 0023: One product installer and a read-only prerequisite report
 
-- Status: proposed; implementation authorized, operator acceptance pending
+- Status: accepted for D01–D03; legacy CLI retired by D04 in favor of Make + Docker Compose
 - Scope: initial full SpeechPlatform release qualification
 - Extends: [ADR 0018](0018-git-compose-product-operations.md)
 
@@ -13,6 +13,17 @@ stale documentation made these paths appear interchangeable. The current public
 API functionality remains unchanged.
 
 ## Decision
+
+**D04 implementation update (2026-10-25):** the Make + Docker Compose path
+described by this decision is now the sole supported deployment path. The
+historical Python installer and its shared Ollama network mutator have been
+removed after their active callers were migrated. Read-only Ollama validation,
+preflight, image checks and independent API smoke commands remain. D02 and D03
+live qualification records document the accepted runtime behavior.
+
+The decision text below records the original D01-era implementation and
+interface. Its references to `product_deployment.py`, `make plan` and
+`gpu-check` are historical; D04 supersedes those implementation details.
 
 Use root `compose.yaml` and extend `scripts/product_deployment.py` for full-stack
 and single Gateway/STT/TTS installs. Keep the historical installer/descriptor

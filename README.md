@@ -132,6 +132,8 @@ the uploaded audio.
 
 Use `make test-stt AUDIO=private/audio/sample.wav SOURCE_LANGUAGE=auto OUTPUT_LANGUAGE=auto` to submit a local file through Gateway. The command prints detected/output metadata and transcription to the invoking terminal; audio is not copied into logs by the service.
 
+Use `make test-tts OUTPUT=private/audio/tts-smoke.wav` for a synthetic local TTS API smoke request. It saves a new mode-0600 WAV under `private/` and does not overwrite existing files.
+
 ## Operate and recover
 
 ```sh

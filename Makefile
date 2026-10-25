@@ -18,19 +18,6 @@ TTS_MODEL_READ_GID ?= $(MODEL_READ_GID)
 TTS_MODEL_READ_GROUP ?= $(shell getent group $(TTS_MODEL_READ_GID) | cut -d: -f1)
 TTS_MODEL_OWNER_UID ?= 0
 SOURCE_REVISION ?= $(shell git rev-parse HEAD)
-NO_BUILD_ARGS :=
-ifneq ($(strip $(NO_BUILD)),)
-ifneq ($(NO_BUILD),1)
-$(error NO_BUILD must be 1 when supplied)
-endif
-ifneq ($(filter plan install,$(MAKECMDGOALS)), $(MAKECMDGOALS))
-$(error NO_BUILD is supported only for make plan or make install)
-endif
-ifneq ($(SERVICE),gateway)
-$(error NO_BUILD=1 requires SERVICE=gateway)
-endif
-NO_BUILD_ARGS := --no-build
-endif
 ifneq ($(filter image,$(MAKECMDGOALS)),)
 ifeq ($(filter $(IMAGE_VARIANT),cpu cuda),)
 $(error Unknown image VARIANT '$(IMAGE_VARIANT)'; choose cpu or cuda)
@@ -66,7 +53,7 @@ else
 $(error Unknown publish service '$(SERVICE)'; choose gateway, stt, or tts)
 endif
 endif
-.PHONY: init preflight gpu-check stop remove verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check tts-lock-check release-check model-check model-fetch tts-model-check tts-model-fetch tts-warmup tts-state plan install status logs test-stt stt-cpu-integration stt-cuda-http-integration
+.PHONY: init preflight stop verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check tts-lock-check release-check model-check model-fetch tts-model-check tts-model-fetch tts-warmup tts-state install status logs test-stt test-tts stt-cpu-integration stt-cuda-http-integration
 DEPLOY_SERVICES := gateway stt tts
 ifneq ($(filter status logs stop,$(MAKECMDGOALS)),)
 ifneq ($(strip $(SERVICE)),)
@@ -139,10 +126,6 @@ init:
 	sh scripts/init.sh
 preflight:
 	$(PYTHON) scripts/preflight.py $(if $(SERVICE),--service "$(SERVICE)")
-gpu-check remove:
-	$(PYTHON) scripts/product_deployment.py $@ $(if $(SERVICE),--service "$(SERVICE)")
-plan:
-	$(PYTHON) scripts/product_deployment.py plan $(if $(SERVICE),--service "$(SERVICE)") $(NO_BUILD_ARGS)
 install:
 	@set -eu; \
 	$(PYTHON) scripts/deploy_images.py source; \
@@ -164,7 +147,9 @@ logs:
 stop:
 	$(PYTHON) scripts/compose.py stop $(if $(SERVICE),"$(SERVICE)")
 test-stt:
-	$(PYTHON) scripts/product_deployment.py test-stt $(if $(AUDIO),--audio "$(AUDIO)") $(if $(SOURCE_LANGUAGE),--source-language "$(SOURCE_LANGUAGE)") $(if $(OUTPUT_LANGUAGE),--output-language "$(OUTPUT_LANGUAGE)")
+	$(PYTHON) scripts/api_smoke.py stt $(if $(AUDIO),--audio "$(AUDIO)") $(if $(SOURCE_LANGUAGE),--source-language "$(SOURCE_LANGUAGE)") $(if $(OUTPUT_LANGUAGE),--output-language "$(OUTPUT_LANGUAGE)")
+test-tts:
+	$(PYTHON) scripts/api_smoke.py tts --output "$(if $(OUTPUT),$(OUTPUT),private/audio/tts-smoke.wav)"
 governance-check:
 	$(PYTHON) scripts/validate_governance.py
 	$(PYTHON) -m unittest discover -s scripts -p 'test_governance.py' -v

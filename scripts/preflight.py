@@ -26,13 +26,15 @@ if str(Path(__file__).resolve().parents[1]) not in sys.path:
 from services.worker.server import StrictLoader
 from scripts.release_manifest import load_release
 from services.stt.artifacts import load_artifact_manifest
-from scripts import ollama_network
 
 GROUPS = ("Host", "GPU", "Models", "Networking", "External Providers", "Deployment")
 STATUSES = ("PASS", "WARN", "FAIL", "SKIP")
 ROOT = Path(__file__).resolve().parents[1]
 STT_MANIFEST_SHA256 = "86d87665c1a794b30f99e800e7bc180a7615b82caea88e4b02c22a7214168ff6"
 TTS_MANIFEST_SHA256 = "04d6e05b69b22568030ac21f494e406ffdf2d06efeeab43cfdb4c21ba8c9bd41"
+OLLAMA_DEFAULT_NETWORK = "speech-platform_ollama_private"
+OLLAMA_DEFAULT_CONTAINER = "ollama"
+DOCKER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 ALLOWED_ENV = {
     "COMPOSE_PROJECT_NAME",
     "SPEECH_BIND_IP",
@@ -69,6 +71,16 @@ ALLOWED_ENV = {
 
 class PreflightError(ValueError):
     """A safe configuration or prerequisite validation error."""
+
+
+def validate_ollama_names(network_name, container_name):
+    """Validate names used only for read-only inspection of shared Ollama."""
+    if not DOCKER_NAME.fullmatch(network_name):
+        raise PreflightError("OLLAMA_NETWORK_NAME is not a valid Docker network name")
+    if not DOCKER_NAME.fullmatch(container_name):
+        raise PreflightError(
+            "OLLAMA_CONTAINER_NAME is not a valid Docker container name"
+        )
 
 
 def run_command(args, *, root=ROOT, timeout=60, env=None):
@@ -308,11 +320,11 @@ def validate_environment(values, root=ROOT):
         if not raw.isdecimal() or not 1 <= int(raw) <= 2147483647:
             raise PreflightError(f"{key} must be in 1..2147483647")
     try:
-        ollama_network.validate_names(
-            values.get("OLLAMA_NETWORK_NAME", ollama_network.DEFAULT_NETWORK),
-            values.get("OLLAMA_CONTAINER_NAME", ollama_network.DEFAULT_CONTAINER),
+        validate_ollama_names(
+            values.get("OLLAMA_NETWORK_NAME", OLLAMA_DEFAULT_NETWORK),
+            values.get("OLLAMA_CONTAINER_NAME", OLLAMA_DEFAULT_CONTAINER),
         )
-    except ollama_network.NetworkError as exc:
+    except PreflightError as exc:
         raise PreflightError(str(exc)) from exc
     api_url = values.get("SPEECH_API_URL")
     if api_url:
@@ -963,10 +975,8 @@ def run_checks(
                 for m in transform.get("models", [])
                 if m.get("enabled") is True and m.get("provider") in provider_ids
             ]
-            network = values.get("OLLAMA_NETWORK_NAME", ollama_network.DEFAULT_NETWORK)
-            container = values.get(
-                "OLLAMA_CONTAINER_NAME", ollama_network.DEFAULT_CONTAINER
-            )
+            network = values.get("OLLAMA_NETWORK_NAME", OLLAMA_DEFAULT_NETWORK)
+            container = values.get("OLLAMA_CONTAINER_NAME", OLLAMA_DEFAULT_CONTAINER)
 
             def inspect_ollama():
                 info = json.loads(command(["docker", "inspect", container]))[0]
