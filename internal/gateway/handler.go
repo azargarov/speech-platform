@@ -36,9 +36,6 @@ func requestBodyLimit(path string, configured int64) int64 {
 }
 
 type Readiness interface{ Ready() bool }
-type Foundation struct{}
-
-func (Foundation) Ready() bool { return false }
 
 type STTProxy struct {
 	BaseURL string

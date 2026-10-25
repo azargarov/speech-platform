@@ -50,7 +50,7 @@ func TestPublicWarmupValidatesBeforeSideEffectsAndEnforcesAuth(t *testing.T) {
 	}))
 	defer worker.Close()
 	stt := NewSTTProxy(worker.URL, warmupTestToken, time.Second)
-	h := HandlerWithWorkersAndText(Foundation{}, 1024, stt, nil, nil)
+	h := HandlerWithWorkersAndText(unreadyState{}, 1024, stt, nil, nil)
 	if got := postWarmup(h, `{"operations":["stt"]}`, ""); got.Code != http.StatusUnauthorized || calls.Load() != 0 {
 		t.Fatalf("unauthorized status=%d calls=%d", got.Code, calls.Load())
 	}
@@ -97,7 +97,7 @@ func TestPublicWarmupStalledBodyUsesTotalDeadlineBeforeSideEffects(t *testing.T)
 	worker := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
 	defer worker.Close()
 	stt := NewSTTProxy(worker.URL, "", time.Second)
-	h := HandlerWithWarmupContext(Foundation{}, 1024, stt, nil, nil, 25*time.Millisecond, context.Background())
+	h := HandlerWithWarmupContext(unreadyState{}, 1024, stt, nil, nil, 25*time.Millisecond, context.Background())
 	request := httptest.NewRequest(http.MethodPost, "/v1/models/warmup", nil)
 	request.Body = &stalledWarmupBody{closed: make(chan struct{})}
 	request.ContentLength = -1
@@ -127,7 +127,7 @@ func TestPublicWarmupPartialFailureAndTTSBusy(t *testing.T) {
 	defer ttsWorker.Close()
 	stt := NewSTTProxy(sttWorker.URL, "", time.Second)
 	tts := NewTTSProxy(ttsWorker.URL, "", time.Second)
-	h := HandlerWithWorkersAndText(Foundation{}, 1024, stt, tts, nil)
+	h := HandlerWithWorkersAndText(unreadyState{}, 1024, stt, tts, nil)
 	w := postWarmup(h, `{"operations":["stt","tts"]}`, "")
 	result := decodeWarmup(t, w)
 	if w.Code != 200 || result.Complete || result.Results[0].Status != "ready" || result.Results[1].Status != "overloaded" {
@@ -136,7 +136,7 @@ func TestPublicWarmupPartialFailureAndTTSBusy(t *testing.T) {
 }
 
 func TestPublicWarmupAllUnavailableAndSanitizedWorkerFailures(t *testing.T) {
-	h := HandlerWithWorkersAndText(Foundation{}, 1024, nil, nil, nil)
+	h := HandlerWithWorkersAndText(unreadyState{}, 1024, nil, nil, nil)
 	response := postWarmup(h, `{"operations":["stt"]}`, "")
 	if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), "worker") {
 		t.Fatalf("unconfigured warmup status=%d body=%s", response.Code, response.Body.String())
@@ -179,7 +179,7 @@ func TestPublicWarmupResourceUnavailablePreservesReadyOperation(t *testing.T) {
 	}))
 	defer ttsWorker.Close()
 	h := HandlerWithWorkersAndText(
-		Foundation{}, 1024,
+		unreadyState{}, 1024,
 		NewSTTProxy(sttWorker.URL, "", time.Second),
 		NewTTSProxy(ttsWorker.URL, "", time.Second),
 		nil,
@@ -256,7 +256,7 @@ func TestPublicTextTransformWarmupDoesNotExposeOrAcceptUserContent(t *testing.T)
 		t.Fatal(err)
 	}
 	defer service.Close()
-	h := HandlerWithWorkersAndText(Foundation{}, 1024, nil, nil, service)
+	h := HandlerWithWorkersAndText(unreadyState{}, 1024, nil, nil, service)
 	response := postWarmup(h, `{"operations":["text_transform"]}`, "")
 	result := decodeWarmup(t, response)
 	if response.Code != http.StatusOK || !result.Complete || calls.Load() != 1 {
@@ -545,7 +545,7 @@ func TestWarmupWorkerTimeoutBeforeTotalDeadlineAllowsLaterOperation(t *testing.T
 		ttsCalls.Add(1)
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"model_state":"loaded","inference_active":false}`)), Header: make(http.Header)}, nil
 	})
-	h := HandlerWithWarmupContext(Foundation{}, 1024, stt, tts, nil, time.Hour, context.Background())
+	h := HandlerWithWarmupContext(unreadyState{}, 1024, stt, tts, nil, time.Hour, context.Background())
 	w := postWarmup(h, `{"operations":["stt","tts"]}`, "")
 	got := decodeWarmup(t, w)
 	if w.Code != http.StatusOK || len(got.Results) != 2 || got.Complete || got.Results[0].Status != "timed_out" || got.Results[1].Status != "ready" || ttsCalls.Load() != 1 {

@@ -132,7 +132,7 @@ func TestM06WarmupAndInferenceIntegrationAcrossAllBackends(t *testing.T) {
 
 	stt := NewSTTProxy(sttWorker.URL, token, 2*time.Second)
 	tts := NewTTSProxy(ttsWorker.URL, token, 2*time.Second)
-	h := HandlerWithWarmupContext(Foundation{}, config.PublicMaxRequestBytes, stt, tts, textService, 4*time.Second, context.Background())
+	h := HandlerWithWarmupContext(unreadyState{}, config.PublicMaxRequestBytes, stt, tts, textService, 4*time.Second, context.Background())
 
 	// Ordinary local transformation works before any predictive warmup.
 	if got := servePublic(t, h, http.MethodPost, "/v1/text/transformations", `{"text":"synthetic private input","mode":"written","model":"local-qwen","local_only":true}`, token, "application/json"); got.Code != http.StatusOK {

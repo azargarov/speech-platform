@@ -39,7 +39,7 @@ func speechFixture(operation string, client *http.Client) (http.Handler, *http.R
 	}
 	r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	r.Header.Set("Content-Type", content)
-	return HandlerWithWorkers(Foundation{}, 1024, stt, tts), r
+	return HandlerWithWorkers(unreadyState{}, 1024, stt, tts), r
 }
 
 func TestSpeechDeadlinesAndUnavailableAreDistinct(t *testing.T) {

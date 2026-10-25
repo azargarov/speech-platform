@@ -21,7 +21,7 @@ func admissionTestHandler(roundTripper http.RoundTripper) http.Handler {
 	tts := NewTTSProxy("http://worker.invalid", "", time.Minute)
 	stt.Client = client
 	tts.Client = client
-	return HandlerWithWorkers(Foundation{}, 25*1024*1024, stt, tts)
+	return HandlerWithWorkers(unreadyState{}, 25*1024*1024, stt, tts)
 }
 
 func admissionRequest(operation string, body io.ReadCloser) *http.Request {
@@ -588,7 +588,7 @@ func TestQueuedSpeechWaitersExitOnCancellationAndGatewayShutdown(t *testing.T) {
 				stt := NewSTTProxy("http://worker.invalid", "", time.Minute)
 				tts := NewTTSProxy("http://worker.invalid", "", time.Minute)
 				stt.Client, tts.Client = client, client
-				h := HandlerWithWarmupContext(Foundation{}, 25*1024*1024, stt, tts, nil, time.Minute, root)
+				h := HandlerWithWarmupContext(unreadyState{}, 25*1024*1024, stt, tts, nil, time.Minute, root)
 
 				activeDone := make(chan *httptest.ResponseRecorder, 1)
 				go func() {
@@ -682,7 +682,7 @@ func TestHTTPServerShutdownClosesSpeechQueueButDoesNotCancelActiveRequest(t *tes
 		}
 		return admissionWorkerResponse("stt", r), nil
 	})}
-	h := HandlerWithWarmupContext(Foundation{}, 25*1024*1024, stt, nil, nil, time.Minute, root)
+	h := HandlerWithWarmupContext(unreadyState{}, 25*1024*1024, stt, nil, nil, time.Minute, root)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

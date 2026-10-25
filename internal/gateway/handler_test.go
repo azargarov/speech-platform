@@ -35,7 +35,7 @@ func TestTextTransformationRunsThroughPublicGatewayRouteWithFakeProvider(t *test
 		t.Fatal(err)
 	}
 	defer service.Close()
-	h := HandlerWithWorkersAndText(Foundation{}, config.PublicMaxRequestBytes, nil, nil, service)
+	h := HandlerWithWorkersAndText(unreadyState{}, config.PublicMaxRequestBytes, nil, nil, service)
 
 	unauthorized := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/v1/text/transformations", strings.NewReader(`{"text":"Synthetic note","model":"local-qwen"}`))
@@ -66,7 +66,7 @@ func TestTextTransformationRouteUsesSharedGatewayAndBearerBoundary(t *testing.T)
 		t.Fatal(err)
 	}
 	defer service.Close()
-	h := HandlerWithWorkersAndText(Foundation{}, config.PublicMaxRequestBytes, nil, nil, service)
+	h := HandlerWithWorkersAndText(unreadyState{}, config.PublicMaxRequestBytes, nil, nil, service)
 	for _, tc := range []struct {
 		method, auth string
 		want         int
@@ -84,8 +84,8 @@ func TestTextTransformationRouteUsesSharedGatewayAndBearerBoundary(t *testing.T)
 	}
 }
 
-func TestFoundation(t *testing.T) {
-	h := Handler(Foundation{}, 1024)
+func TestHandlerHealthReadinessAndUnavailableRoutes(t *testing.T) {
+	h := Handler(unreadyState{}, 1024)
 	for _, tc := range []struct {
 		method, path string
 		status       int
@@ -106,7 +106,7 @@ func TestFoundation(t *testing.T) {
 }
 
 func TestRequestSizeLimit(t *testing.T) {
-	h := Handler(Foundation{}, 4)
+	h := Handler(unreadyState{}, 4)
 	for _, tc := range []struct {
 		name string
 		body string
@@ -337,7 +337,7 @@ func TestSpeechAdmissionBoundsBufferedResponsesAndRecoversAfterSlowClient(t *tes
 			Request:       r,
 		}, nil
 	})}
-	h := HandlerWithWorkers(Foundation{}, config.PublicMaxRequestBytes, nil, proxy)
+	h := HandlerWithWorkers(unreadyState{}, config.PublicMaxRequestBytes, nil, proxy)
 	request := func() *http.Request {
 		r := httptest.NewRequest(http.MethodPost, "/v1/tts/speech", strings.NewReader(`{"text":"synthetic"}`))
 		r.Header.Set("Content-Type", "application/json")
@@ -458,7 +458,7 @@ func TestSpeechClientCancellationClosesResponseAndReleasesCapacity(t *testing.T)
 			Body:       io.NopCloser(strings.NewReader("RIFF")), ContentLength: 4, Request: r,
 		}, nil
 	})}
-	h := HandlerWithWorkers(Foundation{}, config.PublicMaxRequestBytes, nil, proxy)
+	h := HandlerWithWorkers(unreadyState{}, config.PublicMaxRequestBytes, nil, proxy)
 	cancelled, cancel := context.WithCancel(context.Background())
 	firstRequest := httptest.NewRequest(http.MethodPost, "/v1/tts/speech", strings.NewReader(`{"text":"synthetic"}`)).WithContext(cancelled)
 	firstRequest.Header.Set("Content-Type", "application/json")

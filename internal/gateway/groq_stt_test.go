@@ -57,7 +57,7 @@ func groqTestHandler(t *testing.T, adapter *GroqSTTAdapter, local http.RoundTrip
 	t.Helper()
 	stt := NewSTTProxy("http://local.invalid", "", 2*time.Second)
 	stt.Client = &http.Client{Transport: local}
-	return HandlerWithWarmupContextAndGroqSTT(Foundation{}, 25*1024*1024, stt, nil, nil, 2*time.Second, context.Background(), adapter, true, 2)
+	return HandlerWithWarmupContextAndGroqSTT(unreadyState{}, 25*1024*1024, stt, nil, nil, 2*time.Second, context.Background(), adapter, true, 2)
 }
 
 func groqRequest(t *testing.T, fields map[string]string, provider string, consent bool) *http.Request {
@@ -152,7 +152,7 @@ func TestDisabledGroqCannotReceiveAudio(t *testing.T) {
 	stt.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return admissionWorkerResponse("stt", r), nil
 	})}
-	h := HandlerWithWarmupContextAndGroqSTT(Foundation{}, 25*1024*1024, stt, nil, nil, time.Second, context.Background(), adapter, false, 2)
+	h := HandlerWithWarmupContextAndGroqSTT(unreadyState{}, 25*1024*1024, stt, nil, nil, time.Second, context.Background(), adapter, false, 2)
 	response := serveAdmissionRequest(h, "stt", groqRequest(t, nil, "groq", true))
 	if response.Code != http.StatusServiceUnavailable || calls.Load() != 0 {
 		t.Fatalf("disabled Groq status=%d calls=%d body=%s", response.Code, calls.Load(), response.Body.String())
