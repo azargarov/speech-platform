@@ -9,7 +9,7 @@
 /secrets/
 /credentials/
 
-# Audio and inference model artifacts
+# Private, fixture and generated audio; inference model artifacts
 *.m4a
 *.wav
 *.mp3

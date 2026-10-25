@@ -53,7 +53,7 @@ else
 $(error Unknown publish service '$(SERVICE)'; choose gateway, stt, or tts)
 endif
 endif
-.PHONY: init preflight stop verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check tts-lock-check release-check model-check model-fetch tts-model-check tts-model-fetch tts-warmup tts-state install status logs test-stt test-tts stt-cpu-integration stt-cuda-http-integration
+.PHONY: init preflight stop verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check tts-lock-check release-check model-check model-fetch tts-model-check tts-model-fetch tts-warmup tts-state install status logs test-stt test-tts test-roundtrip stt-cpu-integration stt-cuda-http-integration
 DEPLOY_SERVICES := gateway stt tts
 ifneq ($(filter status logs stop,$(MAKECMDGOALS)),)
 ifneq ($(strip $(SERVICE)),)
@@ -150,6 +150,8 @@ test-stt:
 	$(PYTHON) -m scripts.api_smoke stt $(if $(AUDIO),--audio "$(AUDIO)") $(if $(SOURCE_LANGUAGE),--source-language "$(SOURCE_LANGUAGE)") $(if $(OUTPUT_LANGUAGE),--output-language "$(OUTPUT_LANGUAGE)")
 test-tts:
 	$(PYTHON) -m scripts.api_smoke tts --output "$(if $(OUTPUT),$(OUTPUT),private/audio/tts-smoke.wav)"
+test-roundtrip:
+	$(PYTHON) -m scripts.roundtrip
 governance-check:
 	$(PYTHON) scripts/validate_governance.py
 	$(PYTHON) -m unittest discover -s scripts -p 'test_governance.py' -v
