@@ -168,11 +168,11 @@ func TestCloudCredentialsAreResolvedOnlyForPermittedEnabledModels(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := c.TextTransform.ResolveTextCredentials(); len(got) != 0 {
+	if got := c.TextTransform.ResolveCredentials(); len(got) != 0 {
 		t.Fatalf("cloud forbidden but credentials resolved: %#v", got)
 	}
 	c.TextTransform.Selection.AllowCloud = true
-	got := c.TextTransform.ResolveTextCredentials()
+	got := c.TextTransform.ResolveCredentials()
 	if got["groq"] != "secret-test-value" {
 		t.Fatalf("credential not resolved for permitted model: %#v", got)
 	}

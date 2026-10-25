@@ -236,8 +236,8 @@ func validReasoning(v string) bool {
 	return true
 }
 
-// ResolveTextCredentials reads only credentials for enabled, cloud-permitted models.
-func (t *TextTransform) ResolveTextCredentials() map[string]string {
+// ResolveCredentials reads only credentials for enabled, cloud-permitted models.
+func (t *TextTransform) ResolveCredentials() map[string]string {
 	result := map[string]string{}
 	if t == nil || t.Enabled == nil || !*t.Enabled {
 		return result

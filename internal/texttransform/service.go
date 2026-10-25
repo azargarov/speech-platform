@@ -113,7 +113,7 @@ func New(parent context.Context, cfg *config.TextTransform, token string, genera
 	if _, ok := generator.(HTTPGenerator); ok {
 		generator = HTTPGenerator{Client: client, MaxResponseBytes: cfg.MaxResponseBytes}
 	}
-	return &Service{cfg: *cfg, token: token, creds: cfg.ResolveTextCredentials(), client: client, gen: generator, root: ctx, cancel: cancel, slots: make(chan struct{}, 1), logger: logger}, nil
+	return &Service{cfg: *cfg, token: token, creds: cfg.ResolveCredentials(), client: client, gen: generator, root: ctx, cancel: cancel, slots: make(chan struct{}, 1), logger: logger}, nil
 }
 
 // ValidateConfig checks fixed prompt and framing fit without resolving secrets or making network calls.
