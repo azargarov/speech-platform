@@ -21,6 +21,7 @@ def rendered(port=8080, bind="127.0.0.1"):
             "gateway": {
                 "environment": {"SPEECH_LISTEN_PORT": str(port)},
                 "ports": [{"host_ip": bind, "published": "8080", "target": port}],
+                "volumes": [{"target": "/configs/prompts", "read_only": True}],
                 "read_only": True,
                 "user": "65532:65532",
                 "cap_drop": ["ALL"],
@@ -60,6 +61,12 @@ class ComposeConfig(unittest.TestCase):
 
     def test_port_override(self):
         validate(rendered(8765), 8765, "127.0.0.1")
+
+    def test_gateway_prompt_directory_must_be_read_only(self):
+        config = rendered()
+        config["services"]["gateway"]["volumes"][0]["read_only"] = False
+        with self.assertRaisesRegex(ValueError, "prompt directory.*read-only"):
+            validate(config, 8080, "127.0.0.1")
 
     def test_tts_requires_config_reader_group(self):
         config = rendered()

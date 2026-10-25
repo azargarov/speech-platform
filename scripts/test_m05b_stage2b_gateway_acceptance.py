@@ -277,6 +277,9 @@ class GatewayAcceptanceTest(unittest.TestCase):
         config["stt_url"] = f"http://127.0.0.1:{self.worker.server_port}"
         config["tts_url"] = config["stt_url"]
         transform = config["text_transform"]
+        transform["prompt_file"] = str(
+            ROOT / "configs/prompts/text-transformation-system.txt"
+        )
         transform["selection"]["policy"] = policy
         transform["selection"]["allow_cloud"] = allow_cloud
         transform["request_timeout"] = request_timeout

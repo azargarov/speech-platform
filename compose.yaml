@@ -21,6 +21,10 @@ services:
         source: ${GATEWAY_CONFIG:-./configs/gateway.yaml}
         target: /config/gateway.yaml
         read_only: true
+      - type: bind
+        source: ./configs/prompts
+        target: /configs/prompts
+        read_only: true
     depends_on:
       stt:
         condition: service_healthy

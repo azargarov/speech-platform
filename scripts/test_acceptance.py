@@ -113,6 +113,9 @@ class Acceptance(unittest.TestCase):
             transcribe["x-maxRequestSizeBytes"],
         )
         self.assertIn("413", transcribe["responses"])
+        transform = public["paths"]["/v1/text/transformations"]["post"]
+        prompt_hash = transform["responses"]["200"]["headers"]["X-Speech-Prompt-SHA256"]
+        self.assertEqual(prompt_hash["schema"]["pattern"], "^[a-f0-9]{64}$")
         for operation in (
             public["paths"]["/v1/stt/models"]["get"],
             public["paths"]["/v1/tts/voices"]["get"],

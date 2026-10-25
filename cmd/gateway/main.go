@@ -71,6 +71,13 @@ func run() error {
 	}
 	ready := gateway.NewWorkersReadiness(stt, tts)
 	srv := &http.Server{Addr: net.JoinHostPort(c.ListenHost, fmt.Sprint(c.ListenPort)), Handler: gateway.HandlerWithWarmupContextAndGroqSTT(ready, c.MaxRequestBytes, stt, tts, textService, duration(c.WarmupTimeout), ctx, groqSTT, c.GroqSTT.Enabled, *c.GroqSTT.Capacity), ReadTimeout: duration(c.ReadTimeout), ReadHeaderTimeout: duration(c.ReadTimeout), WriteTimeout: duration(c.WriteTimeout), IdleTimeout: duration(c.IdleTimeout), MaxHeaderBytes: c.MaxHeaderBytes}
+	if c.TextTransform != nil && c.TextTransform.Enabled != nil && *c.TextTransform.Enabled {
+		reloadSignals := make(chan os.Signal, 1)
+		signal.Notify(reloadSignals, syscall.SIGHUP)
+		defer signal.Stop(reloadSignals)
+		go reloadPromptOnSignal(ctx, reloadSignals, textService, logger)
+		logger.Info("text transformation prompt loaded", "sha256", textService.PromptSHA256())
+	}
 	errs := make(chan error, 1)
 	go func() { logger.Info("gateway starting"); errs <- srv.ListenAndServe() }()
 	select {
@@ -90,4 +97,25 @@ func run() error {
 	shutdown, cancel := context.WithTimeout(context.Background(), duration(c.ShutdownTimeout))
 	defer cancel()
 	return srv.Shutdown(shutdown)
+}
+
+func reloadPromptOnSignal(ctx context.Context, signals <-chan os.Signal, service *texttransform.Service, logger *slog.Logger) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case sig, ok := <-signals:
+			if !ok {
+				return
+			}
+			if sig != syscall.SIGHUP {
+				continue
+			}
+			if err := service.ReloadPrompt(); err != nil {
+				logger.Error("text transformation prompt reload rejected", "error", err)
+				continue
+			}
+			logger.Info("text transformation prompt reloaded", "sha256", service.PromptSHA256())
+		}
+	}
 }

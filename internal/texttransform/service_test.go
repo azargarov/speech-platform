@@ -2,10 +2,14 @@ package texttransform
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -16,6 +20,8 @@ import (
 	"speech-platform/internal/config"
 )
 
+const testPrompt = "Synthetic test transformation prompt."
+
 type fakeGenerator struct {
 	calls   []string
 	inputs  []string
@@ -23,6 +29,174 @@ type fakeGenerator struct {
 	fail    map[string]error
 	output  string
 	started chan struct{}
+}
+
+func TestProductionPromptDefinesModeAndPreservationRules(t *testing.T) {
+	configured, err := config.Load("../../configs/gateway-text.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, err := loadPrompt(configured.TextTransform.PromptFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	required := []string{
+		"raw preserves wording and tone; with a target language, translate faithfully without stylistic rewriting",
+		"written removes spoken-language artifacts",
+		"polite uses courteous wording while retaining criticism, expressed dissatisfaction and responsibility",
+		"diplomatic uses measured, constructive, tactful wording while retaining criticism, expressed dissatisfaction and responsibility",
+		"Tone changes wording, never substance",
+		"translate and apply the selected style together in one transformation",
+		"facts (including names, numbers, quantities, dates and technical identifiers), negation, uncertainty, criticism, dissatisfaction, who did what, responsibility and attribution, recurrence, sequence, temporal relationships, requests, intent and commitments",
+		"Do not omit or obscure these, or invent apologies, promises, requests, solutions, explanations, motivations or other facts",
+	}
+	for _, instruction := range required {
+		if !strings.Contains(prompt.text, instruction) {
+			t.Errorf("production prompt is missing instruction %q", instruction)
+		}
+	}
+}
+
+func TestPromptStartupLoadsContentAndFingerprint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prompt.txt")
+	content := []byte("startup prompt\n")
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig()
+	cfg.PromptFile = path
+	s, err := New(context.Background(), &cfg, "", &fakeGenerator{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	hash := sha256.Sum256([]byte("startup prompt"))
+	if got, want := s.PromptSHA256(), fmt.Sprintf("%x", hash); got != want {
+		t.Fatalf("prompt fingerprint=%s, want %s", got, want)
+	}
+}
+
+func TestPromptReloadChangesFingerprintAndRejectedReloadKeepsActivePrompt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prompt.txt")
+	if err := os.WriteFile(path, []byte("first prompt\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig()
+	cfg.PromptFile = path
+	s, err := New(context.Background(), &cfg, "", &fakeGenerator{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	first := s.PromptSHA256()
+	if err := os.WriteFile(path, []byte("second prompt\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReloadPrompt(); err != nil {
+		t.Fatal(err)
+	}
+	second := s.PromptSHA256()
+	if first == second {
+		t.Fatal("prompt fingerprint did not change")
+	}
+	if err := os.WriteFile(path, []byte("  \n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReloadPrompt(); err == nil {
+		t.Fatal("empty prompt reload was accepted")
+	}
+	if got := s.PromptSHA256(); got != second {
+		t.Fatalf("rejected reload replaced active fingerprint: got %s, want %s", got, second)
+	}
+}
+
+type snapshotGenerator struct {
+	mu      sync.Mutex
+	prompts []string
+	started chan struct{}
+	release chan struct{}
+}
+
+func (g *snapshotGenerator) Generate(_ context.Context, _ config.TextProvider, _ config.TextModel, _, prompt, _, _ string) (string, error) {
+	g.mu.Lock()
+	g.prompts = append(g.prompts, prompt)
+	call := len(g.prompts)
+	g.mu.Unlock()
+	if call == 1 {
+		close(g.started)
+		<-g.release
+		return "", &ProviderError{Kind: FailureTransport}
+	}
+	return "generated", nil
+}
+
+func TestConcurrentRequestUsesOnePromptSnapshotAcrossReloadAndFallback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prompt.txt")
+	if err := os.WriteFile(path, []byte("old snapshot\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig()
+	cfg.PromptFile = path
+	g := &snapshotGenerator{started: make(chan struct{}), release: make(chan struct{})}
+	s, err := New(context.Background(), &cfg, "", g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/text/transformations", strings.NewReader(`{"text":"synthetic","mode":"written"}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { s.ServeHTTP(recorder, request); close(done) }()
+	<-g.started
+	if err := os.WriteFile(path, []byte("new snapshot\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReloadPrompt(); err != nil {
+		t.Fatal(err)
+	}
+	close(g.release)
+	<-done
+	oldHash := sha256.Sum256([]byte("old snapshot"))
+	if got := recorder.Header().Get("X-Speech-Prompt-SHA256"); got != fmt.Sprintf("%x", oldHash) {
+		t.Fatalf("response fingerprint=%s, want old snapshot fingerprint", got)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.prompts) != 2 || g.prompts[0] != "old snapshot" || g.prompts[1] != "old snapshot" {
+		t.Fatalf("fallback attempts mixed prompt snapshots: %#v", g.prompts)
+	}
+	if got := s.PromptSHA256(); got == recorder.Header().Get("X-Speech-Prompt-SHA256") {
+		t.Fatal("reload did not activate the new prompt for subsequent requests")
+	}
+}
+
+func TestModeAndTranslationOptionsRemainSeparateFromUserText(t *testing.T) {
+	cases := []struct {
+		mode, language string
+	}{
+		{"written", "none"},
+		{"polite", "ru"},
+		{"diplomatic", "sv"},
+	}
+	input := "Synthetic text: \"keep responsibility\"\n"
+	for _, tc := range cases {
+		t.Run(tc.mode+"/"+tc.language, func(t *testing.T) {
+			options := optionsJSON(tc.mode, "normal", tc.language)
+			var got map[string]string
+			if err := json.Unmarshal([]byte(options), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got["mode"] != tc.mode || got["format"] != "normal" || got["target_language"] != tc.language {
+				t.Fatalf("options = %s", options)
+			}
+			prompt := userPrompt(input, options)
+			if !strings.Contains(prompt, "Validated options (JSON): "+options) || !strings.Contains(prompt, "User text (JSON string): "+mustJSONString(input)) {
+				t.Fatalf("options and JSON-quoted text were not constructed separately")
+			}
+		})
+	}
 }
 
 func (f *fakeGenerator) Generate(ctx context.Context, _ config.TextProvider, m config.TextModel, _, _, input, options string) (string, error) {
@@ -121,7 +295,11 @@ func testConfig() config.TextTransform {
 	seed := int32(1)
 	n := 1024
 	think := false
-	return config.TextTransform{Enabled: &trueValue, RequestTimeout: "2s", MaxRequestBytes: 65536, MaxInputBytes: 10000, MaxOutputCharacters: 20000, MaxResponseBytes: 262144, MaxConcurrentRequests: 1, Selection: config.TextSelection{Policy: "ordered", AllowCloud: true}, Transport: config.TextTransport{ConnectTimeout: "1s", TLSHandshakeTimeout: "1s", MaxIdleConnections: 2}, Providers: []config.TextProvider{{ID: "local", Type: "ollama", Locality: "local", Endpoint: "http://local.invalid/api/generate", Timeout: "1s"}, {ID: "cloud", Type: "openai_compatible", Locality: "cloud", Endpoint: "https://cloud.invalid/v1/chat/completions", Timeout: "1s"}}, Models: []config.TextModel{{ID: "local-model", Provider: "local", Model: "local:tag", Enabled: &trueValue, ContextLimitTokens: 4096, PromptOverheadTokens: 64, Parameters: config.TextModelParameters{Ollama: &config.OllamaParameters{Think: &think, NumPredict: n, NumBatch: 128, NumThread: 4, Temperature: &zero, TopP: &top, Seed: &seed}}}, {ID: "cloud-model", Provider: "cloud", Model: "cloud-model", Enabled: &trueValue, ContextLimitTokens: 8192, PromptOverheadTokens: 64, Parameters: config.TextModelParameters{OpenAI: &config.OpenAIParameters{MaxCompletionTokens: &n, Temperature: &zero, TopP: &top, Seed: &seed}}}}}
+	promptFile, err := filepath.Abs("testdata/system-prompt.txt")
+	if err != nil {
+		panic(err)
+	}
+	return config.TextTransform{Enabled: &trueValue, PromptFile: promptFile, RequestTimeout: "2s", MaxRequestBytes: 65536, MaxInputBytes: 10000, MaxOutputCharacters: 20000, MaxResponseBytes: 262144, MaxConcurrentRequests: 1, Selection: config.TextSelection{Policy: "ordered", AllowCloud: true}, Transport: config.TextTransport{ConnectTimeout: "1s", TLSHandshakeTimeout: "1s", MaxIdleConnections: 2}, Providers: []config.TextProvider{{ID: "local", Type: "ollama", Locality: "local", Endpoint: "http://local.invalid/api/generate", Timeout: "1s"}, {ID: "cloud", Type: "openai_compatible", Locality: "cloud", Endpoint: "https://cloud.invalid/v1/chat/completions", Timeout: "1s"}}, Models: []config.TextModel{{ID: "local-model", Provider: "local", Model: "local:tag", Enabled: &trueValue, ContextLimitTokens: 4096, PromptOverheadTokens: 64, Parameters: config.TextModelParameters{Ollama: &config.OllamaParameters{Think: &think, NumPredict: n, NumBatch: 128, NumThread: 4, Temperature: &zero, TopP: &top, Seed: &seed}}}, {ID: "cloud-model", Provider: "cloud", Model: "cloud-model", Enabled: &trueValue, ContextLimitTokens: 8192, PromptOverheadTokens: 64, Parameters: config.TextModelParameters{OpenAI: &config.OpenAIParameters{MaxCompletionTokens: &n, Temperature: &zero, TopP: &top, Seed: &seed}}}}}
 }
 func call(t *testing.T, h http.Handler, body string, auth bool) (int, []byte) {
 	t.Helper()
@@ -298,7 +476,7 @@ func TestRejectDuplicateKeysAndLoneSurrogates(t *testing.T) {
 func TestContextRejectionMakesNoCall(t *testing.T) {
 	cfg := testConfig()
 	cfg.Models = cfg.Models[:1]
-	cfg.Models[0].ContextLimitTokens = len(systemPrompt) + len(userPrompt("", `{"format":"normal","mode":"raw","target_language":"none"}`)) + 512 + cfg.Models[0].PromptOverheadTokens + outputBudget(cfg.Models[0])
+	cfg.Models[0].ContextLimitTokens = len(testPrompt) + len(userPrompt("", `{"format":"normal","mode":"raw","target_language":"none"}`)) + 512 + cfg.Models[0].PromptOverheadTokens + outputBudget(cfg.Models[0])
 	g := &fakeGenerator{}
 	s, _ := New(context.Background(), &cfg, "", g)
 	defer s.Close()
@@ -320,7 +498,7 @@ func TestContextBoundaryAndMultilingualInputAreNotTruncated(t *testing.T) {
 	cfg := testConfig()
 	cfg.Models = cfg.Models[:1]
 	input := "åäö Привет 😀"
-	need := len(systemPrompt) + len(userPrompt(input, `{"format":"normal","mode":"written","target_language":"none"}`)) + 512 + cfg.Models[0].PromptOverheadTokens + outputBudget(cfg.Models[0])
+	need := len(testPrompt) + len(userPrompt(input, `{"format":"normal","mode":"written","target_language":"none"}`)) + 512 + cfg.Models[0].PromptOverheadTokens + outputBudget(cfg.Models[0])
 	cfg.Models[0].ContextLimitTokens = need
 	g := &fakeGenerator{}
 	s, _ := New(context.Background(), &cfg, "", g)
@@ -340,11 +518,19 @@ func TestContextBoundaryAndMultilingualInputAreNotTruncated(t *testing.T) {
 }
 
 func TestExampleLocalSerializedInputBudget(t *testing.T) {
+	cfg, err := config.Load("../../configs/gateway-text.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, err := loadPrompt(cfg.TextTransform.PromptFile)
+	if err != nil {
+		t.Fatal(err)
+	}
 	options := optionsJSON("raw", "normal", "none")
 	const contextLimit, framing, promptOverhead, outputReservation = 8192, 512, 512, 1024
-	budget := contextLimit - framing - promptOverhead - outputReservation - len([]byte(systemPrompt)) - len([]byte(userPrompt("", options)))
-	if budget != 4963 {
-		t.Fatalf("example local serialized input budget = %d bytes, want 4963; update this boundary when prompt or example budgets change", budget)
+	budget := contextLimit - framing - promptOverhead - outputReservation - len([]byte(prompt.text)) - len([]byte(userPrompt("", options)))
+	if budget != 4397 {
+		t.Fatalf("example local serialized input budget = %d bytes, want 4397; update this boundary when prompt or example budgets change", budget)
 	}
 }
 
@@ -364,6 +550,11 @@ func TestEightKContextAcceptsLongDictationRejectedAtFourK(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := testConfig()
 			cfg.Models = cfg.Models[:1]
+			productionConfig, err := config.Load("../../configs/gateway-text.example.yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.PromptFile = productionConfig.TextTransform.PromptFile
 			cfg.Models[0].ContextLimitTokens = tc.limit
 			cfg.Models[0].PromptOverheadTokens = 512
 			g := &fakeGenerator{}
@@ -385,7 +576,7 @@ func TestContextBoundaryCountsJSONEscaping(t *testing.T) {
 	cfg.Models = cfg.Models[:1]
 	input := "say \"hello\"\\now\nnext"
 	options := optionsJSON("written", "normal", "none")
-	need := len([]byte(systemPrompt)) + len([]byte(userPrompt(input, options))) + 512 + cfg.Models[0].PromptOverheadTokens + outputBudget(cfg.Models[0])
+	need := len([]byte(testPrompt)) + len([]byte(userPrompt(input, options))) + 512 + cfg.Models[0].PromptOverheadTokens + outputBudget(cfg.Models[0])
 	cfg.Models[0].ContextLimitTokens = need
 	g := &fakeGenerator{}
 	s, _ := New(context.Background(), &cfg, "", g)
@@ -551,11 +742,11 @@ func TestHTTPGeneratorOllamaSerialization(t *testing.T) {
 	p := cfg.Providers[0]
 	p.Endpoint = server.URL
 	m := cfg.Models[0]
-	out, err := (HTTPGenerator{}).Generate(context.Background(), p, m, "secret", systemPrompt, "hello", "{}")
+	out, err := (HTTPGenerator{}).Generate(context.Background(), p, m, "secret", testPrompt, "hello", "{}")
 	if err != nil || out != "ok" {
 		t.Fatalf("out=%q err=%v", out, err)
 	}
-	if got["keep_alive"] != float64(0) || got["stream"] != false || got["system"] != systemPrompt || strings.Contains(got["prompt"].(string), "hello") == false {
+	if got["keep_alive"] != float64(0) || got["stream"] != false || got["system"] != testPrompt || strings.Contains(got["prompt"].(string), "hello") == false {
 		t.Fatalf("payload %#v", got)
 	}
 	if think, ok := got["think"].(bool); !ok || think {
@@ -591,7 +782,7 @@ func TestHTTPGeneratorRejectsIncompleteAndClassifiesProviderFailures(t *testing.
 		cfg := testConfig()
 		p := cfg.Providers[0]
 		p.Endpoint = server.URL
-		_, err := (HTTPGenerator{}).Generate(context.Background(), p, cfg.Models[0], "", systemPrompt, "x", "{}")
+		_, err := (HTTPGenerator{}).Generate(context.Background(), p, cfg.Models[0], "", testPrompt, "x", "{}")
 		server.Close()
 		var pe *ProviderError
 		if !errors.As(err, &pe) || pe.Kind != tc.kind || pe.Suppress != tc.suppress {
@@ -658,7 +849,7 @@ func TestOllamaCompletionValidation(t *testing.T) {
 			provider := cfg.Providers[0]
 			provider.Endpoint = server.URL
 			generator := HTTPGenerator{MaxResponseBytes: tc.maxBytes}
-			got, err := generator.Generate(context.Background(), provider, cfg.Models[0], "", systemPrompt, "synthetic", "{}")
+			got, err := generator.Generate(context.Background(), provider, cfg.Models[0], "", testPrompt, "synthetic", "{}")
 			if tc.wantInvalid {
 				var providerErr *ProviderError
 				if !errors.As(err, &providerErr) || providerErr.Kind != FailureInvalidResponse {
@@ -691,7 +882,7 @@ func TestHTTPGeneratorOpenAIWireAndStructuredRefusal(t *testing.T) {
 	budget := 1024
 	m.Parameters.OpenAI.MaxTokens = &budget
 	m.Parameters.OpenAI.ReasoningEffort = "none"
-	out, err := (HTTPGenerator{}).Generate(context.Background(), p, m, "", systemPrompt, "user text", `{"mode":"written"}`)
+	out, err := (HTTPGenerator{}).Generate(context.Background(), p, m, "", testPrompt, "user text", `{"mode":"written"}`)
 	if err != nil || out != "final text" {
 		t.Fatalf("out=%q err=%v", out, err)
 	}
@@ -703,7 +894,7 @@ func TestHTTPGeneratorOpenAIWireAndStructuredRefusal(t *testing.T) {
 	}))
 	defer refusalServer.Close()
 	p.Endpoint = refusalServer.URL
-	_, err = (HTTPGenerator{Client: refusalServer.Client()}).Generate(context.Background(), p, m, "", systemPrompt, "x", "{}")
+	_, err = (HTTPGenerator{Client: refusalServer.Client()}).Generate(context.Background(), p, m, "", testPrompt, "x", "{}")
 	var pe *ProviderError
 	if !errors.As(err, &pe) || pe.Kind != FailureRefused {
 		t.Fatalf("refusal error=%v", err)
@@ -744,7 +935,7 @@ func TestAcceptedGroqModelsSerializeConfiguredReasoningOptions(t *testing.T) {
 				}
 			}
 			provider.Endpoint = server.URL
-			_, err := (HTTPGenerator{}).Generate(context.Background(), provider, model, "offline-test-credential", systemPrompt, "Synthetic test sentence.", `{"mode":"written"}`)
+			_, err := (HTTPGenerator{}).Generate(context.Background(), provider, model, "offline-test-credential", testPrompt, "Synthetic test sentence.", `{"mode":"written"}`)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 type TextTransform struct {
 	Enabled               *bool          `yaml:"enabled"`
+	PromptFile            string         `yaml:"prompt_file"`
 	RequestTimeout        string         `yaml:"request_timeout"`
 	WarmupKeepAlive       string         `yaml:"warmup_keep_alive"`
 	MaxRequestBytes       int            `yaml:"max_request_bytes"`
@@ -86,6 +88,9 @@ func (t *TextTransform) Validate(writeTimeout string) error {
 	bad := func(s string) error { return fmt.Errorf("text_transform: %s", s) }
 	if t.Enabled == nil {
 		return bad("enabled is required")
+	}
+	if *t.Enabled && (!filepath.IsAbs(t.PromptFile) || strings.TrimSpace(t.PromptFile) == "") {
+		return bad("prompt_file must be an absolute path when text transformation is enabled")
 	}
 	requestTimeout, err := boundedDuration(t.RequestTimeout, 10*time.Minute)
 	if err != nil {

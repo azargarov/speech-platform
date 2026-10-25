@@ -126,6 +126,11 @@ Copy `configs/gateway-text.example.yaml` into ignored `private/`, adapt its
 listener to `0.0.0.0` and worker URLs to `http://stt:8081` / `http://tts:8082`, then
 set `GATEWAY_CONFIG=private/<name>.yaml` in `.env`. Paths are canonicalized; root
 Compose also uses a bind-mount object so relative names cannot become named volumes.
+The example's `text_transform.prompt_file` is relative to the Gateway config
+file and points to `../configs/prompts/text-transformation-system.txt`. Compose
+mounts `configs/prompts/` read-only at `/configs/prompts/` in the Gateway.
+Custom prompt files must remain in that mounted directory and the config path
+must resolve to the corresponding mounted file.
 
 An enabled local model requires the externally owned running Ollama container,
 its existing internal bridge network and alias `ollama`, endpoint
@@ -147,6 +152,32 @@ validates it without contacting paid provider inference endpoints. Public errors
 and reports never include credential values. Groq STT credentials are checked
 independently when `groq_stt.enabled` is true; they do not depend on text
 `allow_cloud`. Cloud audio still requires per-request `X-Allow-Cloud-Audio: true`.
+
+### Updating the text transformation prompt
+
+The active prompt is `configs/prompts/text-transformation-system.txt`, mounted
+read-only into the Gateway. Its bytes, excluding one terminal LF (and a CR
+immediately before it), are the active prompt text and the input to its SHA-256
+fingerprint. The Gateway validates UTF-8, non-empty content, a 64 KiB size
+limit, and fit against every enabled model before activation.
+
+After a Gateway version with prompt reload support has been deployed, update
+the version-controlled prompt file using a temporary file in the same directory
+and an atomic rename. Then signal only the Gateway container:
+
+```sh
+docker --context default kill --signal HUP <gateway-container-id>
+```
+
+The Gateway logs `text transformation prompt reloaded` with the active
+fingerprint after success. A rejected reload logs `text transformation prompt
+reload rejected` and leaves the prior snapshot active. Each transformation
+response also includes `X-Speech-Prompt-SHA256`; qualification JSON reports
+record that value. The request captures one prompt snapshot, so a reload during
+an operation affects later requests only. Updating the prompt file does not
+change provider/model selection or sampling settings and does not restart the
+Gateway. Changes to the prompt-file path itself still require configuration
+change and deployment.
 
 ## Smoke test, upgrade and remove
 

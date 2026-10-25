@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -129,6 +130,14 @@ func TestTextTransformExampleAndStrictNestedConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	valid := string(raw)
+	configured, err := Load("../../configs/gateway-text.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPrompt, err := filepath.Abs("../../configs/prompts/text-transformation-system.txt")
+	if err != nil || configured.TextTransform.PromptFile != wantPrompt {
+		t.Fatalf("resolved prompt path=%q, want %q; err=%v", configured.TextTransform.PromptFile, wantPrompt, err)
+	}
 	withoutWarmupKeepAlive := strings.Replace(valid, "  warmup_keep_alive: 60s\n", "", 1)
 	defaultPath := t.TempDir() + "/gateway-default.yaml"
 	if err := os.WriteFile(defaultPath, []byte(withoutWarmupKeepAlive), 0600); err != nil {
@@ -143,6 +152,7 @@ func TestTextTransformExampleAndStrictNestedConfig(t *testing.T) {
 		"unknown nested field":      strings.Replace(valid, "      enabled: true", "      enabled: true\n      surprise: true", 1),
 		"duplicate nested key":      strings.Replace(valid, "  enabled: true", "  enabled: true\n  enabled: true", 1),
 		"required enabled":          strings.Replace(valid, "  enabled: true\n", "", 1),
+		"required prompt file":      strings.Replace(valid, "  prompt_file: ../configs/prompts/text-transformation-system.txt\n", "", 1),
 		"cloud requires https":      strings.Replace(valid, "https://api.groq.com", "http://api.groq.com", 1),
 		"invalid output budget":     strings.Replace(valid, "num_predict: 1024", "num_predict: 8192", 1),
 		"invalid warmup keep alive": strings.Replace(valid, "warmup_keep_alive: 60s", "warmup_keep_alive: 0s", 1),

@@ -68,6 +68,8 @@ type Generator interface {
 
 type Service struct {
 	cfg         config.TextTransform
+	promptFile  string
+	prompt      atomic.Pointer[promptSnapshot]
 	token       string
 	creds       map[string]string
 	client      *http.Client
@@ -98,8 +100,16 @@ func New(parent context.Context, cfg *config.TextTransform, token string, genera
 		root, cancel := context.WithCancel(parent)
 		return &Service{token: token, root: root, cancel: cancel, logger: logger}, nil
 	}
-	if err := ValidateConfig(cfg); err != nil {
-		return nil, err
+	var prompt *promptSnapshot
+	if cfg.Enabled != nil && *cfg.Enabled {
+		var err error
+		prompt, err = loadPrompt(cfg.PromptFile)
+		if err != nil {
+			return nil, fmt.Errorf("text_transform: active prompt is invalid")
+		}
+		if err = validatePrompt(cfg, prompt.text); err != nil {
+			return nil, err
+		}
 	}
 	if parent == nil {
 		parent = context.Background()
@@ -113,25 +123,64 @@ func New(parent context.Context, cfg *config.TextTransform, token string, genera
 	if _, ok := generator.(HTTPGenerator); ok {
 		generator = HTTPGenerator{Client: client, MaxResponseBytes: cfg.MaxResponseBytes}
 	}
-	return &Service{cfg: *cfg, token: token, creds: cfg.ResolveCredentials(), client: client, gen: generator, root: ctx, cancel: cancel, slots: make(chan struct{}, 1), logger: logger}, nil
+	s := &Service{cfg: *cfg, promptFile: cfg.PromptFile, token: token, creds: cfg.ResolveCredentials(), client: client, gen: generator, root: ctx, cancel: cancel, slots: make(chan struct{}, 1), logger: logger}
+	if prompt != nil {
+		s.prompt.Store(prompt)
+	}
+	return s, nil
 }
 
-// ValidateConfig checks fixed prompt and framing fit without resolving secrets or making network calls.
+// ValidateConfig checks the configured prompt and framing fit without resolving secrets or making network calls.
 func ValidateConfig(cfg *config.TextTransform) error {
 	if cfg == nil || cfg.Enabled == nil || !*cfg.Enabled {
 		return nil
 	}
+	prompt, err := loadPrompt(cfg.PromptFile)
+	if err != nil {
+		return fmt.Errorf("text_transform: active prompt is invalid")
+	}
+	return validatePrompt(cfg, prompt.text)
+}
+
+func validatePrompt(cfg *config.TextTransform, prompt string) error {
 	for _, m := range cfg.Models {
 		if m.Enabled == nil || !*m.Enabled {
 			continue
 		}
 		options := optionsJSON("raw", "normal", "none")
-		need := len([]byte(systemPrompt)) + len([]byte(userPrompt("", options))) + 512 + m.PromptOverheadTokens + outputBudget(m)
+		need := len([]byte(prompt)) + len([]byte(userPrompt("", options))) + 512 + m.PromptOverheadTokens + outputBudget(m)
 		if need > m.ContextLimitTokens {
-			return fmt.Errorf("text_transform model %q cannot fit the fixed prompt, framing and output reservation", m.ID)
+			return fmt.Errorf("text_transform model %q cannot fit the active prompt, framing and output reservation", m.ID)
 		}
 	}
 	return nil
+}
+
+// ReloadPrompt replaces the active prompt only after the configured file passes validation.
+func (s *Service) ReloadPrompt() error {
+	if s == nil || s.stopped.Load() || s.root == nil || s.root.Err() != nil {
+		return fmt.Errorf("text transformation service is unavailable")
+	}
+	next, err := loadPrompt(s.promptFile)
+	if err != nil || validatePrompt(&s.cfg, next.text) != nil {
+		return fmt.Errorf("configured prompt reload was rejected")
+	}
+	if s.stopped.Load() || s.root.Err() != nil {
+		return fmt.Errorf("text transformation service is unavailable")
+	}
+	s.prompt.Store(next)
+	return nil
+}
+
+// PromptSHA256 returns the fingerprint for the currently active prompt snapshot.
+func (s *Service) PromptSHA256() string {
+	if s == nil {
+		return ""
+	}
+	if prompt := s.prompt.Load(); prompt != nil {
+		return prompt.sha256
+	}
+	return ""
 }
 
 func (s *Service) MissingCredentials() []string {
@@ -292,6 +341,12 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 503, "text_transform_unavailable")
 		return
 	}
+	prompt := s.prompt.Load()
+	if prompt == nil {
+		writeErr(w, 503, "text_transform_unavailable")
+		return
+	}
+	w.Header().Set("X-Speech-Prompt-SHA256", prompt.sha256)
 	mediaType, _, mediaErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if mediaErr != nil || mediaType != "application/json" {
 		writeErr(w, 415, "unsupported_media_type")
@@ -453,7 +508,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if suppressed[p.ID] {
 			continue
 		}
-		need := len([]byte(systemPrompt)) + len([]byte(userPrompt(req.Text, optionsJSON(req.Mode, req.Format, req.TargetLanguage)))) + 512 + m.PromptOverheadTokens
+		need := len([]byte(prompt.text)) + len([]byte(userPrompt(req.Text, optionsJSON(req.Mode, req.Format, req.TargetLanguage)))) + 512 + m.PromptOverheadTokens
 		if budget := outputBudget(m); need+budget > m.ContextLimitTokens {
 			if req.Model != nil {
 				writeErr(w, 413, "context_limit_exceeded")
@@ -474,7 +529,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.attempts.Add(1)
 		attemptStart := time.Now()
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, duration(p.Timeout))
-		out, e := s.gen.Generate(attemptCtx, p, m, s.creds[p.ID], systemPrompt, req.Text, optionsJSON(req.Mode, req.Format, req.TargetLanguage))
+		out, e := s.gen.Generate(attemptCtx, p, m, s.creds[p.ID], prompt.text, req.Text, optionsJSON(req.Mode, req.Format, req.TargetLanguage))
 		attemptCancel()
 		if e == nil {
 			if !utf8.ValidString(out) || strings.TrimSpace(out) == "" || len([]rune(out)) > s.cfg.MaxOutputCharacters {

@@ -118,6 +118,9 @@ class GatewayProcessLifecycleTest(unittest.TestCase):
             config["stt_url"] = fake_url
             config["tts_url"] = fake_url
             transform = config["text_transform"]
+            transform["prompt_file"] = str(
+                ROOT / "configs/prompts/text-transformation-system.txt"
+            )
             transform["selection"]["allow_cloud"] = False
             for provider in transform["providers"]:
                 if provider["type"] == "ollama":

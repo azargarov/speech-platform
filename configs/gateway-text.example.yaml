@@ -13,6 +13,7 @@ idle_timeout: 60s
 shutdown_timeout: 10s
 text_transform:
   enabled: true
+  prompt_file: ../configs/prompts/text-transformation-system.txt
   request_timeout: 240s
   warmup_keep_alive: 60s
   max_request_bytes: 65536

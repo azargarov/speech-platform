@@ -47,6 +47,13 @@ def validate(config, expected_port, expected_bind, expected_config_gid="65532"):
     if set(services) != {"gateway", "stt", "tts"}:
         raise ValueError("unexpected Compose service set")
     gateway = services["gateway"]
+    prompt_mounts = [
+        volume
+        for volume in gateway.get("volumes", [])
+        if volume.get("target") == "/configs/prompts"
+    ]
+    if len(prompt_mounts) != 1 or prompt_mounts[0].get("read_only") is not True:
+        raise ValueError("Gateway prompt directory must be mounted read-only")
     if set(gateway["networks"]) != {"gateway_publish", "stt_private", "tts_private"}:
         raise ValueError("Gateway must connect to its publication and worker networks")
     if set(services["stt"]["networks"]) != {"stt_private"}:

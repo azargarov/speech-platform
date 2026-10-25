@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -55,6 +56,13 @@ func Load(path string) (Config, error) {
 	var extra any
 	if e = d.Decode(&extra); e != io.EOF {
 		return c, fmt.Errorf("expected exactly one YAML document")
+	}
+	if c.TextTransform != nil && c.TextTransform.PromptFile != "" && !filepath.IsAbs(c.TextTransform.PromptFile) {
+		promptPath, err := filepath.Abs(filepath.Join(filepath.Dir(path), c.TextTransform.PromptFile))
+		if err != nil {
+			return c, fmt.Errorf("text_transform.prompt_file path is invalid")
+		}
+		c.TextTransform.PromptFile = promptPath
 	}
 	if c.WarmupTimeout == "" {
 		c.WarmupTimeout = "180s"
