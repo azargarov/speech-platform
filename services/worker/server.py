@@ -177,9 +177,9 @@ def main(kind):
         import asyncio
 
         from services.stt.http_server import serve
-        from services.stt.service import DeferredSTTApplication
+        from services.stt.service import DeferredApplication
 
-        application = DeferredSTTApplication(application_config, deployment_config)
+        application = DeferredApplication(application_config, deployment_config)
         asyncio.run(
             serve(
                 application,

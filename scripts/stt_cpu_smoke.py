@@ -13,7 +13,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from services.stt.config import load_application_config, load_deployment_config
 from services.stt.http_server import create_http_app
-from services.stt.service import DeferredSTTApplication
+from services.stt.service import DeferredApplication
 
 
 def main():
@@ -28,7 +28,7 @@ def main():
         raise SystemExit("CPU smoke test requires device_policy.mode: cpu")
     if audio_path.stat().st_size > config.admission.max_request_bytes:
         raise SystemExit("smoke audio exceeds configured request byte limit")
-    application = DeferredSTTApplication(config, deployment)
+    application = DeferredApplication(config, deployment)
     result = asyncio.run(_exercise_http(application, config, audio_path))
     load_seconds = result.pop("model_load_seconds")
     inference_seconds = result.pop("inference_seconds")

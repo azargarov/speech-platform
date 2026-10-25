@@ -100,7 +100,7 @@ class ModelCatalog:
             ) from exc
 
 
-class STTApplication:
+class Application:
     def __init__(
         self,
         config: ApplicationConfig,
@@ -800,7 +800,7 @@ def create_application(
     backend_registry: dict[str, object],
     device_probe,
     artifact_store=None,
-) -> STTApplication:
+) -> Application:
     factory = resolve_backend(config.backend_id, backend_registry)
     backend = factory()
     expected_artifacts = {model.artifact_ref for model in config.models}
@@ -863,7 +863,7 @@ def create_application(
             cleanup_event=cleanup_event,
         )
 
-    return STTApplication(
+    return Application(
         config,
         ModelCatalog(config.models, config.default_model),
         runner_factory,

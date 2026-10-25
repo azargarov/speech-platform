@@ -9,13 +9,13 @@ import time
 from aiohttp import web
 
 from services.stt.domain import FailureCode, OperationContext, SpeechFailure, safe_error
-from services.stt.metrics import STTMetrics
+from services.stt.metrics import Metrics
 
 STARTUP_TASK_KEY = web.AppKey("startup_task", asyncio.Task)
 
 
 def create_http_app(application):
-    metrics = STTMetrics()
+    metrics = Metrics()
     maximum = application.config.admission.max_request_bytes
     http_app = web.Application(
         client_max_size=maximum,

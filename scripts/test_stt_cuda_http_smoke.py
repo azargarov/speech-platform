@@ -205,7 +205,7 @@ class CUDAHTTPProfileTests(unittest.TestCase):
             loop = asyncio.new_event_loop()
             self.addCleanup(loop.close)
             with patch(
-                "scripts.stt_cuda_http_smoke.DeferredSTTApplication", FakeApplication
+                "scripts.stt_cuda_http_smoke.DeferredApplication", FakeApplication
             ):
                 operations = build_operations(args, loop, state)
                 result = operations["http_worker_integration"]({})
@@ -323,9 +323,7 @@ class CUDAHTTPProfileTests(unittest.TestCase):
             loop = asyncio.new_event_loop()
             self.addCleanup(loop.close)
             with (
-                patch(
-                    "scripts.stt_cuda_http_smoke.DeferredSTTApplication", Application
-                ),
+                patch("scripts.stt_cuda_http_smoke.DeferredApplication", Application),
                 patch("scripts.stt_cuda_http_smoke.create_http_app", lambda app: app),
                 patch("scripts.stt_cuda_http_smoke.TestServer", lambda app: app),
                 patch(
@@ -456,9 +454,7 @@ class CUDAHTTPProfileTests(unittest.TestCase):
             loop = asyncio.new_event_loop()
             self.addCleanup(loop.close)
             with (
-                patch(
-                    "scripts.stt_cuda_http_smoke.DeferredSTTApplication", Application
-                ),
+                patch("scripts.stt_cuda_http_smoke.DeferredApplication", Application),
                 patch("scripts.stt_cuda_http_smoke.create_http_app", lambda app: app),
                 patch("scripts.stt_cuda_http_smoke.TestServer", lambda app: app),
                 patch(
@@ -650,7 +646,7 @@ class CUDAHTTPProfileTests(unittest.TestCase):
             self.addCleanup(loop.close)
             with (
                 patch(
-                    "scripts.stt_cuda_http_smoke.DeferredSTTApplication",
+                    "scripts.stt_cuda_http_smoke.DeferredApplication",
                     SequentialApplication,
                 ),
                 patch(
@@ -746,7 +742,7 @@ class CUDAHTTPProfileTests(unittest.TestCase):
             loop = asyncio.new_event_loop()
             self.addCleanup(loop.close)
             with patch(
-                "scripts.stt_cuda_http_smoke.DeferredSTTApplication",
+                "scripts.stt_cuda_http_smoke.DeferredApplication",
                 FailingApplication,
             ):
                 operations = build_operations(args, loop, state)

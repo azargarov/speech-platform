@@ -10,7 +10,7 @@ from services.stt.lifecycle import Lifecycle, ModelState, WorkerState
 from services.stt.runtime import create_runtime
 
 
-class DeferredSTTApplication:
+class DeferredApplication:
     def __init__(self, config, deployment, backend_registry=None):
         self.config = config
         self._deployment = deployment

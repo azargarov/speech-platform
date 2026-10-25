@@ -33,7 +33,7 @@ from scripts.stt_cuda_preflight import verify_approved_audio
 from services.stt.artifacts import verify_artifact
 from services.stt.domain import FailureCode
 from services.stt.http_server import create_http_app
-from services.stt.service import DeferredSTTApplication
+from services.stt.service import DeferredApplication
 from services.worker.server import load_config as load_worker_config
 from scripts.stt_resource_sampling import ResourceSampler
 
@@ -403,7 +403,7 @@ def build_operations(args, loop, state, *, clock=time.monotonic):
     async def exercise_http():
         app = state["app"]
         measurement = state["measurement"]
-        application = DeferredSTTApplication(app, state["deployment"])
+        application = DeferredApplication(app, state["deployment"])
         client = TestClient(TestServer(create_http_app(application)))
         overall_deadline = state["experiment_deadline"]
         shutdown_budget = _shutdown_timeout_seconds(app)
