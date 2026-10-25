@@ -2,7 +2,7 @@
 
 ## Status
 
-**Live validation executed; operator review and acceptance pending.** The 2026-10-25 run was authorized by the user. Execution does not itself accept or close M07A.
+**Accepted; M07A complete.** On 2026-10-25, the operator explicitly accepted M07A following successful offline verification and controlled live Gateway qualification, including the limitations recorded below and in the [result](result.md).
 
 ## Observed technical results
 
@@ -13,17 +13,15 @@
 - Negative checks: invalid transformation options rejected locally with exit 2; controlled invalid bearer token received HTTP 401 with exit 1; existing output collision rejected locally with exit 2. No request was made for the two local validation failures.
 - Gateway, STT and TTS remained healthy with unchanged image IDs/source revision. GPU/model residency returned naturally to baseline between operations; no concurrent inference, cloud call, deployment, or restart occurred.
 
-These outcomes establish technical operation only. Semantic equivalence, translation quality, style and TTS audio quality have not been assessed. Review the private generated text/audio before accepting M07A.
+These outcomes establish technical operation only. Semantic equivalence, translation quality, style and TTS audio quality were not independently established by the checks. The operator accepted M07A with these limitations; generated content should receive appropriate human review before consequential use.
 
 ## Private evidence
 
 Evidence directory: `private/m07a/validation-20261025T135107Z/`. It contains per-operation content-free JSON reports, private request/output evidence, the supplied synthetic text inputs, and `speech.wav`. Generated text and transcript are intentionally not copied into this document. Evidence files were created with mode `0600`; no token is included.
 
-## Pending operator review
+## Operator acceptance
 
-- [ ] Review the Written and Diplomatic output and decide whether they meet the intended technical/semantic use.
-- [ ] Review the Swedish translation for linguistic correctness.
-- [ ] Listen to the private TTS WAV and assess quality.
-- [ ] Confirm whether these bounded results satisfy M07A acceptance criteria.
-
-No completion, acceptance, commit, or M07B authorization is recorded.
+- **Decision:** M07A accepted and closed on 2026-10-25.
+- **Accepted scope:** offline implementation verification and the bounded live technical results recorded above.
+- **Accepted limitations:** semantic preservation, translation correctness, stylistic quality and subjective TTS quality are not established as PASS by technical testing. This acceptance does not authorize M07B.
+- **Implementation commit:** `0b213aa` — `feat(cli): add public API qualification toolkit foundation`.
