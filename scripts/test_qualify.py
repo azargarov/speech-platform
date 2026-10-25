@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import stat
 import struct
 import subprocess
@@ -22,7 +23,11 @@ TOKEN = "synthetic-token-that-never-appears-in-reports-123"
 
 class Response:
     status = 200
-    headers = {"X-Speech-Provider": "local", "Content-Type": "application/json"}
+    headers = {
+        "X-Speech-Provider": "local",
+        "X-Speech-Prompt-SHA256": "a" * 64,
+        "Content-Type": "application/json",
+    }
 
     def __init__(self, body):
         self.body = body
@@ -76,7 +81,7 @@ class QualificationTests(unittest.TestCase):
             status = qualify.main(argv)
         return status, captured
 
-    def test_transform_builds_public_request_and_default_report_hides_text(self):
+    def test_transform_omits_default_model_and_keeps_report_content_free(self):
         status, seen = self.invoke(
             ["transform", "--text", "private synthetic words"],
             json.dumps(
@@ -101,9 +106,137 @@ class QualificationTests(unittest.TestCase):
         request = seen["request"]
         self.assertEqual(request.get_header("Authorization"), f"Bearer {TOKEN}")
         payload = json.loads(request.data)
+        self.assertNotIn("model", payload)
         self.assertTrue(payload["local_only"])
         self.assertEqual(payload["target_language"], "none")
         self.assertNotIn("private synthetic words", str(seen))
+
+    def test_explicit_local_model_is_sent_unchanged(self):
+        alias = "synthetic-local-alias"
+        body = {
+            "original_text": "source",
+            "transformed_text": "output",
+            "options": {
+                "mode": "written",
+                "format": "normal",
+                "target_language": "none",
+                "model": alias,
+                "local_only": True,
+            },
+            "model": alias,
+            "provider": "host-ollama",
+            "fallback_occurred": False,
+            "generated": True,
+        }
+        status, seen = self.invoke(
+            ["transform", "--text", "source", "--model", alias],
+            json.dumps(body).encode(),
+        )
+        payload = json.loads(seen["request"].data)
+        self.assertEqual(status, 0)
+        self.assertEqual(payload["model"], alias)
+        self.assertTrue(payload["local_only"])
+
+    def test_explicit_cloud_model_requires_cli_consent_and_gateway_policy(self):
+        alias = "synthetic-cloud-alias"
+        body = {
+            "original_text": "source",
+            "transformed_text": "output",
+            "options": {
+                "mode": "written",
+                "format": "normal",
+                "target_language": "none",
+                "model": alias,
+                "local_only": False,
+            },
+            "model": alias,
+            "provider": "synthetic-cloud-provider",
+            "fallback_occurred": False,
+            "generated": True,
+        }
+        status, seen = self.invoke(
+            [
+                "transform",
+                "--text",
+                "source",
+                "--model",
+                alias,
+                "--allow-cloud",
+            ],
+            json.dumps(body).encode(),
+        )
+        payload = json.loads(seen["request"].data)
+        self.assertEqual(status, 0)
+        self.assertEqual(payload["model"], alias)
+        self.assertFalse(payload["local_only"])
+
+    def test_gateway_authorization_and_alias_errors_are_preserved(self):
+        cases = (
+            ("synthetic-cloud-alias", (), 403, "cloud_not_allowed", True),
+            (
+                "synthetic-cloud-alias",
+                ("--allow-cloud",),
+                403,
+                "cloud_disabled",
+                False,
+            ),
+            ("unavailable-alias", (), 400, "unknown_model", True),
+        )
+        for index, (alias, options, status_code, api_code, local_only) in enumerate(
+            cases
+        ):
+            with self.subTest(alias=alias, options=options):
+                report_path = self.root / "private" / f"{alias}-{index}-failure.json"
+                captured = {}
+
+                def reject(request, timeout):
+                    captured["request"] = request
+                    raise HTTPError(
+                        request.full_url,
+                        status_code,
+                        "Gateway error",
+                        {},
+                        io.BytesIO(
+                            json.dumps(
+                                {
+                                    "code": api_code,
+                                    "message": "synthetic private provider detail",
+                                }
+                            ).encode()
+                        ),
+                    )
+
+                stdout = io.StringIO()
+                with (
+                    patch.object(qualify, "ROOT", self.root),
+                    patch.object(qualify, "load_env", return_value=self.env),
+                    patch.object(qualify, "urlopen", side_effect=reject),
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    result = qualify.main(
+                        [
+                            "transform",
+                            "--text",
+                            "source",
+                            "--model",
+                            alias,
+                            *options,
+                            "--report",
+                            str(report_path),
+                        ]
+                    )
+
+                payload = json.loads(captured["request"].data)
+                report = json.loads(report_path.read_text())
+                self.assertEqual(result, qualify.EXIT_REQUEST)
+                self.assertEqual(payload["model"], alias)
+                self.assertEqual(payload["local_only"], local_only)
+                self.assertEqual(report["http"]["status"], status_code)
+                self.assertEqual(report["error"]["api_code"], api_code)
+                self.assertNotIn(
+                    "synthetic private provider detail", report_path.read_text()
+                )
+                self.assertNotIn("synthetic private provider detail", stdout.getvalue())
 
     def test_groq_requires_explicit_consent_before_request(self):
         with (
@@ -150,6 +283,125 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(
             seen["request"].full_url, "http://127.0.0.1:8080/v1/tts/speech"
         )
+
+    def test_tts_writes_relative_absolute_and_non_private_paths(self):
+        (self.root / "samples" / "audio").mkdir(parents=True)
+        (self.root / "outside").mkdir()
+        paths = (
+            Path("relative.wav"),
+            self.root / "absolute.wav",
+            Path("samples/audio/en-polite.wav"),
+            self.root / "outside" / "speech.wav",
+        )
+        original_cwd = Path.cwd()
+        try:
+            os.chdir(self.root)
+            for output in paths:
+                with self.subTest(output=str(output)):
+                    status, _ = self.invoke(
+                        ["tts", "--text", "synthetic", "--output", str(output)],
+                        wav_bytes(),
+                    )
+                    self.assertEqual(status, 0)
+                    resolved = output.expanduser().absolute()
+                    self.assertTrue(resolved.is_file())
+                    self.assertEqual(stat.S_IMODE(resolved.stat().st_mode), 0o600)
+        finally:
+            os.chdir(original_cwd)
+
+    def test_tts_expands_home_directory_output(self):
+        home = self.root / "home"
+        (home / "recordings").mkdir(parents=True)
+        with patch.dict(os.environ, {"HOME": str(home)}):
+            status, _ = self.invoke(
+                ["tts", "--text", "synthetic", "--output", "~/recordings/speech.wav"],
+                wav_bytes(),
+            )
+        output = home / "recordings" / "speech.wav"
+        self.assertEqual(status, 0)
+        self.assertTrue(output.is_file())
+        self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+
+    def test_tts_existing_output_collision_fails_before_request_with_safe_message(self):
+        output = self.root / "existing.wav"
+        output.write_bytes(b"keep")
+        stdout = io.StringIO()
+        with (
+            patch.object(qualify, "ROOT", self.root),
+            patch.object(qualify, "load_env", return_value=self.env),
+            patch.object(qualify, "urlopen") as opened,
+            contextlib.redirect_stdout(stdout),
+        ):
+            status = qualify.main(
+                ["tts", "--text", "private words", "--output", str(output)]
+            )
+        self.assertEqual(status, qualify.EXIT_INPUT)
+        self.assertIn("HTTP N/A; elapsed=N/A", stdout.getvalue())
+        self.assertIn("output file already exists", stdout.getvalue())
+        self.assertNotIn("private words", stdout.getvalue())
+        self.assertNotIn(TOKEN, stdout.getvalue())
+        opened.assert_not_called()
+        self.assertEqual(output.read_bytes(), b"keep")
+
+    def test_tts_missing_output_parent_fails_before_request(self):
+        output = self.root / "missing" / "speech.wav"
+        stdout = io.StringIO()
+        with (
+            patch.object(qualify, "ROOT", self.root),
+            patch.object(qualify, "load_env", return_value=self.env),
+            patch.object(qualify, "urlopen") as opened,
+            contextlib.redirect_stdout(stdout),
+        ):
+            status = qualify.main(
+                ["tts", "--text", "synthetic", "--output", str(output)]
+            )
+        self.assertEqual(status, qualify.EXIT_INPUT)
+        self.assertIn("output directory does not exist:", stdout.getvalue())
+        self.assertIn("HTTP N/A; elapsed=N/A", stdout.getvalue())
+        opened.assert_not_called()
+
+    def test_tts_permission_failure_has_safe_actionable_error_and_output_exit(self):
+        output = self.root / "forbidden.wav"
+        stdout = io.StringIO()
+        with (
+            patch.object(qualify, "ROOT", self.root),
+            patch.object(qualify, "load_env", return_value=self.env),
+            patch.object(qualify, "urlopen", return_value=Response(wav_bytes())),
+            patch.object(qualify.os, "open", side_effect=PermissionError),
+            contextlib.redirect_stdout(stdout),
+        ):
+            status = qualify.main(
+                ["tts", "--text", "private words", "--output", str(output)]
+            )
+        self.assertEqual(status, qualify.EXIT_OUTPUT)
+        self.assertIn("HTTP 200", stdout.getvalue())
+        self.assertIn("permission denied creating output file", stdout.getvalue())
+        self.assertNotIn("private words", stdout.getvalue())
+        self.assertNotIn(TOKEN, stdout.getvalue())
+
+    def test_report_and_evidence_remain_restricted_to_private(self):
+        for option in ("--report", "--evidence"):
+            with self.subTest(option=option):
+                stdout = io.StringIO()
+                with (
+                    patch.object(qualify, "ROOT", self.root),
+                    patch.object(qualify, "load_env", return_value=self.env),
+                    patch.object(qualify, "urlopen") as opened,
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    status = qualify.main(
+                        [
+                            "tts",
+                            "--text",
+                            "synthetic",
+                            option,
+                            str(self.root / "outside.json"),
+                        ]
+                    )
+                self.assertEqual(status, qualify.EXIT_INPUT)
+                self.assertIn("under private/", stdout.getvalue())
+                self.assertIn("HTTP N/A; elapsed=N/A", stdout.getvalue())
+                opened.assert_not_called()
 
     def test_wav_rejects_truncation_and_incomplete_final_frame(self):
         valid = wav_bytes()
@@ -265,12 +517,12 @@ class QualificationTests(unittest.TestCase):
     def test_file_output_failure_returns_output_exit_code(self):
         output = self.root / "private" / "out.wav"
         report_path = self.root / "private" / "report.json"
-        actual_write = qualify._write_private
+        actual_write = qualify._write_output
 
-        def fail_audio(path, data):
+        def fail_audio(path, data, **kwargs):
             if path == output:
                 raise qualify.QualificationError("output_error", "write failed")
-            return actual_write(path, data)
+            return actual_write(path, data, **kwargs)
 
         with (
             patch.object(qualify, "ROOT", self.root),
@@ -278,7 +530,7 @@ class QualificationTests(unittest.TestCase):
             patch.object(qualify, "urlopen", return_value=Response(wav_bytes())),
             patch.object(
                 qualify,
-                "_write_private",
+                "_write_output",
                 side_effect=fail_audio,
             ),
             contextlib.redirect_stdout(io.StringIO()),
@@ -306,18 +558,18 @@ class QualificationTests(unittest.TestCase):
     def test_previous_audio_artifact_remains_if_report_write_fails(self):
         output = self.root / "private" / "out.wav"
         report = self.root / "private" / "report.json"
-        actual_write = qualify._write_private
+        actual_write = qualify._write_output
 
-        def fail_report(path, data):
+        def fail_report(path, data, **kwargs):
             if path == report:
                 raise qualify.QualificationError("output_error", "write failed")
-            return actual_write(path, data)
+            return actual_write(path, data, **kwargs)
 
         with (
             patch.object(qualify, "ROOT", self.root),
             patch.object(qualify, "load_env", return_value=self.env),
             patch.object(qualify, "urlopen", return_value=Response(wav_bytes())),
-            patch.object(qualify, "_write_private", side_effect=fail_report),
+            patch.object(qualify, "_write_output", side_effect=fail_report),
             contextlib.redirect_stdout(io.StringIO()),
             contextlib.redirect_stderr(io.StringIO()),
         ):
@@ -384,6 +636,7 @@ class QualificationTests(unittest.TestCase):
         report = json.loads(report_text)
         self.assertEqual(status, 0)
         self.assertEqual(stat.S_IMODE(report_path.stat().st_mode), 0o600)
+        self.assertEqual(report["response"]["metadata"]["prompt_sha256"], "a" * 64)
         self.assertNotIn("secret input", report_text)
         self.assertNotIn("private output", report_text)
         self.assertEqual(report["schema_version"], "1.0")

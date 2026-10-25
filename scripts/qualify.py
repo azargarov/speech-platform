@@ -76,8 +76,21 @@ def _origin(values):
     return origin, values["SPEECH_API_TOKEN"]
 
 
+def _output_path(path, *, private=False):
+    target = path.expanduser().absolute()
+    if not target.parent.is_dir():
+        raise QualificationError(
+            "local_validation", f"output directory does not exist: {target.parent}"
+        )
+    if target.exists() or target.is_symlink():
+        raise QualificationError("local_validation", "output file already exists")
+    if private:
+        return _private_path(target)
+    return target.resolve(strict=False)
+
+
 def _private_path(path):
-    target = path.absolute()
+    target = path.expanduser().absolute()
     private_root = ROOT / "private"
     if private_root.is_symlink():
         raise QualificationError(
@@ -85,29 +98,27 @@ def _private_path(path):
         )
     private = private_root.resolve()
     canonical = target.resolve(strict=False)
-    if not canonical.is_relative_to(private) or not target.parent.is_dir():
+    if not canonical.is_relative_to(private):
         raise QualificationError(
             "local_validation",
-            "evidence and WAV output paths must be under an existing private/ directory",
+            "report and evidence paths must be under private/",
         )
     if target.exists() or target.is_symlink():
-        raise QualificationError(
-            "local_validation", "output already exists; choose a new private path"
-        )
+        raise QualificationError("local_validation", "output file already exists")
     return canonical
 
 
 def _validate_output_paths(args):
-    paths = [
-        path
-        for path in (
-            getattr(args, "report", None),
-            getattr(args, "evidence", None),
-            getattr(args, "output", None),
-        )
+    paths = (
+        (getattr(args, "report", None), True),
+        (getattr(args, "evidence", None), True),
+        (getattr(args, "output", None), False),
+    )
+    canonical = [
+        _output_path(path, private=private)
+        for path, private in paths
         if path is not None
     ]
-    canonical = [_private_path(path) for path in paths]
     if len(set(canonical)) != len(canonical):
         raise QualificationError(
             "local_validation",
@@ -115,22 +126,22 @@ def _validate_output_paths(args):
         )
 
 
-def _write_private(path, data):
+def _write_output(path, data, *, private=False):
     try:
-        target = _private_path(path)
-    except QualificationError:
-        raise QualificationError(
-            "output_error", "private output destination became unavailable"
-        ) from None
+        target = _output_path(path, private=private)
+    except QualificationError as exc:
+        raise QualificationError("output_error", str(exc)) from None
     try:
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
+        raise QualificationError("output_error", "output file already exists") from None
+    except PermissionError:
         raise QualificationError(
-            "output_error", "private output already exists"
+            "output_error", "permission denied creating output file"
         ) from None
     except OSError:
         raise QualificationError(
-            "output_error", "could not create private output"
+            "output_error", "could not create output file"
         ) from None
     try:
         with os.fdopen(fd, "wb") as stream:
@@ -140,10 +151,10 @@ def _write_private(path, data):
             target.unlink(missing_ok=True)
         except OSError:
             raise QualificationError(
-                "output_error", "private output write failed; a partial file may remain"
+                "output_error", "output write failed; a partial file may remain"
             ) from None
         raise QualificationError(
-            "output_error", "private output write failed; partial file removed"
+            "output_error", "output write failed; partial file removed"
         ) from None
     return target
 
@@ -441,9 +452,10 @@ def _execute(args):
             "mode": args.mode,
             "format": args.format,
             "target_language": args.target_language,
-            "model": args.model,
             "local_only": not args.allow_cloud,
         }
+        if args.model is not None:
+            payload["model"] = args.model
         body, content_type = (
             json.dumps(payload, ensure_ascii=False).encode(),
             "application/json",
@@ -527,6 +539,9 @@ def _execute(args):
                     if k in response
                 },
             }
+            prompt_sha256 = headers.get("X-Speech-Prompt-SHA256")
+            if prompt_sha256 is not None:
+                report["response"]["metadata"]["prompt_sha256"] = prompt_sha256
             evidence_content["transformed_text"] = transformed
             checks = [
                 {
@@ -553,9 +568,9 @@ def _execute(args):
             report["technical_checks"] = checks
             if args.output:
                 report["artifact"]["saved"] = False
-                target = _write_private(args.output, raw)
+                target = _write_output(args.output, raw)
                 report["artifact"]["saved"] = True
-                report["artifact"]["relative_path"] = str(target.relative_to(ROOT))
+                report["artifact"]["relative_path"] = os.path.relpath(target, ROOT)
         report["technical_checks"] = checks
         report["outcome"] = (
             "pass"
@@ -563,8 +578,10 @@ def _execute(args):
             else "fail"
         )
         if args.evidence:
-            _write_private(
-                args.evidence, json.dumps(evidence_content, ensure_ascii=False).encode()
+            _write_output(
+                args.evidence,
+                json.dumps(evidence_content, ensure_ascii=False).encode(),
+                private=True,
             )
     except QualificationError as exc:
         if exc.status is not None:
@@ -687,24 +704,43 @@ def main(argv=None):
         and not args.allow_cloud_audio
     ):
         parser.error("Groq requires explicit --allow-cloud-audio consent")
+    report_writable = args.report is not None
+    if report_writable:
+        try:
+            _output_path(args.report, private=True)
+        except QualificationError:
+            report_writable = False
     try:
         report = _execute(args)
     except (OSError, QualificationError) as exc:
         report = _failure_report(args, exc)
-    if args.report:
+    if report_writable:
         try:
-            _write_private(
-                args.report, json.dumps(report, ensure_ascii=False, indent=2).encode()
+            _write_output(
+                args.report,
+                json.dumps(report, ensure_ascii=False, indent=2).encode(),
+                private=True,
             )
-        except (OSError, QualificationError):
+        except (OSError, QualificationError) as exc:
+            message = (
+                str(exc)
+                if isinstance(exc, QualificationError)
+                else "could not write private report"
+            )
             print(
-                f"FAIL {args.operation}: private report write failed; any previously written artifact remains",
+                f"FAIL {args.operation}: private report write failed: {message}; any previously written artifact remains",
                 file=sys.stderr,
             )
             return EXIT_OUTPUT
-    summary = f"{report['outcome'].upper()} {args.operation}: HTTP {report['http']['status']}; elapsed={report['elapsed_seconds']}s"
+    status = report["http"]["status"]
+    elapsed = report["elapsed_seconds"]
+    http_text = str(status) if status is not None else "N/A"
+    elapsed_text = f"{elapsed}s" if elapsed is not None else "N/A"
+    summary = f"{report['outcome'].upper()} {args.operation}: HTTP {http_text}; elapsed={elapsed_text}"
     if report["error"]["classification"]:
         summary += f"; error={report['error']['classification']}"
+    if report.get("message"):
+        summary += f"; {report['message']}"
     print(summary)
     if report["outcome"] == "pass":
         return 0
