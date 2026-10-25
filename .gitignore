@@ -70,6 +70,7 @@ id_ecdsa*
 .nox/
 *.egg-info/
 /models/
+/samples/transformed/
 **/models--*/
 *.swp
 *.swo
