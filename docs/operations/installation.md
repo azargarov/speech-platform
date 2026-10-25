@@ -172,11 +172,81 @@ large-v3-turbo model returns an explicit error, not a fabricated translation.
 
 For an upgrade, check out the approved clean revision, review `.env` compatibility,
 then run preflight/install. Before building, the installer retains current container
-image IDs as local `speech-platform-rollback-<service>:<image-id>` tags. To roll
-back, check out the previously qualified source revision with its matching private
-configuration and run preflight/install; Compose rebuilds that revision. If its
-source or compatible configuration is unavailable, stop and recover those inputs
-before replacing services. Model stores and private files are not removed.
+image IDs as local `speech-platform-rollback-<service>:<image-id>` tags.
+
+### Exact-image rollback
+
+Use exact local image objects and a private configuration snapshot. Do not select
+a rollback by source revision alone.
+
+1. Record the target Gateway, STT and TTS image IDs from the trusted pre-upgrade
+   record. Confirm each image exists and inspect its service-role and source
+   labels. Do not use a tag until `docker image inspect` has confirmed its full
+   image ID.
+2. Snapshot the active `.env`, the configured Gateway YAML and any configured
+   private secrets file under a new `private/deployment-backups/<rollback-id>/`
+   directory. Keep the directory mode `0700`; keep `.env` and secret files
+   `0600`. Point the snapshot `.env` at the copied Gateway YAML and secrets file.
+   Leave active `.env`, credentials and source files unchanged. The old
+   pre-D02 `.env` backup contains obsolete image-pin entries and fails current
+   preflight; use a validated snapshot of the active configuration instead.
+3. Give the three exact image IDs a common local rollback tag, then inspect each
+   tag and confirm it resolves to its recorded full image ID and correct role.
+   For example, replace the placeholders with recorded IDs and one unique tag:
+
+   ```sh
+   ROLLBACK_TAG=rollback-<unique-id>
+   docker tag "$GATEWAY_IMAGE_ID" "speech-platform-gateway:$ROLLBACK_TAG"
+   docker tag "$STT_IMAGE_ID" "speech-platform-stt-cuda:$ROLLBACK_TAG"
+   docker tag "$TTS_IMAGE_ID" "speech-platform-tts:$ROLLBACK_TAG"
+   docker image inspect "speech-platform-gateway:$ROLLBACK_TAG" \
+     "speech-platform-stt-cuda:$ROLLBACK_TAG" \
+     "speech-platform-tts:$ROLLBACK_TAG"
+   ```
+
+4. Render the complete project with `SOURCE_REVISION=$ROLLBACK_TAG`,
+   `GATEWAY_IMAGE=speech-platform-gateway:$ROLLBACK_TAG`, the snapshot `.env`,
+   `compose.yaml` and the existing Ollama overlay when configured. Confirm the
+   project is `speech-platform`, the only services are Gateway/STT/TTS, each
+   image reference is the verified rollback alias, worker/model/config mounts
+   are read-only, and Ollama remains an external network. Run each selected
+   image's `--check-config` command in a temporary `--network none` container
+   before replacing services.
+5. Reinspect all three aliases to full image IDs immediately before running:
+
+   ```sh
+   SOURCE_REVISION="$ROLLBACK_TAG" \
+   GATEWAY_IMAGE="speech-platform-gateway:$ROLLBACK_TAG" \
+   docker --context default compose \
+     --project-name speech-platform \
+     --env-file private/deployment-backups/<rollback-id>/.env \
+     -f compose.yaml \
+     -f deployments/compose/compose.ollama.yaml \
+     up -d --no-build --pull never --wait --wait-timeout 240 \
+     gateway stt tts
+   ```
+
+   Omit the Ollama overlay only when the selected Gateway config does not use
+   local Ollama. This command changes only the three named SpeechPlatform
+   services. It does not build, pull, run `down`, remove volumes or alter the
+   external Ollama network.
+6. Verify health/readiness, container image IDs and labels, authenticated
+   Gateway API behavior, and bounded local STT and TTS smoke tests. Check that
+   Ollama and unrelated container IDs/start times are unchanged.
+
+To restore the intended release, check out its clean committed revision and run
+`make preflight`, `make install`, and `make status` with the active validated
+`.env`. Installation rebuilds the three images from that revision, retains the
+currently running exact image IDs, and replaces only SpeechPlatform services.
+Repeat health, image/source, API and local STT/TTS checks. If rollback or
+restoration is incomplete, inspect `make status` and service-scoped `make logs`,
+preserve the recorded exact IDs/config snapshot, and restore from a validated
+clean revision. Do not use `down`, prune Docker resources, or alter shared
+Ollama. If neither a compatible config snapshot nor exact images validate, stop
+before replacement.
+
+Model stores and private source configuration are never removed by these steps;
+workers mount model stores read-only.
 
 ```sh
 make stop SERVICE=tts PYTHON=.venv/bin/python

@@ -103,7 +103,9 @@ prunes Docker resources.
 Obsolete `GATEWAY_EXPECTED_IMAGE_ID` and
 `GATEWAY_EXPECTED_SOURCE_REVISION` settings must be manually removed from `.env`
 after review; preflight rejects them with a migration message. Never paste
-private configuration into reports. For rollback, check out the previously
-qualified source revision with compatible private configuration, then use the
-same preflight/install path. If either input is unavailable, stop before
-replacing services.
+private configuration into reports. For exact-image rollback and return to the
+current release, follow [the rollback procedure in the installation guide](installation.md#exact-image-rollback).
+It validates retained local image IDs and a private configuration snapshot,
+uses Compose with `--no-build --pull never`, and scopes changes to Gateway, STT
+and TTS. The older procedure of checking out a prior source revision and
+rebuilding it is not an exact-image rollback.
