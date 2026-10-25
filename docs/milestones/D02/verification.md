@@ -1,7 +1,9 @@
 # D02 — Verification Record
 
-Date: 2026-10-25. Environment: repository checkout on `main`, baseline
-`6bf5d13de175566c6c84473c3e17051c1ddc1e6e`; changes remained uncommitted.
+Date: 2026-10-25. Environment: repository checkout on `main`. The original D02
+implementation was committed, followed by the model-store traversal fix at
+`2ec766855c5c355bd312c47bb79549cf99c80b1f`. Live qualification results are
+recorded at the end of this file.
 
 ## Offline checks — OBSERVED
 
@@ -79,20 +81,21 @@ image build, CUDA probes, or Compose `up`; no service was replaced or restarted.
 
 `make status PYTHON=.venv/bin/python` exited 0 after the attempt and reported
 the same image IDs/source label as before. The private backup's contents match
-the migrated `.env` byte-for-byte after excluding the two removed assignments.
-No STT/TTS inference smoke was run because the new stack was not installed. No
-cloud inference, Ollama mutation, network change, or unrelated Docker change
-occurred.
+the migrated `.env` byte-for-byte after excluding the two removed assignments;
+this establishes preservation of the other entries, not compatibility with the
+new deployment path. No STT/TTS inference smoke was run because the new stack
+was not installed. No cloud inference, Ollama mutation, network change, or
+unrelated Docker change occurred.
 
-**NOT ESTABLISHED — recovery selection:** the exact pre-deployment image
-objects are present by ID, and a compatible private configuration backup is
-available. However, preflight stopped before `deploy_images.retain`, so the D02
-rollback tags were not created by this attempt. More importantly, the documented
-rollback path checks out a previous source revision and rebuilds it; it does not
-select retained image IDs directly. Therefore the requested retained-image
-rollback procedure is not established. Do not replace services until this
-recovery path and the active model-store access check are resolved. No rollback
-rehearsal was performed.
+**NOT ESTABLISHED — recovery selection at this attempt:** the exact
+pre-deployment image objects were present by ID. Preflight stopped before
+`deploy_images.retain`, so rollback tags were not created by this attempt. The
+available private configuration backup preserved the non-obsolete entries, but
+its compatibility with the new deployment path was not established. The
+documented rollback path checked out a previous source revision and rebuilt it;
+it did not select retained image IDs directly. Therefore the requested
+retained-image rollback procedure was not established. No rollback rehearsal
+was performed.
 
 ## Model-store access-check correction — 2026-10-25
 
@@ -130,7 +133,111 @@ No permission, ownership, ACL, model file, or service was changed.
 | `make preflight PYTHON=.venv/bin/python` | In this execution process, exit 2 because its active supplementary groups do not include GID 988, so the metadata walk cannot read the pinned artifacts. Account database membership for `master` includes `stt-model-reader`; the running process group list is stale. This is distinct from the corrected parent-directory read-bit check. |
 | `make verify PYTHON=.venv/bin/python` | PASS, exit 0. |
 
-No deployment, Docker mutation, service restart, inference, or credential change
-occurred. The ordinary preflight must be rerun in a process with the operator's
-current `stt-model-reader` supplementary group before install authorization is
-considered again.
+No deployment or inference occurred during this model-store fix investigation.
+The ordinary preflight must be run in a process with the operator's current
+`stt-model-reader` supplementary group because the ordinary execution process
+may have a stale supplementary-group list.
+
+## Final fix and authorized live qualification — 2026-10-25
+
+**OBSERVED — fix commit:** focused regression tests and full repository
+verification passed before commit `2ec766855c5c355bd312c47bb79549cf99c80b1f`
+(`fix(deploy): allow traversal-only model store parents`). The commit contains
+the traversal-only parent check, regression tests, and corresponding D02
+documentation. No push or tag was created.
+
+**OBSERVED — recovery prerequisites before replacement:** exact prior running
+images were recorded and retained by immutable image ID:
+
+| Service | Prior container | Prior image ID | Retained rollback tag |
+| --- | --- | --- | --- |
+| Gateway | `f2d1ebf6a398` | `sha256:105b8ab16496d9160d267fa3ab5a9f1e4250d8eb6231987e92553122aa38c320` | `speech-platform-rollback-gateway:105b8ab16496d9160d267fa3ab5a9f1e4250d8eb6231987e92553122aa38c320` |
+| STT | `22c6961ffeed` | `sha256:7e89999512a2a2e7da952616cce78a9f252918be2f9fde6dc140f3e4cc9fb87c` | `speech-platform-rollback-stt:7e89999512a2a2e7da952616cce78a9f252918be2f9fde6dc140f3e4cc9fb87c` |
+| TTS | `1308a8fcd148` | `sha256:2fe78236c87ea0e3c9b63e565fedfb32cc73fe20a2f596987f41c252ea03a5b7` | `speech-platform-rollback-tts:2fe78236c87ea0e3c9b63e565fedfb32cc73fe20a2f596987f41c252ea03a5b7` |
+
+The mode-0600 configuration backup is
+`private/deployment-backups/.env.d02-20261025T095806Z.bak`. It predates the
+configuration migration and contains the obsolete image-pin entries. Its
+compatibility with the new deployment path is **NOT ESTABLISHED**. A manual
+recovery Compose command was rendered before replacement, but it selects
+images by the prior source revision tag rather than explicitly selecting the
+retained exact image IDs. The command was not executed; no rollback is claimed:
+
+```sh
+SOURCE_REVISION=9329b574bb5a21fa101d830e26202ff6707b4c4e docker --context default compose --project-name speech-platform --env-file private/deployment-backups/.env.d02-20261025T095806Z.bak -f compose.yaml -f deployments/compose/compose.ollama.yaml up -d --no-build --pull never --wait --wait-timeout 240
+```
+
+The rendered project contains only Gateway, STT and TTS. Ollama is attached via
+the existing external network and is outside this Compose service lifecycle.
+Retaining exact image IDs and rendering this command established recovery
+preparation only; exact-ID selection and backup compatibility remain open
+recovery limitations.
+
+**OBSERVED — preflight and install:**
+
+- `sg stt-model-reader -c 'make preflight PYTHON=.venv/bin/python'` — PASS
+  after the fix: STT/TTS pinned metadata passed, zero failures, READY TO INSTALL.
+- `sg stt-model-reader -c 'make install PYTHON=.venv/bin/python'` — PASS.
+  The install verified clean source commit
+  `2ec766855c5c355bd312c47bb79549cf99c80b1f`; preflight reported PASS=34,
+  WARN=1, FAIL=0, SKIP=2. All three images built and passed image identity and
+  disposable CUDA driver/device checks. Compose recreated only Gateway, STT
+  and TTS and waited for all three to become healthy. The pinned runtime
+  dependencies and VoxCPM source were downloaded during the image build; no
+  model artifacts were downloaded.
+- `sg stt-model-reader -c 'make status PYTHON=.venv/bin/python'` — PASS; all
+  services running and healthy with source label
+  `2ec766855c5c355bd312c47bb79549cf99c80b1f`.
+
+| Service | New container | New image ID | Restarts | Health | Source revision |
+| --- | --- | --- | ---: | --- | --- |
+| Gateway | `0d529b5e52ba` | `sha256:13199aab05368b1da662057178a89a0688ce17c9e35765d2f88dee242e1d23db` | 0 | healthy | `2ec766855c5c355bd312c47bb79549cf99c80b1f` |
+| STT | `d2fb8e36909e` | `sha256:b8a2c25c853cd76803502509dea2ffb932d4a04d49e444738a911f2876d649b4` | 0 | healthy | `2ec766855c5c355bd312c47bb79549cf99c80b1f` |
+| TTS | `832ea8ab6eb0` | `sha256:c7c10e283fa898ce6a8951bd20d7e3824010e0ffb22cc4bab04c83ca561941d6` | 0 | healthy | `2ec766855c5c355bd312c47bb79549cf99c80b1f` |
+
+**OBSERVED — authenticated local smoke:** the configured bearer token was
+loaded in process memory and not printed or recorded. `make test-stt` sent one
+request using the existing local synthetic fixture, returned the expected
+English metadata, and passed. The transcript is not copied into this record.
+One authenticated `POST /v1/tts/speech` with short synthetic English text and
+`mode=fast` returned HTTP 200 and a valid 384,044-byte, 48 kHz WAV in 94.696 s.
+Generated audio and request credentials were not persisted. No retry was made.
+
+**OBSERVED — isolation and cloud configuration:** the active Gateway config
+`private/m05b/stage2c/gateway.yaml` has text transformation enabled with
+`allow_cloud=false`. The install and both speech requests made no cloud
+inference request. Read-only post-install checks found shared Ollama running
+under its existing container ID `72d0ee33e0e6`, with no container events for
+that ID during the install window; the Compose project includes only the three
+SpeechPlatform services and uses the already-external Ollama network. Dify
+containers remained running with their prior multi-day uptime. No Docker
+network or model-store change was made.
+
+**OBSERVED — verification and worktree:** focused model-store tests (2), the
+full preflight suite (49), combined focused/preflight tests (51), and
+`make verify PYTHON=.venv/bin/python` passed before the fix commit. After the
+live qualification, documentation-only updates passed `git diff --check`.
+The fix commit remains HEAD; no deployment artifacts or private evidence were
+added to Git.
+
+**NOT ESTABLISHED:** no rollback rehearsal was performed. Simultaneous LLM
+inference with TTS cold-loading was not part of this qualification. The TTS
+smoke established endpoint functionality for one synthetic request, not
+quality or concurrent-load limits. D02 operator acceptance/closeout remains
+pending the separate acceptance record below. D03 and D04 had not started at
+the time of live qualification.
+
+## Operator acceptance and closeout — 2026-10-25
+
+**OBSERVED — operator decision:** the operator accepted D02 live deployment
+qualification and authorized closeout. D02 is **COMPLETE** for implementation,
+offline verification, live installation and authenticated local STT/TTS smoke
+scope. This acceptance does not convert the recovery limitations above into
+passes.
+
+**NOT ESTABLISHED — recovery:** the retained exact image IDs have not been
+selected by a recovery command, the prior private `.env` backup's compatibility
+with the new deployment path has not been established, and rollback has not
+been executed. D03 is the next planned milestone and has not started; D04 has
+not started. Simultaneous local LLM inference and TTS cold-loading remains
+unqualified.

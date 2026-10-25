@@ -2,8 +2,8 @@
 
 ## Status
 
-**IMPLEMENTATION COMMITTED; OFFLINE VERIFICATION PASS; TARGET-HOST QUALIFICATION
-BLOCKED; OPERATOR ACCEPTANCE PENDING.** D02 is not complete.
+**IMPLEMENTATION COMMITTED; OFFLINE VERIFICATION PASS; LIVE TARGET-HOST
+QUALIFICATION PASS; OPERATOR ACCEPTED; COMPLETE (2026-10-25).**
 
 ## Evidence
 
@@ -14,19 +14,17 @@ focused checks recorded in [verification](verification.md) passed.
 
 ## Limitations
 
-Live installation is not established. The two obsolete image-pin assignments
-were removed from private `.env` under operator authorization after creating a
-mode-0600 timestamped backup; all other bytes were preserved. Investigation
-found the preflight parent-store check incorrectly required directory listing
-instead of traversal. That check is corrected and regression-tested. The
-group-scoped preflight passes; ordinary preflight in this execution process
-still fails the metadata walk because active supplementary groups omit GID 988.
-No model artifact was modified. The authorized install attempt occurred before
-this fix and stopped before image retention/build, CUDA probes or Compose
-replacement. Existing services remain healthy on their prior image IDs.
+Live installation is established on commit
+`2ec766855c5c355bd312c47bb79549cf99c80b1f`; Gateway, STT and TTS are healthy
+with matching source labels and zero restarts. Authenticated local STT and TTS
+smokes passed. The private `.env` migration used a mode-0600 timestamped backup
+and preserved all other bytes. The parent model-store check now correctly
+requires traversal while pinned artifact metadata/read checks remain enforced.
+No model artifact was modified.
 
-Rollback image objects remain available by exact ID and the private configuration
-backup is compatible. The current runbook rebuilds a previous source revision;
-it does not select the retained rollback image tags directly. This remains a
-recovery-procedure limitation to resolve before a future replacement. D02 target
-qualification and operator acceptance remain pending.
+Exact previous image IDs and rollback tags were retained. The render-checked
+recovery command does not explicitly select those exact IDs, and compatibility
+of the pre-migration private `.env` backup with the new deployment path is NOT
+ESTABLISHED. Rollback was not executed. Concurrent LLM inference with TTS
+cold-loading remains unqualified. D03 is next planned and has not started; D04
+has not started.

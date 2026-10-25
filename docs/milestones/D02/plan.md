@@ -42,16 +42,20 @@ as fallback during this milestone.
 The obsolete Gateway image pins were removed from the private `.env` under
 operator authorization on 2026-10-25 after a private mode-0600 backup. The
 resulting configuration validates. The parent model-store directory grants
-reader-group traversal but not listing; preflight's access check now matches
-that layout. `sg stt-model-reader` preflight passes. This execution process
-lacks GID 988 in its active supplementary groups, so ordinary preflight cannot
-walk the model artifacts. Do not bypass that active-access failure or alter
-model artifacts. Installation also requires a clean committed source tree.
+reader-group traversal but not listing; preflight now matches that layout.
+Installation succeeded from a clean committed revision in the
+`stt-model-reader` group context. This execution process still has a stale
+supplementary-group list outside that context. No model artifacts or permissions
+were changed.
 
 ## Status
 
-Implementation is committed. Offline checks pass. The group-scoped preflight
-passes, but ordinary preflight in this execution process cannot read model
-artifacts because its active groups are stale. No service replacement or smoke
-inference occurred. Direct retained-image rollback selection also remains
-unqualified; D02 qualification and user validation remain pending.
+Implementation and the model-store fix are committed. Offline verification and
+live target-host qualification pass; the installed Gateway, STT and TTS images
+match the fix commit, and authenticated local STT/TTS smoke checks succeeded.
+Exact prior images were retained before replacement. The manual recovery command
+was render-checked but does not explicitly select the retained image IDs, and
+compatibility of the pre-migration private `.env` backup with the new deployment
+path is NOT ESTABLISHED. No rollback execution is claimed. The operator accepted
+D02 and approved closeout on 2026-10-25. D03 is next planned and has not started.
+See [verification](verification.md) for observed results and limitations.
