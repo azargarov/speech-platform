@@ -2,7 +2,13 @@
 
 Canonical workflow: Inspect → Design → Plan → Implement → Verify → User Validate → Closeout.
 
-[AGENTS.md](../../AGENTS.md) supplies mandatory repository rules. Skills under `.codex/skills/` supply task-specific workflows; load only relevant instructions. Current work authorization and milestone state live in [PLANS.md](../../PLANS.md). Older milestone records remain historical evidence, never implied permission to resume work.
+[AGENTS.md](../../AGENTS.md) supplies mandatory repository rules. The
+[architecture principles](../architecture/principles.md) are the single source
+of truth for design principles. Skills under `.codex/skills/` supply
+task-specific workflows; load only relevant instructions. Current work
+authorization and milestone state live in [PLANS.md](../../PLANS.md). Older
+milestone records remain historical evidence, never implied permission to
+resume work.
 
 ## Stages and gates
 

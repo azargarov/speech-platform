@@ -12,7 +12,9 @@ Use for application code implementation, code review or refactoring. Documentati
 
 ## Required inputs
 
-Authorized behavior, relevant code/configuration, contracts, existing tests and a proportional design/plan.
+Authorized behavior, relevant code/configuration, contracts, existing tests and
+a proportional design/plan. Apply the [architecture principles](../../../docs/architecture/principles.md)
+as the design source of truth.
 
 ## Workflow
 
