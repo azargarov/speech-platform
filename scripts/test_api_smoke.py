@@ -4,6 +4,8 @@ import contextlib
 import io
 import json
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +16,51 @@ from scripts import api_smoke
 
 
 class APISmokeTests(unittest.TestCase):
+    def test_make_targets_execute_the_module_cli(self):
+        root = Path(__file__).resolve().parents[1]
+        for target, expected in (
+            (
+                "test-stt",
+                f'{sys.executable} -m scripts.api_smoke stt --audio "private/audio/test.wav"',
+            ),
+            (
+                "test-tts",
+                f'{sys.executable} -m scripts.api_smoke tts --output "private/audio/test.wav"',
+            ),
+        ):
+            with self.subTest(target=target):
+                result = subprocess.run(
+                    [
+                        "make",
+                        "--no-print-directory",
+                        "-n",
+                        target,
+                        f"PYTHON={sys.executable}",
+                        "AUDIO=private/audio/test.wav",
+                        "OUTPUT=private/audio/test.wav",
+                    ],
+                    cwd=root,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertIn(expected, result.stdout)
+
+    def test_module_cli_entrypoint_runs_from_repository_root(self):
+        root = Path(__file__).resolve().parents[1]
+        for service in ("stt", "tts"):
+            with self.subTest(service=service):
+                result = subprocess.run(
+                    [sys.executable, "-m", "scripts.api_smoke", service, "--help"],
+                    cwd=root,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertIn("usage:", result.stdout)
+                self.assertIn(service, result.stdout)
+
     def test_gateway_origin_requires_token_without_disclosing_it(self):
         with self.assertRaisesRegex(api_smoke.SmokeError, "TOKEN"):
             api_smoke._gateway_origin({"SPEECH_PORT": "8080"})

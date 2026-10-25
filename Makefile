@@ -147,9 +147,9 @@ logs:
 stop:
 	$(PYTHON) scripts/compose.py stop $(if $(SERVICE),"$(SERVICE)")
 test-stt:
-	$(PYTHON) scripts/api_smoke.py stt $(if $(AUDIO),--audio "$(AUDIO)") $(if $(SOURCE_LANGUAGE),--source-language "$(SOURCE_LANGUAGE)") $(if $(OUTPUT_LANGUAGE),--output-language "$(OUTPUT_LANGUAGE)")
+	$(PYTHON) -m scripts.api_smoke stt $(if $(AUDIO),--audio "$(AUDIO)") $(if $(SOURCE_LANGUAGE),--source-language "$(SOURCE_LANGUAGE)") $(if $(OUTPUT_LANGUAGE),--output-language "$(OUTPUT_LANGUAGE)")
 test-tts:
-	$(PYTHON) scripts/api_smoke.py tts --output "$(if $(OUTPUT),$(OUTPUT),private/audio/tts-smoke.wav)"
+	$(PYTHON) -m scripts.api_smoke tts --output "$(if $(OUTPUT),$(OUTPUT),private/audio/tts-smoke.wav)"
 governance-check:
 	$(PYTHON) scripts/validate_governance.py
 	$(PYTHON) -m unittest discover -s scripts -p 'test_governance.py' -v
