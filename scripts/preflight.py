@@ -463,6 +463,11 @@ def _model_metadata(store: str, worker: str, root: Path):
     return True
 
 
+def _model_store_traversable(store: str) -> bool:
+    """The host caller needs search permission on the parent store directory."""
+    return os.access(store, os.X_OK)
+
+
 @dataclass
 class Report:
     entries: list[tuple[str, str, str, str]] = field(default_factory=list)
@@ -1281,12 +1286,12 @@ def run_checks(
             lambda worker=worker, store=store: _model_metadata(store, worker, root),
             f"Provision the pinned model with make {'tts-model-fetch' if worker == 'tts' else 'model-fetch'}; preflight checks file names and sizes, while worker startup verifies SHA-256.",
         )
-        if result and not os.access(store, os.R_OK | os.X_OK):
+        if result and not _model_store_traversable(store):
             report.add(
                 "Models",
                 "FAIL",
                 worker + " model-store access",
-                "Grant the configured runtime reader access to this model store.",
+                "Grant the operator search/traverse access to the model-store directory; pinned file readability is checked separately.",
             )
     return report
 

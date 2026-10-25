@@ -41,14 +41,17 @@ as fallback during this milestone.
 
 The obsolete Gateway image pins were removed from the private `.env` under
 operator authorization on 2026-10-25 after a private mode-0600 backup. The
-resulting configuration validates. Target preflight still fails both pinned
-STT/TTS model metadata checks; model artifacts are outside this scope and must
-not be altered to bypass the gate. Installation also requires a clean committed
-source tree.
+resulting configuration validates. The parent model-store directory grants
+reader-group traversal but not listing; preflight's access check now matches
+that layout. `sg stt-model-reader` preflight passes. This execution process
+lacks GID 988 in its active supplementary groups, so ordinary preflight cannot
+walk the model artifacts. Do not bypass that active-access failure or alter
+model artifacts. Installation also requires a clean committed source tree.
 
 ## Status
 
-Implementation is committed as `cb627310dd939f7e8a3ce6c5a433007ce57e20b6`.
-Offline checks pass. Target-host installation is blocked by STT/TTS model
-metadata preflight failures; no service replacement or smoke inference occurred.
-D02 qualification and user validation remain pending; D02 is not closed.
+Implementation is committed. Offline checks pass. The group-scoped preflight
+passes, but ordinary preflight in this execution process cannot read model
+artifacts because its active groups are stale. No service replacement or smoke
+inference occurred. Direct retained-image rollback selection also remains
+unqualified; D02 qualification and user validation remain pending.

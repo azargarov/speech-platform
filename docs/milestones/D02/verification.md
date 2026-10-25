@@ -91,5 +91,46 @@ rollback tags were not created by this attempt. More importantly, the documented
 rollback path checks out a previous source revision and rebuilds it; it does not
 select retained image IDs directly. Therefore the requested retained-image
 rollback procedure is not established. Do not replace services until this
-recovery path and the failed model metadata checks are resolved. No rollback
+recovery path and the active model-store access check are resolved. No rollback
 rehearsal was performed.
+
+## Model-store access-check correction — 2026-10-25
+
+**OBSERVED — permission and identity assumptions:** the preflight metadata scan
+(`_model_metadata`) runs as the host operator. It checks pinned model metadata,
+walks the known digest's artifact tree, and checks readability of each artifact
+file. The subsequent `model-store access` check also ran as the host operator;
+it did not inspect or impersonate the worker container identity. Compose instead
+runs both workers as `65532:65532`, adds configured reader GID `988`, and mounts
+only the pinned digest directory at `/models` read-only.
+
+The host model-store parent is owned by `root:988` and has mode `2710`; each
+pinned digest and artifact directory is `root:988` mode `2750`. The configured
+reader group therefore has search/traverse permission on the parent, but no
+permission to list that parent. The worker's bind source is the digest directory,
+not the parent; GID 988 has read/search on that mounted directory and its files.
+
+**INTERPRETATION — root cause and fix:** after successful pinned metadata
+validation, preflight redundantly required both `R_OK` and `X_OK` on the parent
+store root. The missing parent-directory read bit is intentional and not needed
+to traverse to the known digest. Requiring `R_OK` caused the false model-store
+access failure. Preflight now checks only `X_OK` for the parent, while retaining
+the existing metadata walk and per-file read checks. It still does not claim to
+probe worker-container access; that runtime boundary remains enforced by the
+Compose UID/GID/group_add and read-only bind mount, and worker startup checks.
+No permission, ownership, ACL, model file, or service was changed.
+
+**OBSERVED — regression and validation:**
+
+| Command | Result |
+| --- | --- |
+| `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest scripts.test_preflight.ModelStoreAccessTests -v` | PASS; 2 focused tests ensure traversal is required without requesting directory-list permission, and missing traversal remains rejected. |
+| `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest scripts.test_preflight -q` | PASS; 49 tests. |
+| `sg stt-model-reader -c 'make preflight PYTHON=.venv/bin/python'` | PASS; both STT/TTS metadata checks passed, zero failures, READY TO INSTALL. No install was run. |
+| `make preflight PYTHON=.venv/bin/python` | In this execution process, exit 2 because its active supplementary groups do not include GID 988, so the metadata walk cannot read the pinned artifacts. Account database membership for `master` includes `stt-model-reader`; the running process group list is stale. This is distinct from the corrected parent-directory read-bit check. |
+| `make verify PYTHON=.venv/bin/python` | PASS, exit 0. |
+
+No deployment, Docker mutation, service restart, inference, or credential change
+occurred. The ordinary preflight must be rerun in a process with the operator's
+current `stt-model-reader` supplementary group before install authorization is
+considered again.

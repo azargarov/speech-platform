@@ -891,6 +891,22 @@ class ServiceScopeTests(unittest.TestCase):
             )
 
 
+class ModelStoreAccessTests(unittest.TestCase):
+    def test_store_parent_requires_traverse_but_not_directory_listing(self):
+        with patch.object(
+            preflight.os,
+            "access",
+            side_effect=lambda _path, mode: mode == os.X_OK,
+        ) as access:
+            self.assertTrue(preflight._model_store_traversable("/model-store"))
+        access.assert_called_once_with("/model-store", os.X_OK)
+
+    def test_store_without_traverse_permission_is_rejected(self):
+        with patch.object(preflight.os, "access", return_value=False) as access:
+            self.assertFalse(preflight._model_store_traversable("/model-store"))
+        access.assert_called_once_with("/model-store", os.X_OK)
+
+
 class PreflightCLITests(unittest.TestCase):
     def test_removed_gpu_ownership_guard_fails_instead_of_claiming_enforcement(self):
         with self.assertRaisesRegex(

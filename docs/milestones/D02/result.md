@@ -16,11 +16,14 @@ focused checks recorded in [verification](verification.md) passed.
 
 Live installation is not established. The two obsolete image-pin assignments
 were removed from private `.env` under operator authorization after creating a
-mode-0600 timestamped backup; all other bytes were preserved. The new read-only
-preflight then failed the STT and TTS pinned model metadata checks. No model
-artifact was modified. `make install` stopped at preflight before image
-retention/build, CUDA probes or Compose replacement. Existing services remain
-healthy on their prior image IDs.
+mode-0600 timestamped backup; all other bytes were preserved. Investigation
+found the preflight parent-store check incorrectly required directory listing
+instead of traversal. That check is corrected and regression-tested. The
+group-scoped preflight passes; ordinary preflight in this execution process
+still fails the metadata walk because active supplementary groups omit GID 988.
+No model artifact was modified. The authorized install attempt occurred before
+this fix and stopped before image retention/build, CUDA probes or Compose
+replacement. Existing services remain healthy on their prior image IDs.
 
 Rollback image objects remain available by exact ID and the private configuration
 backup is compatible. The current runbook rebuilds a previous source revision;
