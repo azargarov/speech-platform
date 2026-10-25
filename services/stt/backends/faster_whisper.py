@@ -22,7 +22,7 @@ from services.stt.domain import (
 
 
 @dataclass(frozen=True)
-class FasterWhisperOptions:
+class Options:
     cpu_threads: int
     compute_type_cpu: str
     compute_type_cuda: str
@@ -35,8 +35,8 @@ class FasterWhisperOptions:
     minimum_free_gpu_bytes_before_load: int | None
 
 
-class FasterWhisperBackend:
-    def __init__(self, options: FasterWhisperOptions, *, modules=None):
+class Backend:
+    def __init__(self, options: Options, *, modules=None):
         self.options = options
         self._modules = modules
 
@@ -109,7 +109,7 @@ class FasterWhisperBackend:
             automatic_language_detection=multilingual,
             segment_timestamps=True,
         )
-        return FasterWhisperLoadedModel(model, metadata, self.options, modules)
+        return LoadedModel(model, metadata, self.options, modules)
 
     def _load_modules(self):
         if self._modules is not None:
@@ -138,7 +138,7 @@ class FasterWhisperBackend:
         return modules
 
 
-class FasterWhisperLoadedModel:
+class LoadedModel:
     def __init__(self, model, metadata, options, modules):
         self.metadata = metadata
         self._model = model

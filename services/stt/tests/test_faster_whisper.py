@@ -9,9 +9,9 @@ from pathlib import Path
 import numpy
 
 from services.stt.backends.faster_whisper import (
-    FasterWhisperBackend,
-    FasterWhisperLoadedModel,
-    FasterWhisperOptions,
+    Backend,
+    LoadedModel,
+    Options,
     _decode_audio,
 )
 from services.stt.domain import (
@@ -63,7 +63,7 @@ def options(**overrides):
         "minimum_free_gpu_bytes_before_load": 1024,
     }
     values.update(overrides)
-    return FasterWhisperOptions(**values)
+    return Options(**values)
 
 
 class DecodeTests(unittest.TestCase):
@@ -164,7 +164,7 @@ class AdapterContractTests(unittest.TestCase):
             numpy=numpy,
         )
         model = FakeModel()
-        loaded = FasterWhisperLoadedModel(
+        loaded = LoadedModel(
             model,
             ModelMetadata(ModelIdentity("whisper", "a" * 40), frozenset(), True, True),
             options(),
@@ -203,7 +203,7 @@ class AdapterContractTests(unittest.TestCase):
             ),
             faster_whisper=SimpleNamespace(WhisperModel=FakeWhisper),
         )
-        backend = FasterWhisperBackend(options(), modules=modules)
+        backend = Backend(options(), modules=modules)
         identity = ModelIdentity("whisper", "a" * 40)
         selection = ModelSelection(
             "small", identity, "small", ArtifactIdentity("b" * 64, "ct2")
@@ -234,7 +234,7 @@ class AdapterContractTests(unittest.TestCase):
             ),
             faster_whisper=SimpleNamespace(WhisperModel=lambda *_args, **_kwargs: None),
         )
-        backend = FasterWhisperBackend(options(), modules=modules)
+        backend = Backend(options(), modules=modules)
         identity = ModelIdentity("whisper", "a" * 40)
         selection = ModelSelection(
             "small", identity, "small", ArtifactIdentity("b" * 64, "ct2")
@@ -268,7 +268,7 @@ class AdapterContractTests(unittest.TestCase):
             ),
             faster_whisper=SimpleNamespace(WhisperModel=construct),
         )
-        backend = FasterWhisperBackend(options(), modules=modules)
+        backend = Backend(options(), modules=modules)
         identity = ModelIdentity("whisper", "a" * 40)
         selection = ModelSelection(
             "small", identity, "small", ArtifactIdentity("b" * 64, "ct2")
@@ -343,7 +343,7 @@ class AdapterContractTests(unittest.TestCase):
         metadata = ModelMetadata(
             ModelIdentity("whisper", "a" * 40), frozenset(), True, True
         )
-        loaded = FasterWhisperLoadedModel(FakeModel(), metadata, options(), modules)
+        loaded = LoadedModel(FakeModel(), metadata, options(), modules)
         result = loaded.transcribe(
             TranscriptionRequest(b"wav", "audio/wav", language="auto", timestamps=True),
             OperationContext(),
@@ -353,9 +353,7 @@ class AdapterContractTests(unittest.TestCase):
         self.assertEqual(result.segments[0].end_seconds, 0.2)
         self.assertTrue(loaded._model.assertion[1]["word_timestamps"] is False)
 
-        failed = FasterWhisperLoadedModel(
-            FakeModel(fail=True), metadata, options(), modules
-        )
+        failed = LoadedModel(FakeModel(fail=True), metadata, options(), modules)
         with self.assertRaises(FatalBackendFailure) as caught:
             failed.transcribe(
                 TranscriptionRequest(b"wav", "audio/wav"), OperationContext()

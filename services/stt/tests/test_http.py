@@ -18,7 +18,7 @@ from services.stt.domain import (
 )
 from services.stt.http_server import (
     _validate_empty_warmup_body,
-    create_http_app,
+    create_app,
 )
 
 
@@ -108,7 +108,7 @@ class FakeApplication:
 class HTTPTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.application = FakeApplication()
-        self.client = TestClient(TestServer(create_http_app(self.application)))
+        self.client = TestClient(TestServer(create_app(self.application)))
         await self.client.start_server()
 
     async def asyncTearDown(self):
@@ -211,7 +211,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
     async def test_warmup_http_timeout_does_not_cancel_model_load(self):
         await self.client.close()
         self.application = FakeApplication(block_warmup=True)
-        self.client = TestClient(TestServer(create_http_app(self.application)))
+        self.client = TestClient(TestServer(create_app(self.application)))
         await self.client.start_server()
         response = await self.client.post(
             "/internal/v1/warmup", headers={"X-Request-Timeout-Ms": "1"}
@@ -258,7 +258,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
     async def test_request_disconnect_cancels_inference_context(self):
         await self.client.close()
         self.application = FakeApplication(block_until_cancel=True)
-        self.client = TestClient(TestServer(create_http_app(self.application)))
+        self.client = TestClient(TestServer(create_app(self.application)))
         await self.client.start_server()
         task = asyncio.create_task(
             self.client.post(
@@ -287,7 +287,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                 "private /srv/audio/russian.m4a token=secret-value transcript text",
             )
         )
-        self.client = TestClient(TestServer(create_http_app(self.application)))
+        self.client = TestClient(TestServer(create_app(self.application)))
         await self.client.start_server()
         response = await self.client.post(
             "/internal/v1/transcriptions",
@@ -310,7 +310,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                 "allocator at /private/audio/russian.m4a token=secret-value",
             )
         )
-        self.client = TestClient(TestServer(create_http_app(self.application)))
+        self.client = TestClient(TestServer(create_app(self.application)))
         await self.client.start_server()
         response = await self.client.post(
             "/internal/v1/transcriptions",
@@ -327,7 +327,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
     async def test_upload_admission_limit_is_enforced_over_http(self):
         await self.client.close()
         self.application = FakeApplication(block_until_cancel=True, max_uploads=1)
-        self.client = TestClient(TestServer(create_http_app(self.application)))
+        self.client = TestClient(TestServer(create_app(self.application)))
         await self.client.start_server()
         first = asyncio.create_task(
             self.client.post(
@@ -357,7 +357,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
     async def test_request_deadline_cancels_work_and_returns_gateway_timeout(self):
         await self.client.close()
         self.application = FakeApplication(block_until_cancel=True)
-        self.client = TestClient(TestServer(create_http_app(self.application)))
+        self.client = TestClient(TestServer(create_app(self.application)))
         await self.client.start_server()
         request = asyncio.create_task(
             self.client.post(

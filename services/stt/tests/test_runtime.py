@@ -30,7 +30,7 @@ from services.stt.domain import (
 from services.stt.lifecycle import Lifecycle, ModelState, WorkerState
 from services.stt.supervisor import InferenceSupervisor
 from services.stt.testing import FakeBackendFactory
-from services.stt.http_server import STARTUP_TASK_KEY, create_http_app
+from services.stt.http_server import STARTUP_TASK_KEY, create_app
 from services.worker.server import handler, load_config
 
 from services.stt.tests.test_config_artifacts import application_data
@@ -1509,7 +1509,7 @@ class M06HTTPIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 def __getattr__(self, name):
                     return getattr(application, name)
 
-            client = TestClient(TestServer(create_http_app(HTTPFacade())))
+            client = TestClient(TestServer(create_app(HTTPFacade())))
             await client.start_server()
             try:
                 await client.app[STARTUP_TASK_KEY]

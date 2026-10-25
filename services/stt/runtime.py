@@ -1,8 +1,8 @@
 """STT composition root for the selected, strictly validated runtime profile."""
 
 from services.stt.backends.faster_whisper import (
-    FasterWhisperBackend,
-    FasterWhisperOptions,
+    Backend,
+    Options,
 )
 from services.stt.config import ApplicationConfig, DeploymentConfig
 from services.stt.device_adapters import SystemDeviceProbe
@@ -13,7 +13,7 @@ class FasterWhisperFactory:
         self._options = options
 
     def __call__(self):
-        return FasterWhisperBackend(self._options)
+        return Backend(self._options)
 
 
 def create_runtime(config: ApplicationConfig, deployment: DeploymentConfig):
@@ -25,7 +25,7 @@ def create_runtime(config: ApplicationConfig, deployment: DeploymentConfig):
     ):
         raise ValueError("explicit CUDA requires a configured free-memory preflight")
     options = dict(config.backend_options)
-    settings = FasterWhisperOptions(
+    settings = Options(
         cpu_threads=options["cpu_threads"],
         compute_type_cpu=options["compute_type_cpu"],
         compute_type_cuda=options["compute_type_cuda"],

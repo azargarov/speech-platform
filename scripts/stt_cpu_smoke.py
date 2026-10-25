@@ -12,7 +12,7 @@ from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 
 from services.stt.config import load_application_config, load_deployment_config
-from services.stt.http_server import create_http_app
+from services.stt.http_server import create_app
 from services.stt.service import DeferredApplication
 
 
@@ -53,7 +53,7 @@ def main():
 
 
 async def _exercise_http(application, config, audio_path):
-    client = TestClient(TestServer(create_http_app(application)))
+    client = TestClient(TestServer(create_app(application)))
     audio = audio_path.read_bytes()
     result = None
     try:

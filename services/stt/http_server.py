@@ -14,7 +14,7 @@ from services.stt.metrics import Metrics
 STARTUP_TASK_KEY = web.AppKey("startup_task", asyncio.Task)
 
 
-def create_http_app(application):
+def create_app(application):
     metrics = Metrics()
     maximum = application.config.admission.max_request_bytes
     http_app = web.Application(
@@ -433,7 +433,7 @@ def _metric_outcome(code):
 
 
 async def serve(application, listen_host, listen_port, socket_timeout_seconds):
-    http_app = create_http_app(application)
+    http_app = create_app(application)
     runner = web.AppRunner(
         http_app, access_log=None, shutdown_timeout=socket_timeout_seconds
     )

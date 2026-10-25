@@ -324,7 +324,7 @@ class CUDAHTTPProfileTests(unittest.TestCase):
             self.addCleanup(loop.close)
             with (
                 patch("scripts.stt_cuda_http_smoke.DeferredApplication", Application),
-                patch("scripts.stt_cuda_http_smoke.create_http_app", lambda app: app),
+                patch("scripts.stt_cuda_http_smoke.create_app", lambda app: app),
                 patch("scripts.stt_cuda_http_smoke.TestServer", lambda app: app),
                 patch(
                     "scripts.stt_cuda_http_smoke.TestClient", lambda _server: Client()
@@ -455,7 +455,7 @@ class CUDAHTTPProfileTests(unittest.TestCase):
             self.addCleanup(loop.close)
             with (
                 patch("scripts.stt_cuda_http_smoke.DeferredApplication", Application),
-                patch("scripts.stt_cuda_http_smoke.create_http_app", lambda app: app),
+                patch("scripts.stt_cuda_http_smoke.create_app", lambda app: app),
                 patch("scripts.stt_cuda_http_smoke.TestServer", lambda app: app),
                 patch(
                     "scripts.stt_cuda_http_smoke.TestClient", lambda _server: Client()
