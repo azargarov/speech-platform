@@ -272,7 +272,7 @@ def parse_components(raw):
 
 
 def existing_worker_compatible(worker, gateway_document, root, command):
-    """Require a healthy, owned worker compatible with an unchanged Gateway config."""
+    """Require one running, healthy, owned worker compatible with Gateway config."""
     if worker not in WORKER_IMAGE_ROLES:
         raise PreflightError("unknown worker")
     service_role = WORKER_IMAGE_ROLES[worker]
@@ -296,7 +296,6 @@ def existing_worker_compatible(worker, gateway_document, root, command):
         [
             "docker",
             "ps",
-            "--all",
             "--quiet",
             "--filter",
             "label=com.docker.compose.project=speech-platform",

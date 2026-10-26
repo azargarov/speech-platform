@@ -231,6 +231,11 @@ class PreflightTests(unittest.TestCase):
         fail_model=False,
         existing_workers=(),
         unhealthy_workers=(),
+        stale_workers=(),
+        stopped_workers=(),
+        extra_running_workers=None,
+        wrong_owner_workers=(),
+        wrong_network_workers=(),
     ):
         root = Path(directory)
         self.enterContext(
@@ -292,32 +297,53 @@ class PreflightTests(unittest.TestCase):
                     ),
                     "",
                 )
-                return (
-                    f"worker-{selected_worker}"
-                    if selected_worker in existing_workers
-                    else ""
+                candidates = []
+                if selected_worker in existing_workers:
+                    candidates.append(f"worker-{selected_worker}")
+                candidates.extend(
+                    f"worker-{selected_worker}-{index}"
+                    for index in range(
+                        2,
+                        2 + (extra_running_workers or {}).get(selected_worker, 0),
+                    )
                 )
+                if "--all" in args:
+                    stale_count = int(selected_worker in stale_workers) + int(
+                        selected_worker in stopped_workers
+                    )
+                    candidates.extend(
+                        f"worker-{selected_worker}-stale-{index}"
+                        for index in range(stale_count)
+                    )
+                return "\n".join(candidates)
             if args[:2] == ["docker", "inspect"] and str(args[2]).startswith("worker-"):
-                worker = str(args[2]).removeprefix("worker-")
+                candidate = str(args[2]).removeprefix("worker-")
+                worker = candidate.split("-", 1)[0]
                 image = "sha256:" + ("a" if worker == "stt" else "b") * 64
+                compose_labels = {
+                    "com.docker.compose.project": "speech-platform",
+                    "com.docker.compose.service": worker,
+                    "com.docker.compose.project.working_dir": str(root.resolve()),
+                    "com.docker.compose.project.config_files": str(
+                        (root / "compose.yaml").resolve()
+                    ),
+                }
+                if worker in wrong_owner_workers:
+                    compose_labels["com.docker.compose.project.working_dir"] = str(
+                        root / "another-checkout"
+                    )
+                private_network = f"speech-platform_{worker}_private"
+                if worker in wrong_network_workers:
+                    other_worker = "tts" if worker == "stt" else "stt"
+                    private_network = f"speech-platform_{other_worker}_private"
+                nonrunning = "-stale-" in candidate
                 return json.dumps(
                     [
                         {
                             "Image": image,
-                            "Config": {
-                                "Labels": {
-                                    "com.docker.compose.project": "speech-platform",
-                                    "com.docker.compose.service": worker,
-                                    "com.docker.compose.project.working_dir": str(
-                                        root.resolve()
-                                    ),
-                                    "com.docker.compose.project.config_files": str(
-                                        (root / "compose.yaml").resolve()
-                                    ),
-                                }
-                            },
+                            "Config": {"Labels": compose_labels},
                             "State": {
-                                "Running": True,
+                                "Running": not nonrunning,
                                 "Health": {
                                     "Status": (
                                         "unhealthy"
@@ -328,9 +354,7 @@ class PreflightTests(unittest.TestCase):
                             },
                             "NetworkSettings": {
                                 "Networks": {
-                                    f"speech-platform_{worker}_private": {
-                                        "IPAddress": "172.30.0.2"
-                                    }
+                                    private_network: {"IPAddress": "172.30.0.2"}
                                 }
                             },
                         }
@@ -611,6 +635,89 @@ class PreflightTests(unittest.TestCase):
                 report.entries,
             )
         self.assertTrue(any(args[:2] == ["docker", "ps"] for args in calls))
+
+    def test_running_worker_is_selected_while_stale_created_match_is_ignored(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, calls = self.fixture(
+                temp, existing_workers=("tts",), stale_workers=("tts",)
+            )
+            config_path = root / "private/deployment/gateway.yaml"
+            config_path.write_text(
+                "capabilities:\n  stt: false\n  tts: true\ntts_url: http://tts:8082\n"
+            )
+            report = preflight.run_checks(root=root, components="gateway")
+        self.assertFalse(report.failed, report.entries)
+        worker_queries = [args for args in calls if args[:2] == ["docker", "ps"]]
+        self.assertEqual(len(worker_queries), 1)
+        self.assertNotIn("--all", worker_queries[0])
+
+    def test_running_worker_is_selected_while_stopped_match_is_ignored(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, calls = self.fixture(
+                temp, existing_workers=("stt",), stopped_workers=("stt",)
+            )
+            config_path = root / "private/deployment/gateway.yaml"
+            config_path.write_text(
+                "capabilities:\n  stt: true\n  tts: false\nstt_url: http://stt:8081\n"
+            )
+            report = preflight.run_checks(root=root, components="gateway")
+        self.assertFalse(report.failed, report.entries)
+        worker_queries = [args for args in calls if args[:2] == ["docker", "ps"]]
+        self.assertEqual(len(worker_queries), 1)
+        self.assertNotIn("--all", worker_queries[0])
+
+    def test_multiple_running_worker_candidates_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(
+                temp,
+                existing_workers=("stt",),
+                extra_running_workers={"stt": 1},
+            )
+            config_path = root / "private/deployment/gateway.yaml"
+            config_path.write_text(
+                "capabilities:\n  stt: true\n  tts: false\nstt_url: http://stt:8081\n"
+            )
+            report = preflight.run_checks(root=root, components="gateway")
+        self.assertTrue(
+            any(
+                name == "Existing STT worker compatibility" and status == "FAIL"
+                for _, status, name, _ in report.entries
+            )
+        )
+
+    def test_running_worker_with_incorrect_compose_ownership_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(
+                temp, existing_workers=("stt",), wrong_owner_workers=("stt",)
+            )
+            config_path = root / "private/deployment/gateway.yaml"
+            config_path.write_text(
+                "capabilities:\n  stt: true\n  tts: false\nstt_url: http://stt:8081\n"
+            )
+            report = preflight.run_checks(root=root, components="gateway")
+        self.assertTrue(
+            any(
+                name == "Existing STT worker compatibility" and status == "FAIL"
+                for _, status, name, _ in report.entries
+            )
+        )
+
+    def test_running_worker_on_wrong_private_network_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(
+                temp, existing_workers=("stt",), wrong_network_workers=("stt",)
+            )
+            config_path = root / "private/deployment/gateway.yaml"
+            config_path.write_text(
+                "capabilities:\n  stt: true\n  tts: false\nstt_url: http://stt:8081\n"
+            )
+            report = preflight.run_checks(root=root, components="gateway")
+        self.assertTrue(
+            any(
+                name == "Existing STT worker compatibility" and status == "FAIL"
+                for _, status, name, _ in report.entries
+            )
+        )
 
     def test_gateway_only_update_fails_actionably_when_enabled_worker_is_missing(self):
         with tempfile.TemporaryDirectory() as temp:
