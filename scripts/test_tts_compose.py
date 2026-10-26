@@ -32,6 +32,13 @@ class CanonicalTTSComposeTests(unittest.TestCase):
             tts["deploy"]["resources"]["reservations"]["devices"][0]["device_ids"][0],
         )
         self.assertIn("tts_private", services["gateway"]["networks"])
+        self.assertEqual(
+            services["gateway"]["networks"]["gateway_egress"]["gw_priority"], 1
+        )
+        self.assertEqual(self.compose["networks"]["gateway_egress"]["driver"], "bridge")
+        self.assertFalse(
+            self.compose["networks"]["gateway_egress"].get("internal", False)
+        )
         self.assertNotIn("depends_on", services["gateway"])
         self.assertEqual(tts["profiles"], ["tts"])
 

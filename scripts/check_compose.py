@@ -26,7 +26,10 @@ def validate(
 
     networks = config["networks"]
     gateway_network = "publish" if require_optional_profiles else "gateway_publish"
-    if set(networks) != {gateway_network, "stt_private", "tts_private"}:
+    required_networks = {gateway_network, "stt_private", "tts_private"}
+    if require_optional_profiles:
+        required_networks.add("gateway_egress")
+    if set(networks) != required_networks:
         raise ValueError("Gateway publication and private worker networks are required")
     gateway_publish = networks[gateway_network]
     if (
@@ -50,6 +53,16 @@ def validate(
             or network.get("internal") is not True
         ):
             raise ValueError("worker networks must be internal")
+    if require_optional_profiles:
+        egress = networks["gateway_egress"]
+        if (
+            set(egress) - {"name", "driver", "ipam", "internal"}
+            or ("name" in egress and not egress["name"])
+            or egress.get("ipam", {}) != {}
+            or egress.get("internal", False) is not False
+            or egress.get("driver") != "bridge"
+        ):
+            raise ValueError("Gateway egress network must be a non-internal bridge")
     services = config["services"]
     if set(services) != {"gateway", "stt", "tts"}:
         raise ValueError("unexpected Compose service set")
@@ -71,7 +84,12 @@ def validate(
     ]
     if len(prompt_mounts) != 1 or prompt_mounts[0].get("read_only") is not True:
         raise ValueError("Gateway prompt directory must be mounted read-only")
-    if set(gateway["networks"]) != {gateway_network, "stt_private", "tts_private"}:
+    gateway_networks = {gateway_network, "stt_private", "tts_private"}
+    if require_optional_profiles:
+        gateway_networks.add("gateway_egress")
+        if gateway["networks"].get("gateway_egress") != {"gw_priority": 1}:
+            raise ValueError("Gateway egress network must be its default gateway")
+    if set(gateway["networks"]) != gateway_networks:
         raise ValueError("Gateway must connect to its publication and worker networks")
     if set(services["stt"]["networks"]) != {"stt_private"}:
         raise ValueError("STT must connect only to the STT-private network")

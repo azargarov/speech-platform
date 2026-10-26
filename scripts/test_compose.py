@@ -5,18 +5,26 @@ import unittest
 from scripts.check_compose import validate, validate_cuda_deployment
 
 
-def rendered(port=8080, bind="127.0.0.1"):
-    return {
-        "networks": {
-            "gateway_publish": {
-                "driver": "bridge",
-                "driver_opts": {
-                    "com.docker.network.bridge.enable_ip_masquerade": "false"
-                },
-            },
-            "stt_private": {"internal": True},
-            "tts_private": {"internal": True},
+def rendered(port=8080, bind="127.0.0.1", require_optional_profiles=False):
+    publication_network = "publish" if require_optional_profiles else "gateway_publish"
+    networks = {
+        publication_network: {
+            "driver": "bridge",
+            "driver_opts": {"com.docker.network.bridge.enable_ip_masquerade": "false"},
         },
+        "stt_private": {"internal": True},
+        "tts_private": {"internal": True},
+    }
+    gateway_networks = {
+        publication_network: None,
+        "stt_private": None,
+        "tts_private": None,
+    }
+    if require_optional_profiles:
+        networks["gateway_egress"] = {"driver": "bridge"}
+        gateway_networks["gateway_egress"] = {"gw_priority": 1}
+    return {
+        "networks": networks,
         "services": {
             "gateway": {
                 "environment": {"SPEECH_LISTEN_PORT": str(port)},
@@ -29,11 +37,7 @@ def rendered(port=8080, bind="127.0.0.1"):
                 "mem_limit": "134217728",
                 "cpus": 1,
                 "pids_limit": 128,
-                "networks": {
-                    "gateway_publish": None,
-                    "stt_private": None,
-                    "tts_private": None,
-                },
+                "networks": gateway_networks,
             },
             "stt": worker("stt_private"),
             "tts": worker("tts_private"),
@@ -110,11 +114,7 @@ class ComposeConfig(unittest.TestCase):
             validate(config, 8080, "127.0.0.1")
 
     def test_each_worker_has_an_independent_profile(self):
-        config = rendered()
-        config["networks"]["publish"] = config["networks"].pop("gateway_publish")
-        config["services"]["gateway"]["networks"]["publish"] = config["services"][
-            "gateway"
-        ]["networks"].pop("gateway_publish")
+        config = rendered(require_optional_profiles=True)
         config["services"]["tts"]["profiles"] = ["stt"]
         with self.assertRaisesRegex(
             ValueError, "TTS must use its independent Compose profile"
@@ -138,6 +138,33 @@ class ComposeConfig(unittest.TestCase):
         config["networks"]["tts_private"]["internal"] = False
         with self.assertRaisesRegex(ValueError, "networks must be internal"):
             validate(config, 8080, "127.0.0.1")
+
+    def test_gateway_egress_uses_non_internal_bridge_and_workers_stay_private(self):
+        config = rendered(require_optional_profiles=True)
+        validate(config, 8080, "127.0.0.1", require_optional_profiles=True)
+        self.assertEqual(config["networks"]["gateway_egress"], {"driver": "bridge"})
+        self.assertEqual(
+            config["services"]["gateway"]["networks"]["gateway_egress"],
+            {"gw_priority": 1},
+        )
+        self.assertEqual(config["services"]["stt"]["networks"], {"stt_private": None})
+        self.assertEqual(config["services"]["tts"]["networks"], {"tts_private": None})
+
+    def test_gateway_egress_requires_default_route_and_rejects_internal_network(self):
+        config = rendered(require_optional_profiles=True)
+        config["services"]["gateway"]["networks"]["gateway_egress"] = {"gw_priority": 0}
+        with self.assertRaisesRegex(ValueError, "default gateway"):
+            validate(config, 8080, "127.0.0.1", require_optional_profiles=True)
+
+        config = rendered(require_optional_profiles=True)
+        config["networks"]["gateway_egress"]["internal"] = True
+        with self.assertRaisesRegex(ValueError, "non-internal bridge"):
+            validate(config, 8080, "127.0.0.1", require_optional_profiles=True)
+
+        config = rendered(require_optional_profiles=True)
+        config["services"]["stt"]["networks"]["gateway_egress"] = None
+        with self.assertRaisesRegex(ValueError, "STT must connect only"):
+            validate(config, 8080, "127.0.0.1", require_optional_profiles=True)
 
     def test_gateway_publication_network_disables_masquerading(self):
         config = rendered()

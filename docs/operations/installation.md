@@ -12,7 +12,7 @@ provenance; it does not describe the current VoxCPM2 deployment.
 ## Prerequisites
 
 - Linux amd64; Ubuntu 24.04 is the qualified distribution. Docker Engine and
-  Compose plugin >=2.24; operator access to the local Unix Docker daemon.
+  Compose plugin >=2.33.1; operator access to the local Unix Docker daemon.
   Installation explicitly uses the `default` Docker context and requires its
   endpoint to be local Unix. Deployment overrides belong in `.env`, not a prior
   shell. The Compose project is fixed to `speech-platform`.
@@ -94,6 +94,12 @@ incompatible, include it in the deployment selection or repair it before
 updating Gateway. A disabled worker is not required. A selected worker is
 checked against its pinned model, GPU and image prerequisites even when its
 Gateway capability is disabled.
+
+Gateway joins a dedicated non-internal `gateway_egress` bridge for outbound
+provider HTTPS. Compose gives that network default-gateway priority; the
+existing publication network retains masquerading disabled. STT and TTS remain
+attached only to their internal worker networks, and the external Ollama
+network remains internally isolated. No additional ports are published.
 
 Use these independent deployment selections:
 

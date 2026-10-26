@@ -857,18 +857,23 @@ def run_checks(
     )
     compose_version = check(
         "Host",
-        "Compose plugin >= 2.24",
+        "Compose plugin >= 2.33.1",
         lambda: command(["docker", "compose", "version", "--short"]),
-        "Install Docker Compose plugin >=2.24.",
+        "Install Docker Compose plugin >=2.33.1 for Gateway egress routing.",
     )
     if compose_version:
-        match = re.search(r"(\d+)\.(\d+)", compose_version)
-        if not match or tuple(map(int, match.groups())) < (2, 24):
+        match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", compose_version)
+        version = (
+            (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
+            if match
+            else (0, 0, 0)
+        )
+        if version < (2, 33, 1):
             report.add(
                 "Host",
                 "FAIL",
                 "Compose compatibility",
-                "Upgrade Docker Compose plugin to >=2.24.",
+                "Upgrade Docker Compose plugin to >=2.33.1 for Gateway egress routing.",
             )
         report.compose_version = compose_version
     report.add(

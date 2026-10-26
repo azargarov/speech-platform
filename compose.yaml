@@ -25,7 +25,12 @@ services:
         source: ./configs/prompts
         target: /configs/prompts
         read_only: true
-    networks: [publish, stt_private, tts_private]
+    networks:
+      gateway_egress:
+        gw_priority: 1
+      publish: {}
+      stt_private: {}
+      tts_private: {}
     restart: unless-stopped
     read_only: true
     user: "65532:65532"
@@ -139,6 +144,8 @@ services:
               device_ids: ["${TTS_GPU_DEVICE:-0}"]
               capabilities: [gpu]
 networks:
+  gateway_egress:
+    driver: bridge
   publish:
     driver: bridge
     driver_opts:

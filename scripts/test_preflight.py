@@ -236,6 +236,7 @@ class PreflightTests(unittest.TestCase):
         extra_running_workers=None,
         wrong_owner_workers=(),
         wrong_network_workers=(),
+        compose_version="2.40.0",
     ):
         root = Path(directory)
         self.enterContext(
@@ -386,7 +387,7 @@ class PreflightTests(unittest.TestCase):
             if args == ["go", "version"]:
                 return "go version go1.24.0 linux/amd64"
             if args[:3] == ["docker", "compose", "version"]:
-                return "2.40.0"
+                return compose_version
             if args == ["docker", "info", "--format", "{{.DockerRootDir}}"]:
                 return str(root)
             if args[:3] == ["docker", "context", "inspect"]:
@@ -473,6 +474,27 @@ class PreflightTests(unittest.TestCase):
         self.assertTrue(output.getvalue().endswith("READY TO INSTALL\n"))
         for group in preflight.GROUPS:
             self.assertIn(group + ":", output.getvalue())
+
+    def test_compose_minimum_supports_gateway_default_route_priority(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(temp, compose_version="2.33.0")
+            report = preflight.run_checks(root=root, service="gateway")
+        self.assertTrue(
+            any(
+                group == "Host" and status == "FAIL" and name == "Compose compatibility"
+                for group, status, name, _ in report.entries
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(temp, compose_version="2.33.1")
+            report = preflight.run_checks(root=root, service="gateway")
+        self.assertFalse(
+            any(
+                group == "Host" and status == "FAIL" and name == "Compose compatibility"
+                for group, status, name, _ in report.entries
+            )
+        )
 
     def test_missing_enabled_optional_cloud_credentials_warn_without_blocking(self):
         with tempfile.TemporaryDirectory() as temp:
