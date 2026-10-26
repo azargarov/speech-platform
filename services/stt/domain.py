@@ -193,8 +193,11 @@ class DeviceRequirements:
 class OperationContext:
     """Monotonic deadline and cancellation signal passed across application ports."""
 
-    def __init__(self, deadline: float | None = None, cancel_event=None):
+    def __init__(
+        self, deadline: float | None = None, cancel_event=None, request_id=None
+    ):
         self.deadline = deadline
+        self.request_id = request_id
         self._cancelled = (
             cancel_event if cancel_event is not None else threading.Event()
         )

@@ -1,11 +1,13 @@
 package texttransform
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"speech-platform/internal/config"
+	"speech-platform/internal/transport"
 )
 
 const testPrompt = "Synthetic test transformation prompt."
@@ -311,6 +314,68 @@ func call(t *testing.T, h http.Handler, body string, auth bool) (int, []byte) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	return w.Code, w.Body.Bytes()
+}
+
+func TestProviderLogsCarryGatewayRequestID(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	service, err := New(context.Background(), ptr(testConfig()), "", &fakeGenerator{output: "synthetic output"}, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	request := httptest.NewRequest(http.MethodPost, "/v1/text/transformations", strings.NewReader(`{"text":"synthetic","mode":"written"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(transport.WithRequestID(request.Context(), "123e4567-e89b-42d3-a456-426614174000"))
+	response := httptest.NewRecorder()
+	service.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d provider log lines, want attempt start/completion: %s", len(lines), logs.String())
+	}
+	for _, line := range lines {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatal(err)
+		}
+		if event["request_id"] != "123e4567-e89b-42d3-a456-426614174000" {
+			t.Fatalf("provider log lacks request ID: %#v", event)
+		}
+	}
+}
+
+func TestProviderFailureLogCarriesGatewayRequestID(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	service, err := New(context.Background(), ptr(testConfig()), "", &fakeGenerator{
+		fail: map[string]error{"local-model": &ProviderError{Kind: FailureTransport}},
+	}, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	request := httptest.NewRequest(http.MethodPost, "/v1/text/transformations", strings.NewReader(`{"text":"synthetic","mode":"written","local_only":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(transport.WithRequestID(request.Context(), "123e4567-e89b-42d3-a456-426614174000"))
+	response := httptest.NewRecorder()
+	service.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d provider log lines, want attempt start/failure: %s", len(lines), logs.String())
+	}
+	var failure map[string]any
+	if err := json.Unmarshal([]byte(lines[1]), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if failure["msg"] != "text provider attempt failed" || failure["request_id"] != "123e4567-e89b-42d3-a456-426614174000" || failure["category"] != string(FailureTransport) {
+		t.Fatalf("provider failure log lacks correlation or category: %#v", failure)
+	}
 }
 
 func TestRawPassthroughIsExactAndSkipsGenerator(t *testing.T) {

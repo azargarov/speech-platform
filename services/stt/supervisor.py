@@ -217,6 +217,8 @@ class InferenceSupervisor:
                 "timestamps": request.timestamps,
                 "deadline": context.deadline,
             }
+            if context.request_id:
+                message["request_id"] = context.request_id
             payload = _encode(message, self._max_message_bytes)
             self._cancel_event.clear()
             try:
@@ -644,7 +646,12 @@ def _child_main(
                     message["output_language"],
                 )
                 result = model.transcribe(
-                    request, OperationContext(message["deadline"], cancel_event)
+                    request,
+                    OperationContext(
+                        message["deadline"],
+                        cancel_event,
+                        message.get("request_id"),
+                    ),
                 )
                 response = {
                     "type": "result",
@@ -672,6 +679,11 @@ def _child_main(
                     "inference_failure",
                     code=exc.code.value,
                     fatal=isinstance(exc, FatalBackendFailure),
+                    **(
+                        {"request_id": message["request_id"]}
+                        if message.get("request_id")
+                        else {}
+                    ),
                 )
                 response = {
                     "type": "failure",
@@ -685,6 +697,11 @@ def _child_main(
                     code="backend_failed",
                     fatal=False,
                     exception_type=type(exc).__name__,
+                    **(
+                        {"request_id": message["request_id"]}
+                        if message.get("request_id")
+                        else {}
+                    ),
                 )
                 response = {
                     "type": "failure",

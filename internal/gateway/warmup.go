@@ -330,6 +330,9 @@ func workerWarmup(ctx context.Context, baseURL, token string, client *http.Clien
 		return warmupResult{Operation: operation, Status: "unavailable", Code: "worker_unavailable"}
 	}
 	request.Header.Set("Content-Length", "0")
+	if requestID := transport.RequestID(ctx); requestID != "" {
+		request.Header.Set(RequestIDHeader, requestID)
+	}
 	if operation == "stt" {
 		request.Header.Set("X-Request-Timeout-Ms", durationHeader(requestCtx, timeout))
 	}

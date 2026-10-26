@@ -3,7 +3,11 @@ info:
   title: Speech Platform public API
   version: 1.0.0
   description: STT transcription, complete WAV TTS, optional text transformation and bounded predictive model warmup routes are implemented. Bearer authentication is required for public speech and text routes in every deployment; configure SPEECH_API_TOKEN as a private random secret of at least 32 characters. Health and readiness endpoints remain unauthenticated. TLS termination is external to Gateway; use a TLS reverse proxy and do not treat an advertised HTTPS URL as proof of TLS. STT request limit is 25 MiB; TTS JSON request limit is 64 KiB; model warmup request limit is 4 KiB. Warmup is synchronous, bounded by warmup_timeout, and can be called asynchronously by clients. It accepts operation names only and never accepts user content. A ready result confirms the warmup operation completed, not future model residency. The total ordinary speech deadline covers body reading, worker dispatch and buffered response completion; remaining budget is forwarded to workers. Default STT deadline is 180 seconds and TTS deadline is 600 seconds; upload read deadline is 30 seconds. Client disconnect cancels the Gateway wait where possible; it does not prove model loading stopped. For ordinary speech, deadline exhaustion returns HTTP 504 before response headers are committed when the connection remains writable; delivery already started may instead be terminated. Warmup retains per-operation timeout outcomes.
-    Streaming is reserved, not implemented; capability flags remain false until supported.
+    Gateway responses include X-Request-ID, a Gateway-generated identifier
+    suitable for correlating that request with Gateway and private worker logs,
+    when UUID generation succeeds. Its failure returns a safe 500 without the
+    header. Caller-provided values are not trusted. Streaming is reserved, not
+    implemented; capability flags remain false until supported.
     Timestamps are optional; unsupported requests return 400. Errors never contain
     audio or transcript payloads. Text transformation is available only when an
     optional Gateway text_transform configuration is enabled; generated output
@@ -85,6 +89,11 @@ paths:
         '200':
           description: Success
           headers:
+            X-Request-ID: &requestIdHeader
+              description: Gateway-generated identifier for this request, also used in Gateway and private worker logs.
+              schema:
+                type: string
+                format: uuid
             X-Speech-Provider:
               description: Provider that handled the request (local or groq).
               schema:
@@ -96,66 +105,88 @@ paths:
                 $ref: '#/components/schemas/Transcription'
         '400': &id001
           description: Invalid request or unsupported option
+          headers:
+            X-Request-ID: *requestIdHeader
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '401': &id002
           description: Missing or invalid bearer token
+          headers:
+            X-Request-ID: *requestIdHeader
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '403': &id003
           description: Cloud STT was explicitly selected without per-request cloud-audio consent.
+          headers:
+            X-Request-ID: *requestIdHeader
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '404': &id004
           description: Unknown platform model or voice
+          headers:
+            X-Request-ID: *requestIdHeader
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '413': &id005
           description: Configured request size limit exceeded
+          headers:
+            X-Request-ID: *requestIdHeader
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '415': &id006
           description: Unsupported audio media type
+          headers:
+            X-Request-ID: *requestIdHeader
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '422': &id007
           description: Input cannot be processed or a requested mode is unavailable
+          headers:
+            X-Request-ID: *requestIdHeader
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '429': &id008
           description: Gateway queue full or Groq rate limit; Retry-After may be provided
+          headers:
+            X-Request-ID: *requestIdHeader
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '500': &id009
           description: Internal failure
+          headers:
+            X-Request-ID: *requestIdHeader
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '503': &id010
           description: Provider not ready
+          headers:
+            X-Request-ID: *requestIdHeader
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '504': &id011
           description: Request deadline exceeded
+          headers:
+            X-Request-ID: *requestIdHeader
           content:
             application/json:
               schema:
@@ -207,6 +238,13 @@ paths:
       responses:
         '200':
           description: Complete WAV PCM16 audio. Sample rate is encoded in the WAV header.
+          headers:
+            X-Request-ID: *requestIdHeader
+            X-Speech-Provider:
+              description: Provider that handled the request (currently local).
+              schema:
+                type: string
+                enum: [local]
           content:
             audio/wav:
               schema:
@@ -225,32 +263,20 @@ paths:
         '504': *id011
         '502':
           description: Selected provider returned an invalid or unusable response
+          headers:
+            X-Request-ID: *requestIdHeader
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-  /v1/stt/models:
-    get:
-      operationId: listModels
-      responses:
-        '200':
-          description: Success
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/Model'
-        '401': *id002
-        '403': *id003
-        '500': *id009
-        '503': *id010
   /v1/tts/voices:
     get:
       operationId: listVoices
       responses:
         '200':
           description: Success
+          headers:
+            X-Request-ID: *requestIdHeader
           content:
             application/json:
               schema:
@@ -276,6 +302,7 @@ paths:
         '200':
           description: Exact raw passthrough or generated text with provenance metadata
           headers:
+            X-Request-ID: *requestIdHeader
             X-Speech-Prompt-SHA256:
               description: SHA-256 fingerprint of the active prompt snapshot used to handle this request.
               schema:
@@ -294,6 +321,8 @@ paths:
         '429': *id008
         '502':
           description: Provider rejected the request, violated protocol, or returned invalid output
+          headers:
+            X-Request-ID: *requestIdHeader
           content:
             application/json:
               schema:
@@ -314,6 +343,8 @@ paths:
       responses:
         '200':
           description: All requested operations were attempted; individual failures are reported in results
+          headers:
+            X-Request-ID: *requestIdHeader
           content:
             application/json:
               schema:
@@ -322,16 +353,22 @@ paths:
         '401': *id002
         '405':
           description: POST is required
+          headers:
+            X-Request-ID: *requestIdHeader
         '413': *id005
         '415': *id006
         '408':
           description: Bounded request body did not complete before the warmup deadline
+          headers:
+            X-Request-ID: *requestIdHeader
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '503':
           description: Gateway cannot attempt any requested operation
+          headers:
+            X-Request-ID: *requestIdHeader
           content:
             application/json:
               schema:
@@ -515,27 +552,6 @@ components:
                 minimum: 0
               text:
                 type: string
-    Model:
-      type: object
-      required:
-      - id
-      - languages
-      - timestamps
-      - streaming
-      properties:
-        id:
-          type: string
-          minLength: 1
-          maxLength: 128
-          description: Stable platform alias, never engine-specific.
-        languages:
-          type: array
-          items:
-            type: string
-        timestamps:
-          type: boolean
-        streaming:
-          type: boolean
     Voice:
       type: object
       required:

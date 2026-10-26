@@ -104,6 +104,16 @@ class Acceptance(unittest.TestCase):
         for path in (ROOT / "api/openapi").glob("*.yaml"):
             validate(yaml.safe_load(path.read_text()))
         public = yaml.safe_load((ROOT / "api/openapi/public-v1.yaml").read_text())
+        for path, operations in public["paths"].items():
+            for method, operation in operations.items():
+                if method not in {"get", "post", "put", "patch", "delete"}:
+                    continue
+                for status, response in operation["responses"].items():
+                    self.assertIn(
+                        "X-Request-ID",
+                        response.get("headers", {}),
+                        f"{method.upper()} {path} response {status} lacks request ID header",
+                    )
         transcribe = public["paths"]["/v1/stt/transcriptions"]["post"]
         self.assertEqual(transcribe["x-maxRequestSizeBytes"], 26214400)
         self.assertEqual(
@@ -116,13 +126,10 @@ class Acceptance(unittest.TestCase):
         transform = public["paths"]["/v1/text/transformations"]["post"]
         prompt_hash = transform["responses"]["200"]["headers"]["X-Speech-Prompt-SHA256"]
         self.assertEqual(prompt_hash["schema"]["pattern"], "^[a-f0-9]{64}$")
-        for operation in (
-            public["paths"]["/v1/stt/models"]["get"],
-            public["paths"]["/v1/tts/voices"]["get"],
-        ):
-            self.assertEqual(
-                set(operation["responses"]), {"200", "401", "403", "500", "503"}
-            )
+        self.assertNotIn("/v1/stt/models", public["paths"])
+        self.assertEqual(public["security"], [{"bearerAuth": []}])
+        voices = public["paths"]["/v1/tts/voices"]["get"]
+        self.assertEqual(set(voices["responses"]), {"200", "401", "403", "500", "503"})
         tts = public["paths"]["/v1/tts/speech"]["post"]
         self.assertEqual(tts["x-maxRequestSizeBytes"], 65536)
         self.assertEqual(

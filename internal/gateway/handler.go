@@ -233,6 +233,11 @@ func HandlerWithWarmupContextAndGroqSTT(state Readiness, maxBytes int64, stt *ST
 			transport.JSON(w, 429, transport.Error{Code: "overloaded", Message: "Gateway request capacity is full"})
 			return
 		}
+		if admissionLease.provider == groqWhisperProvider {
+			w.Header().Set("X-Speech-Provider", "groq")
+		} else {
+			w.Header().Set("X-Speech-Provider", "local")
+		}
 		defer admissionLease.Release()
 		if speechStopped(w, ctx) {
 			return
@@ -289,7 +294,6 @@ func HandlerWithWarmupContextAndGroqSTT(state Readiness, maxBytes int64, stt *ST
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Speech-Provider", "groq")
 			if retry != "" {
 				w.Header().Set("Retry-After", retry)
 			}
@@ -317,6 +321,9 @@ func HandlerWithWarmupContextAndGroqSTT(state Readiness, maxBytes int64, stt *ST
 		}
 		upstream.Header.Set("Content-Type", r.Header.Get("Content-Type"))
 		upstream.Header.Set("X-Request-Timeout-Ms", budget)
+		if requestID := transport.RequestID(r.Context()); requestID != "" {
+			upstream.Header.Set(RequestIDHeader, requestID)
+		}
 		if speechStopped(w, ctx) {
 			return
 		}
@@ -339,7 +346,6 @@ func HandlerWithWarmupContextAndGroqSTT(state Readiness, maxBytes int64, stt *ST
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Speech-Provider", "local")
 		w.WriteHeader(response.StatusCode)
 		beginDelivery()
 		_, _ = w.Write(responseBody)
@@ -385,6 +391,7 @@ func HandlerWithWarmupContextAndGroqSTT(state Readiness, maxBytes int64, stt *ST
 			transport.JSON(w, 429, transport.Error{Code: "overloaded", Message: "Gateway request capacity is full"})
 			return
 		}
+		w.Header().Set("X-Speech-Provider", "local")
 		defer admissionLease.Release()
 		if speechStopped(w, ctx) {
 			return
@@ -517,6 +524,9 @@ func HandlerWithWarmupContextAndGroqSTT(state Readiness, maxBytes int64, stt *ST
 		}
 		upstream.Header.Set("Content-Type", "application/json")
 		upstream.Header.Set("X-Request-Timeout-Ms", budget)
+		if requestID := transport.RequestID(r.Context()); requestID != "" {
+			upstream.Header.Set(RequestIDHeader, requestID)
+		}
 		if speechStopped(w, ctx) {
 			return
 		}

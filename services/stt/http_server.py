@@ -4,20 +4,87 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 
 from aiohttp import web
 
 from services.stt.domain import FailureCode, OperationContext, SpeechFailure, safe_error
 from services.stt.metrics import Metrics
+from services.worker.request_id import REQUEST_ID_HEADER, from_headers
 
 STARTUP_TASK_KEY = web.AppKey("startup_task", asyncio.Task)
+API_ERROR_CODE = re.compile(r"^[a-z0-9_]{1,64}$")
+
+
+@web.middleware
+async def request_diagnostics(request, handler):
+    request_id = from_headers(request.headers)
+    if request_id is None:
+        return await handler(request)
+    started = time.monotonic()
+    _emit_request_event(
+        "worker_request_started", request_id, request.method, request.path
+    )
+    try:
+        response = await handler(request)
+    except Exception:
+        _emit_request_event(
+            "worker_request_failed",
+            request_id,
+            request.method,
+            request.path,
+            status=500,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+            failure_stage="worker_http_handler",
+        )
+        raise
+    response.headers[REQUEST_ID_HEADER] = request_id
+    code = None
+    if response.status >= 400 and isinstance(response.body, bytes):
+        try:
+            payload = json.loads(response.body)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("code"), str):
+            candidate = payload["code"]
+            if API_ERROR_CODE.fullmatch(candidate):
+                code = candidate
+    _emit_request_event(
+        "worker_request_failed"
+        if response.status >= 400
+        else "worker_request_completed",
+        request_id,
+        request.method,
+        request.path,
+        status=response.status,
+        elapsed_ms=int((time.monotonic() - started) * 1000),
+        api_code=code,
+    )
+    return response
+
+
+def _emit_request_event(event, request_id, method, path, **fields):
+    print(
+        json.dumps(
+            {
+                "event": event,
+                "request_id": request_id,
+                "method": method,
+                "path": path,
+                **{key: value for key, value in fields.items() if value is not None},
+            },
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
 
 
 def create_app(application):
     metrics = Metrics()
     maximum = application.config.admission.max_request_bytes
     http_app = web.Application(
+        middlewares=[request_diagnostics],
         client_max_size=maximum,
         handler_args={"max_line_size": 8190, "max_field_size": 8190},
     )
@@ -296,7 +363,10 @@ def _operation_context(request, maximum_seconds):
     if milliseconds < 1:
         raise SpeechFailure(FailureCode.INVALID_INPUT, "request timeout is invalid")
     timeout = min(milliseconds / 1000, maximum_seconds)
-    return OperationContext(time.monotonic() + timeout)
+    return OperationContext(
+        time.monotonic() + timeout,
+        request_id=from_headers(request.headers),
+    )
 
 
 async def _validate_empty_warmup_body(request, context, maximum):

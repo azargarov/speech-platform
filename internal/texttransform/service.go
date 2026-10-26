@@ -528,6 +528,13 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		attemptIndex++
 		s.attempts.Add(1)
 		attemptStart := time.Now()
+		if s.logger != nil {
+			attrs := []any{"provider", p.ID, "model", m.ID, "attempt", attemptIndex}
+			if requestID := transport.RequestID(ctx); requestID != "" {
+				attrs = append(attrs, "request_id", requestID)
+			}
+			s.logger.Info("text provider attempt started", attrs...)
+		}
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, duration(p.Timeout))
 		out, e := s.gen.Generate(attemptCtx, p, m, s.creds[p.ID], prompt.text, req.Text, optionsJSON(req.Mode, req.Format, req.TargetLanguage))
 		attemptCancel()
@@ -544,7 +551,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					s.fallbacks.Add(1)
 				}
 				if s.logger != nil {
-					s.logger.Info("text transformation completed", "provider", p.ID, "model", m.ID, "attempt", attemptIndex, "fallback_occurred", priorFailure, "elapsed_ms", time.Since(attemptStart).Milliseconds())
+					attrs := []any{"provider", p.ID, "model", m.ID, "attempt", attemptIndex, "fallback_occurred", priorFailure, "elapsed_ms", time.Since(attemptStart).Milliseconds()}
+					if requestID := transport.RequestID(ctx); requestID != "" {
+						attrs = append(attrs, "request_id", requestID)
+					}
+					s.logger.Info("text transformation completed", attrs...)
 				}
 				writeJSON(w, 200, Response{OriginalText: req.Text, TransformedText: out, Options: normalized, Model: &mid, Provider: &pid, FallbackOccurred: priorFailure, Generated: true})
 				return
@@ -555,7 +566,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var pe *ProviderError
 		if errors.As(e, &pe) {
 			if s.logger != nil {
-				s.logger.Warn("text provider attempt failed", "provider", p.ID, "model", m.ID, "attempt", attemptIndex, "category", string(pe.Kind), "suppressed", pe.Suppress, "elapsed_ms", time.Since(attemptStart).Milliseconds())
+				attrs := []any{"provider", p.ID, "model", m.ID, "attempt", attemptIndex, "category", string(pe.Kind), "suppressed", pe.Suppress, "elapsed_ms", time.Since(attemptStart).Milliseconds()}
+				if requestID := transport.RequestID(ctx); requestID != "" {
+					attrs = append(attrs, "request_id", requestID)
+				}
+				s.logger.Warn("text provider attempt failed", attrs...)
 			}
 			if pe.Suppress {
 				suppressed[p.ID] = true

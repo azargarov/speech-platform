@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import os
@@ -16,6 +17,7 @@ import types
 from unittest import mock
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from contextlib import redirect_stdout
 
 from services.tts.config import load_config
 from services.tts.lifecycle import (
@@ -1356,20 +1358,47 @@ class WorkerHTTPTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(1)
 
-    def _request(self, payload):
+    def _request(self, payload, headers=None):
         import urllib.error
         import urllib.request
 
         request = urllib.request.Request(
             self.url + "/internal/v1/speech",
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **(headers or {})},
             method="POST",
         )
         try:
             return urllib.request.urlopen(request, timeout=3)
         except urllib.error.HTTPError as error:
             return error
+
+    def test_request_id_is_logged_for_success_and_failure_without_payloads(self):
+        self.lifecycle.release.set()
+        success_id = "123e4567-e89b-42d3-a456-426614174000"
+        failure_id = "123e4567-e89b-42d3-a456-426614174001"
+        logs = io.StringIO()
+        with redirect_stdout(logs):
+            success = self._request(
+                b'{"text":"synthetic private text"}',
+                {"X-Request-ID": success_id},
+            )
+            success.read()
+            failure = self._request(b'{"text":"   "}', {"X-Request-ID": failure_id})
+            failure.read()
+        events = [json.loads(line) for line in logs.getvalue().splitlines()]
+        self.assertEqual(
+            [(event["event"], event["request_id"]) for event in events],
+            [
+                ("worker_request_started", success_id),
+                ("worker_request_completed", success_id),
+                ("worker_request_started", failure_id),
+                ("worker_request_failed", failure_id),
+            ],
+        )
+        self.assertEqual(failure.code, 400)
+        self.assertEqual(events[-1]["api_code"], "invalid_text")
+        self.assertNotIn("synthetic private text", logs.getvalue())
 
     def _warmup(self):
         import urllib.error

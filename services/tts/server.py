@@ -18,6 +18,11 @@ from services.tts.lifecycle import (
     TTSFailure,
     vox_model_factory,
 )
+from services.worker.request_id import from_headers
+
+
+def _emit_event(**fields):
+    print(json.dumps(fields, separators=(",", ":")), flush=True)
 
 
 def handler(config: dict, lifecycle: ModelLifecycle):
@@ -43,6 +48,21 @@ def handler(config: dict, lifecycle: ModelLifecycle):
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 pass
+            request_id = getattr(self, "gateway_request_id", None)
+            if request_id is not None:
+                fields = {
+                    "event": "worker_request_failed"
+                    if status >= 400
+                    else "worker_request_completed",
+                    "request_id": request_id,
+                    "method": self.command,
+                    "path": self.path.split("?", 1)[0],
+                    "status": status,
+                    "elapsed_ms": int((time.monotonic() - self.request_started) * 1000),
+                }
+                if isinstance(value, dict) and isinstance(value.get("code"), str):
+                    fields["api_code"] = value["code"]
+                _emit_event(**fields)
 
         def do_GET(self):
             if self.path == "/healthz":
@@ -92,6 +112,15 @@ def handler(config: dict, lifecycle: ModelLifecycle):
 
         def do_POST(self):
             started = time.monotonic()
+            self.request_started = started
+            self.gateway_request_id = from_headers(self.headers)
+            if self.gateway_request_id is not None:
+                _emit_event(
+                    event="worker_request_started",
+                    request_id=self.gateway_request_id,
+                    method=self.command,
+                    path=self.path.split("?", 1)[0],
+                )
             if self.path == "/internal/v1/warmup":
                 if not inference_slot.acquire(blocking=False):
                     self.reply(

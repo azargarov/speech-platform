@@ -70,7 +70,8 @@ func run() error {
 		defer textService.Close()
 	}
 	ready := gateway.NewWorkersReadiness(stt, tts)
-	srv := &http.Server{Addr: net.JoinHostPort(c.ListenHost, fmt.Sprint(c.ListenPort)), Handler: gateway.HandlerWithWarmupContextAndGroqSTT(ready, c.MaxRequestBytes, stt, tts, textService, duration(c.WarmupTimeout), ctx, groqSTT, c.GroqSTT.Enabled, *c.GroqSTT.Capacity), ReadTimeout: duration(c.ReadTimeout), ReadHeaderTimeout: duration(c.ReadTimeout), WriteTimeout: duration(c.WriteTimeout), IdleTimeout: duration(c.IdleTimeout), MaxHeaderBytes: c.MaxHeaderBytes}
+	handler := gateway.HandlerWithWarmupContextAndGroqSTT(ready, c.MaxRequestBytes, stt, tts, textService, duration(c.WarmupTimeout), ctx, groqSTT, c.GroqSTT.Enabled, *c.GroqSTT.Capacity)
+	srv := &http.Server{Addr: net.JoinHostPort(c.ListenHost, fmt.Sprint(c.ListenPort)), Handler: gateway.WithRequestID(handler, logger), ReadTimeout: duration(c.ReadTimeout), ReadHeaderTimeout: duration(c.ReadTimeout), WriteTimeout: duration(c.WriteTimeout), IdleTimeout: duration(c.IdleTimeout), MaxHeaderBytes: c.MaxHeaderBytes}
 	if c.TextTransform != nil && c.TextTransform.Enabled != nil && *c.TextTransform.Enabled {
 		reloadSignals := make(chan os.Signal, 1)
 		signal.Notify(reloadSignals, syscall.SIGHUP)

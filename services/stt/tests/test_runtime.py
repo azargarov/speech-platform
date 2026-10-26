@@ -1,3 +1,4 @@
+import base64
 import threading
 import tempfile
 import time
@@ -28,7 +29,7 @@ from services.stt.domain import (
     VerifiedArtifact,
 )
 from services.stt.lifecycle import Lifecycle, ModelState, WorkerState
-from services.stt.supervisor import InferenceSupervisor
+from services.stt.supervisor import InferenceSupervisor, _child_main
 from services.stt.testing import FakeBackendFactory
 from services.stt.http_server import STARTUP_TASK_KEY, create_app
 from services.worker.server import handler, load_config
@@ -342,6 +343,69 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(runner._process.pid, pid)
             self.assertTrue(runner.child_alive)
         runner.shutdown(1)
+
+    def test_inference_failure_event_keeps_gateway_request_id(self):
+        request_id = "123e4567-e89b-42d3-a456-426614174000"
+        factory = FakeBackendFactory("failure")
+        identity = ModelIdentity("whisper", "revision-1")
+        artifact_identity = ArtifactIdentity("a" * 64, "fake-v1")
+        selection = ModelSelection("general", identity, "primary", artifact_identity)
+
+        class Receive:
+            def __init__(self):
+                self.messages = [
+                    {
+                        "type": "transcribe",
+                        "audio": base64.b64encode(b"audio").decode("ascii"),
+                        "media_type": "audio/wav",
+                        "language": "en",
+                        "output_language": "auto",
+                        "timestamps": False,
+                        "deadline": time.monotonic() + 2,
+                        "request_id": request_id,
+                    },
+                    {"type": "shutdown"},
+                ]
+
+            def recv_bytes(self, _maximum):
+                if not self.messages:
+                    raise EOFError
+                return json.dumps(self.messages.pop(0)).encode()
+
+            def close(self):
+                pass
+
+        class Send:
+            def __init__(self):
+                self.messages = []
+
+            def send_bytes(self, value):
+                self.messages.append(json.loads(value))
+
+            def close(self):
+                pass
+
+        send = Send()
+        with patch("services.stt.supervisor._emit_event") as emit:
+            _child_main(
+                factory,
+                selection,
+                VerifiedArtifact(artifact_identity, Path("fake")),
+                DeviceCapabilities("cpu", "cpu-test"),
+                factory().capabilities(),
+                Receive(),
+                send,
+                threading.Event(),
+                time.monotonic() + 2,
+                65536,
+            )
+        self.assertTrue(
+            any(
+                call.args[0] == "inference_failure"
+                and call.kwargs.get("request_id") == request_id
+                for call in emit.call_args_list
+            )
+        )
 
     def test_cooperative_cancellation_keeps_child_healthy(self):
         runner = supervisor("unresponsive", duration=0.25, grace=0.01)

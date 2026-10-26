@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -35,13 +36,13 @@ func TestTextTransformationRunsThroughPublicGatewayRouteWithFakeProvider(t *test
 		t.Fatal(err)
 	}
 	defer service.Close()
-	h := HandlerWithWorkersAndText(unreadyState{}, config.PublicMaxRequestBytes, nil, nil, service)
+	h := WithRequestID(HandlerWithWorkersAndText(unreadyState{}, config.PublicMaxRequestBytes, nil, nil, service), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	unauthorized := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/v1/text/transformations", strings.NewReader(`{"text":"Synthetic note","model":"local-qwen"}`))
 	r.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(unauthorized, r)
-	if unauthorized.Code != http.StatusUnauthorized || len(generator.calls) != 0 {
+	if unauthorized.Code != http.StatusUnauthorized || unauthorized.Header().Get(RequestIDHeader) == "" || len(generator.calls) != 0 {
 		t.Fatalf("unauthorized status=%d provider calls=%v", unauthorized.Code, generator.calls)
 	}
 
@@ -50,11 +51,25 @@ func TestTextTransformationRunsThroughPublicGatewayRouteWithFakeProvider(t *test
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+token)
 	h.ServeHTTP(response, r)
-	if response.Code != http.StatusOK || len(generator.calls) != 1 || generator.calls[0] != "local-qwen" {
+	if response.Code != http.StatusOK || response.Header().Get(RequestIDHeader) == "" || len(generator.calls) != 1 || generator.calls[0] != "local-qwen" {
 		t.Fatalf("status=%d provider calls=%v body=%s", response.Code, generator.calls, response.Body.String())
 	}
 	if !strings.Contains(response.Body.String(), `"provider":"host-ollama"`) || !strings.Contains(response.Body.String(), `"fallback_occurred":false`) {
 		t.Fatalf("unexpected response metadata: %s", response.Body.String())
+	}
+
+	policyRejected := httptest.NewRecorder()
+	r = httptest.NewRequest(http.MethodPost, "/v1/text/transformations", strings.NewReader(`{"text":"Synthetic note","mode":"written","model":"groq-qwen","local_only":false}`))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Authorization", "Bearer "+token)
+	r.Header.Set(RequestIDHeader, "caller-controlled")
+	h.ServeHTTP(policyRejected, r)
+	var policyError map[string]string
+	if err := json.Unmarshal(policyRejected.Body.Bytes(), &policyError); err != nil {
+		t.Fatal(err)
+	}
+	if policyRejected.Code != http.StatusForbidden || policyError["code"] != "cloud_not_allowed" || policyRejected.Header().Get(RequestIDHeader) == "" || policyRejected.Header().Get(RequestIDHeader) == "caller-controlled" || len(generator.calls) != 1 {
+		t.Fatalf("policy rejection status=%d error=%v request_id=%q provider_calls=%v", policyRejected.Code, policyError, policyRejected.Header().Get(RequestIDHeader), generator.calls)
 	}
 }
 
@@ -134,6 +149,7 @@ func TestRequestSizeLimit(t *testing.T) {
 }
 
 func TestSTTProxyForwardsBoundedRequestAndRequiresConfiguredToken(t *testing.T) {
+	var forwardedRequestID string
 	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/readyz" {
 			w.WriteHeader(http.StatusOK)
@@ -142,17 +158,18 @@ func TestSTTProxyForwardsBoundedRequestAndRequiresConfiguredToken(t *testing.T) 
 		if r.URL.Path != "/internal/v1/transcriptions" || !validSpeechTimeoutHeader(r, 180000) || r.ContentLength <= 0 {
 			t.Errorf("bad forwarded request: %#v", r)
 		}
+		forwardedRequestID = r.Header.Get(RequestIDHeader)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"text":"ok","transcription":"ok","language":"en","detected_language":"en","source_language":"en","output_language":"en","translated":false}`))
 	}))
 	defer worker.Close()
 	proxy := NewSTTProxy(worker.URL, "12345678901234567890123456789012", 180*time.Second)
-	h := HandlerWithSTT(proxy, 1024, proxy)
+	h := WithRequestID(HandlerWithSTT(proxy, 1024, proxy), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	unauthorized := httptest.NewRequest("POST", "/v1/stt/transcriptions", strings.NewReader("payload"))
 	unauthorized.Header.Set("Content-Type", "multipart/form-data; boundary=x")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, unauthorized)
-	if w.Code != http.StatusUnauthorized {
+	if w.Code != http.StatusUnauthorized || w.Header().Get(RequestIDHeader) == "" {
 		t.Fatalf("unauthorized status=%d", w.Code)
 	}
 	r := httptest.NewRequest("POST", "/v1/stt/transcriptions", strings.NewReader("--x--\r\n"))
@@ -163,6 +180,9 @@ func TestSTTProxyForwardsBoundedRequestAndRequiresConfiguredToken(t *testing.T) 
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"transcription":"ok"`) {
 		t.Fatalf("status=%d response=%s", w.Code, w.Body.String())
 	}
+	if forwardedRequestID == "" || forwardedRequestID != w.Header().Get(RequestIDHeader) {
+		t.Fatalf("worker request ID %q does not match public response ID %q", forwardedRequestID, w.Header().Get(RequestIDHeader))
+	}
 	ready := httptest.NewRecorder()
 	h.ServeHTTP(ready, httptest.NewRequest("GET", "/readyz", nil))
 	if ready.Code != http.StatusOK {
@@ -170,7 +190,48 @@ func TestSTTProxyForwardsBoundedRequestAndRequiresConfiguredToken(t *testing.T) 
 	}
 }
 
+func TestSTTWorkerFailurePreservesIDAndAPIErrorInGatewayLogs(t *testing.T) {
+	var workerRequestID string
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/readyz" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		workerRequestID = r.Header.Get(RequestIDHeader)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"code":"resource_exhausted","message":"safe failure"}`))
+	}))
+	defer worker.Close()
+	proxy := NewSTTProxy(worker.URL, "", time.Minute)
+	var logs strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	handler := WithRequestID(HandlerWithSTT(proxy, 1024, proxy), logger)
+	request := httptest.NewRequest(http.MethodPost, "/v1/stt/transcriptions", strings.NewReader("--x--\r\n"))
+	request.Header.Set("Content-Type", "multipart/form-data; boundary=x")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	requestID := response.Header().Get(RequestIDHeader)
+	if response.Code != http.StatusServiceUnavailable || requestID == "" || workerRequestID != requestID {
+		t.Fatalf("status=%d public id=%q worker id=%q", response.Code, requestID, workerRequestID)
+	}
+	var failure map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatal(err)
+		}
+		if event["msg"] == "request failed" {
+			failure = event
+		}
+	}
+	if failure == nil || failure["api_code"] != "resource_exhausted" || failure["request_id"] != requestID || failure["provider"] != "local" {
+		t.Fatalf("Gateway failure log lacks correlation metadata: %#v", failure)
+	}
+}
+
 func TestTTSProxyValidationForwardingAndAudioResponse(t *testing.T) {
+	var forwardedRequestID string
 	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/readyz" {
 			w.WriteHeader(http.StatusOK)
@@ -179,6 +240,7 @@ func TestTTSProxyValidationForwardingAndAudioResponse(t *testing.T) {
 		if r.URL.Path != "/internal/v1/speech" || !validSpeechTimeoutHeader(r, 600000) {
 			t.Errorf("bad forwarded request: path=%s timeout=%s", r.URL.Path, r.Header.Get("X-Request-Timeout-Ms"))
 		}
+		forwardedRequestID = r.Header.Get(RequestIDHeader)
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Errorf("decode request: %v", err)
@@ -216,7 +278,7 @@ func TestTTSProxyValidationForwardingAndAudioResponse(t *testing.T) {
 	defer worker.Close()
 	proxy := NewTTSProxy(worker.URL, "12345678901234567890123456789012", 600*time.Second)
 	stt := NewSTTProxy(worker.URL, "", time.Second)
-	h := HandlerWithWorkers(NewWorkersReadiness(stt, proxy), 1024, stt, proxy)
+	h := WithRequestID(HandlerWithWorkers(NewWorkersReadiness(stt, proxy), 1024, stt, proxy), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	for _, tc := range []struct {
 		name, body string
 		status     int
@@ -247,8 +309,14 @@ func TestTTSProxyValidationForwardingAndAudioResponse(t *testing.T) {
 			if w.Code != tc.status {
 				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 			}
+			if w.Header().Get(RequestIDHeader) == "" {
+				t.Fatal("Gateway response omitted X-Request-ID")
+			}
 			if tc.status == 200 && (w.Header().Get("Content-Type") != "audio/wav" || w.Body.String() != "RIFF-test") {
 				t.Fatalf("unexpected audio response: %#v %q", w.Header(), w.Body.String())
+			}
+			if tc.status == http.StatusOK && w.Header().Get(RequestIDHeader) != forwardedRequestID {
+				t.Fatalf("worker request ID %q does not match public response ID %q", forwardedRequestID, w.Header().Get(RequestIDHeader))
 			}
 			if tc.code != "" {
 				var got map[string]string

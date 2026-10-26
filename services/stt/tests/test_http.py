@@ -1,8 +1,10 @@
 import asyncio
+import io
 import json
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
 from types import SimpleNamespace
 
 from aiohttp import FormData
@@ -56,6 +58,7 @@ class FakeApplication:
         self.block_until_cancel = block_until_cancel
         self.block_warmup = block_warmup
         self.failure = failure
+        self.last_request_id = None
         self.started = threading.Event()
         self.warmup_done = threading.Event()
         self.release_warmup = threading.Event()
@@ -80,6 +83,7 @@ class FakeApplication:
         context=None,
         output_language="auto",
     ):
+        self.last_request_id = getattr(context, "request_id", None)
         lease.finish()
         if self.failure is not None:
             raise self.failure
@@ -141,6 +145,45 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         metrics_body = await metrics.text()
         self.assertIn('speech_stt_requests_total{outcome="success"} 1', metrics_body)
         self.assertNotIn("synthetic transcript", metrics_body)
+
+    async def test_request_id_is_echoed_logged_and_passed_to_application(self):
+        request_id = "123e4567-e89b-42d3-a456-426614174000"
+        logs = io.StringIO()
+        with redirect_stdout(logs):
+            response = await self.client.post(
+                "/internal/v1/transcriptions",
+                data=self.form(),
+                headers={
+                    "X-Request-Timeout-Ms": "4000",
+                    "X-Request-ID": request_id,
+                },
+            )
+            await response.read()
+        self.assertEqual(response.headers.get("X-Request-ID"), request_id)
+        self.assertEqual(self.application.last_request_id, request_id)
+        events = [json.loads(line) for line in logs.getvalue().splitlines()]
+        self.assertEqual(
+            [event["event"] for event in events],
+            ["worker_request_started", "worker_request_completed"],
+        )
+        self.assertTrue(all(event["request_id"] == request_id for event in events))
+        self.assertNotIn("synthetic transcript", logs.getvalue())
+
+    async def test_missing_or_invalid_request_id_is_not_echoed_or_logged(self):
+        for request_id in (None, "spoofed-id"):
+            logs = io.StringIO()
+            headers = {"X-Request-Timeout-Ms": "4000"}
+            if request_id is not None:
+                headers["X-Request-ID"] = request_id
+            with redirect_stdout(logs):
+                response = await self.client.post(
+                    "/internal/v1/transcriptions",
+                    data=self.form(),
+                    headers=headers,
+                )
+                await response.read()
+            self.assertIsNone(response.headers.get("X-Request-ID"))
+            self.assertEqual(logs.getvalue(), "")
 
     async def test_internal_warmup_empty_body_repeat_and_validation(self):
         headers = {"X-Request-Timeout-Ms": "4000"}
@@ -312,17 +355,33 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         )
         self.client = TestClient(TestServer(create_app(self.application)))
         await self.client.start_server()
-        response = await self.client.post(
-            "/internal/v1/transcriptions",
-            data=self.form(),
-            headers={"X-Request-Timeout-Ms": "4000"},
-        )
+        request_id = "123e4567-e89b-42d3-a456-426614174001"
+        logs = io.StringIO()
+        with redirect_stdout(logs):
+            response = await self.client.post(
+                "/internal/v1/transcriptions",
+                data=self.form(),
+                headers={
+                    "X-Request-Timeout-Ms": "4000",
+                    "X-Request-ID": request_id,
+                },
+            )
+            await response.read()
         body = await response.json()
         self.assertEqual(response.status, 503)
         self.assertEqual(body["code"], "resource_exhausted")
         self.assertEqual(body["message"], "service resource limit was exceeded")
         self.assertNotIn("allocator", json.dumps(body))
         self.assertNotIn("secret-value", json.dumps(body))
+        self.assertEqual(response.headers.get("X-Request-ID"), request_id)
+        failed = [
+            event
+            for event in map(json.loads, logs.getvalue().splitlines())
+            if event.get("event") == "worker_request_failed"
+        ]
+        self.assertEqual(failed[0]["api_code"], "resource_exhausted")
+        self.assertEqual(failed[0]["request_id"], request_id)
+        self.assertNotIn("secret-value", logs.getvalue())
 
     async def test_upload_admission_limit_is_enforced_over_http(self):
         await self.client.close()
