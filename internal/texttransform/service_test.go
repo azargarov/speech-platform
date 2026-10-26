@@ -378,6 +378,40 @@ func TestProviderFailureLogCarriesGatewayRequestID(t *testing.T) {
 	}
 }
 
+func TestProviderFailureLogIncludesOnlySanitizedUpstreamMetadata(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	service, err := New(context.Background(), ptr(testConfig()), "", &fakeGenerator{
+		fail: map[string]error{"local-model": &ProviderError{
+			Kind: FailureUnavailable, Suppress: true, UpstreamStatus: 403,
+			UpstreamCode: "access_denied", UpstreamType: "permission_error",
+		}},
+	}, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	request := httptest.NewRequest(http.MethodPost, "/v1/text/transformations", strings.NewReader(`{"text":"private request","mode":"written","local_only":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(transport.WithRequestID(request.Context(), "123e4567-e89b-42d3-a456-426614174000"))
+	response := httptest.NewRecorder()
+	service.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	var failure map[string]any
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if failure["request_id"] != "123e4567-e89b-42d3-a456-426614174000" || failure["upstream_status"] != float64(403) || failure["upstream_error_code"] != "access_denied" || failure["upstream_error_type"] != "permission_error" {
+		t.Fatalf("provider failure log lacks upstream metadata: %#v", failure)
+	}
+	if strings.Contains(logs.String(), "private request") || strings.Contains(logs.String(), "authorization") {
+		t.Fatalf("provider log included sensitive request or auth data: %s", logs.String())
+	}
+}
+
 func TestSelectedCloudProviderWithoutCredentialIsExplicitlyUnavailable(t *testing.T) {
 	t.Setenv("SPEECH_PLATFORM_TEST_CLOUD_KEY", "")
 	cfg := testConfig()
@@ -879,6 +913,65 @@ func TestHTTPGeneratorRejectsIncompleteAndClassifiesProviderFailures(t *testing.
 		if !errors.As(err, &pe) || pe.Kind != tc.kind || pe.Suppress != tc.suppress {
 			t.Errorf("status=%d error=%#v", tc.status, err)
 		}
+	}
+}
+
+func TestHTTPGeneratorRetainsUpstreamHTTPMetadataWithoutChangingClassification(t *testing.T) {
+	cases := []struct {
+		status   int
+		code     string
+		typeName string
+		kind     FailureKind
+		suppress bool
+	}{
+		{401, "invalid_api_key", "authentication_error", FailureUnavailable, true},
+		{403, "access_denied", "permission_error", FailureUnavailable, true},
+		{429, "provider_rate_limit", "rate_limit_error", FailureUnavailable, true},
+		{400, "model_not_found", "invalid_request_error", FailureUnavailable, false},
+		{404, "model_unavailable", "invalid_request_error", FailureUnavailable, false},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("http_%d", tc.status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = fmt.Fprintf(w, `{"error":{"code":%q,"type":%q,"message":"must not be retained"}}`, tc.code, tc.typeName)
+			}))
+			defer server.Close()
+			cfg := testConfig()
+			p := cfg.Providers[1]
+			p.Endpoint = server.URL
+			_, err := (HTTPGenerator{}).Generate(context.Background(), p, cfg.Models[1], "", testPrompt, "x", "{}")
+			var pe *ProviderError
+			if !errors.As(err, &pe) {
+				t.Fatalf("error=%v, want ProviderError", err)
+			}
+			if pe.Kind != tc.kind || pe.Suppress != tc.suppress {
+				t.Errorf("classification=(%s,%t), want (%s,%t)", pe.Kind, pe.Suppress, tc.kind, tc.suppress)
+			}
+			if pe.UpstreamStatus != tc.status || pe.UpstreamCode != tc.code || pe.UpstreamType != tc.typeName {
+				t.Errorf("upstream metadata=(%d,%q,%q), want (%d,%q,%q)", pe.UpstreamStatus, pe.UpstreamCode, pe.UpstreamType, tc.status, tc.code, tc.typeName)
+			}
+			if strings.Contains(pe.Error(), "must not be retained") {
+				t.Fatal("provider error exposed raw provider message")
+			}
+		})
+	}
+}
+
+func TestHTTPGeneratorDropsUnsafeProviderErrorTokens(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"code":"access denied: token=secret","type":"permission_error"}}`))
+	}))
+	defer server.Close()
+	cfg := testConfig()
+	p := cfg.Providers[1]
+	p.Endpoint = server.URL
+	_, err := (HTTPGenerator{}).Generate(context.Background(), p, cfg.Models[1], "", testPrompt, "x", "{}")
+	var pe *ProviderError
+	if !errors.As(err, &pe) || pe.UpstreamCode != "" || pe.UpstreamType != "permission_error" {
+		t.Fatalf("unsafe provider metadata was not dropped: %#v", pe)
 	}
 }
 

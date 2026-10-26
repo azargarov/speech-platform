@@ -115,6 +115,70 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(payload["target_language"], "none")
         self.assertNotIn("private synthetic words", str(seen))
 
+    def test_successful_transform_prints_complete_output_and_preserves_report_evidence(
+        self,
+    ):
+        transformed = "Complete transformed output.\nSecond line."
+        report_path = self.root / "private" / "transform-report.json"
+        evidence_path = self.root / "private" / "transform-evidence.json"
+        response = {
+            "original_text": "source",
+            "transformed_text": transformed,
+            "options": {
+                "mode": "written",
+                "format": "normal",
+                "target_language": "none",
+                "model": None,
+                "local_only": True,
+            },
+            "model": "local-qwen",
+            "provider": "host-ollama",
+            "generated": True,
+            "fallback_occurred": False,
+        }
+        stdout = io.StringIO()
+        with (
+            patch.object(qualify, "ROOT", self.root),
+            patch.object(qualify, "load_env", return_value=self.env),
+            patch.object(
+                qualify, "urlopen", return_value=Response(json.dumps(response).encode())
+            ),
+            contextlib.redirect_stdout(stdout),
+        ):
+            status = qualify.main(
+                [
+                    "transform",
+                    "--text",
+                    "source",
+                    "--report",
+                    str(report_path),
+                    "--evidence",
+                    str(evidence_path),
+                ]
+            )
+        self.assertEqual(status, 0)
+        self.assertIn(transformed, stdout.getvalue())
+        self.assertEqual(json.loads(report_path.read_text())["outcome"], "pass")
+        self.assertEqual(
+            json.loads(evidence_path.read_text())["transformed_text"], transformed
+        )
+
+    def test_failed_transform_does_not_print_transformation_output(self):
+        stdout = io.StringIO()
+
+        def reject(request, timeout):
+            raise HTTPError(request.full_url, 503, "Unavailable", {}, io.BytesIO(b"{}"))
+
+        with (
+            patch.object(qualify, "ROOT", self.root),
+            patch.object(qualify, "load_env", return_value=self.env),
+            patch.object(qualify, "urlopen", side_effect=reject),
+            contextlib.redirect_stdout(stdout),
+        ):
+            status = qualify.main(["transform", "--text", "source"])
+        self.assertEqual(status, qualify.EXIT_REQUEST)
+        self.assertNotIn("transformed", stdout.getvalue())
+
     def test_explicit_local_model_is_sent_unchanged(self):
         alias = "synthetic-local-alias"
         body = {

@@ -17,6 +17,7 @@ import (
 )
 
 var ollamaModelMissing = regexp.MustCompile(`^model .+ not found$`)
+var providerErrorToken = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
 
 type HTTPGenerator struct {
 	Client           *http.Client
@@ -198,14 +199,18 @@ func classifyHTTP(protocol string, r *http.Response, b []byte) error {
 	status := r.StatusCode
 	var structured struct {
 		Error struct {
-			Code    string `json:"code"`
-			Type    string `json:"type"`
-			Message string `json:"message"`
+			Code string `json:"code"`
+			Type string `json:"type"`
 		} `json:"error"`
 	}
 	_ = json.Unmarshal(b, &structured)
 	errorCode := strings.ToLower(strings.TrimSpace(structured.Error.Code))
 	errorType := strings.ToLower(strings.TrimSpace(structured.Error.Type))
+	providerErr := &ProviderError{
+		UpstreamStatus: status,
+		UpstreamCode:   sanitizeProviderErrorToken(errorCode),
+		UpstreamType:   sanitizeProviderErrorToken(errorType),
+	}
 	ollamaMessage := ""
 	if protocol == "ollama" {
 		var e struct {
@@ -216,10 +221,13 @@ func classifyHTTP(protocol string, r *http.Response, b []byte) error {
 	}
 	modelMissing := (errorCode == "model_not_found" || errorCode == "model_unavailable") || protocol == "ollama" && ollamaModelMissing.MatchString(ollamaMessage)
 	if (status == 404 || status == 400) && modelMissing {
-		return &ProviderError{Kind: FailureUnavailable}
+		providerErr.Kind = FailureUnavailable
+		return providerErr
 	}
 	if status == 401 || status == 403 {
-		return &ProviderError{Kind: FailureUnavailable, Suppress: true}
+		providerErr.Kind = FailureUnavailable
+		providerErr.Suppress = true
+		return providerErr
 	}
 	if status == 429 {
 		scope := strings.ToLower(r.Header.Get("x-ratelimit-scope"))
@@ -228,16 +236,32 @@ func classifyHTTP(protocol string, r *http.Response, b []byte) error {
 		if broad {
 			modelOnly = false
 		}
-		return &ProviderError{Kind: FailureUnavailable, Suppress: !modelOnly}
+		providerErr.Kind = FailureUnavailable
+		providerErr.Suppress = !modelOnly
+		return providerErr
 	}
 	if status == 400 || status == 422 {
-		return &ProviderError{Kind: FailureRejected, Suppress: true}
+		providerErr.Kind = FailureRejected
+		providerErr.Suppress = true
+		return providerErr
 	}
 	if status == 404 {
-		return &ProviderError{Kind: FailureProtocol, Suppress: true}
+		providerErr.Kind = FailureProtocol
+		providerErr.Suppress = true
+		return providerErr
 	}
 	if status >= 500 {
-		return &ProviderError{Kind: FailureTransport}
+		providerErr.Kind = FailureTransport
+		return providerErr
 	}
-	return &ProviderError{Kind: FailureProtocol, Suppress: true}
+	providerErr.Kind = FailureProtocol
+	providerErr.Suppress = true
+	return providerErr
+}
+
+func sanitizeProviderErrorToken(value string) string {
+	if len(value) > 64 || !providerErrorToken.MatchString(value) {
+		return ""
+	}
+	return value
 }

@@ -927,6 +927,8 @@ def _execute(args):
                 json.dumps(evidence_content, ensure_ascii=False).encode(),
                 private=True,
             )
+        if op == "transform" and report["outcome"] == "pass":
+            print(transformed, flush=True)
     except QualificationError as exc:
         if exc.status is not None:
             report["http"]["status"] = exc.status

@@ -54,9 +54,12 @@ const (
 )
 
 type ProviderError struct {
-	Kind     FailureKind
-	Suppress bool
-	Err      error
+	Kind           FailureKind
+	Suppress       bool
+	UpstreamStatus int
+	UpstreamCode   string
+	UpstreamType   string
+	Err            error
 }
 
 func (e *ProviderError) Error() string { return string(e.Kind) }
@@ -574,6 +577,15 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.As(e, &pe) {
 			if s.logger != nil {
 				attrs := []any{"provider", p.ID, "model", m.ID, "attempt", attemptIndex, "category", string(pe.Kind), "suppressed", pe.Suppress, "elapsed_ms", time.Since(attemptStart).Milliseconds()}
+				if pe.UpstreamStatus != 0 {
+					attrs = append(attrs, "upstream_status", pe.UpstreamStatus)
+				}
+				if pe.UpstreamCode != "" {
+					attrs = append(attrs, "upstream_error_code", pe.UpstreamCode)
+				}
+				if pe.UpstreamType != "" {
+					attrs = append(attrs, "upstream_error_type", pe.UpstreamType)
+				}
 				if requestID := transport.RequestID(ctx); requestID != "" {
 					attrs = append(attrs, "request_id", requestID)
 				}

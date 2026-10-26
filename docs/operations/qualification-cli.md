@@ -71,6 +71,14 @@ access Docker.
 
 STT defaults to the local provider. Groq audio requires both `--provider groq` and explicit `--allow-cloud-audio`. Text transformation defaults to `local_only=true`; `--allow-cloud` explicitly permits configured cloud routing but cannot override Gateway policy. Translation is text transformation with `--target-language`. Raw mode requires normal formatting. Use `--text-file` or stdin to avoid placing sensitive input in shell history. `--timeout` is a client wait bound, not a server processing duration.
 
+On a successful single `transform` request, the CLI prints the complete
+`transformed_text` to stdout before its qualification summary. Treat terminal
+output and any captured stdout as sensitive transformation output. `--report`
+and `--evidence` retain their existing structured formats; ordinary Gateway
+logs do not include generated text. Provider failure logs include the upstream
+HTTP status and only bounded, sanitized error code/type tokens when supplied;
+provider response bodies and raw error messages are not logged.
+
 STT accepts the optional `--model` alias for local-provider selection. Groq STT
 uses the configured server model and rejects explicit model values, so the CLI
 rejects `--provider groq --model ...` before sending a request.
