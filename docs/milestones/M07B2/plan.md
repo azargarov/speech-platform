@@ -21,6 +21,10 @@ target-language settings. Save the ten text outputs per case under the ignored
   clarify semantic preservation and mode distinctions; it does not create a
   second prompt framework. This stage does not score linguistic quality or
   authorize live inference.
+- The authorized M07 qualification follow-up adds expected API-error checks
+  and offline OpenAPI enum drift tests to the existing single-request CLI.
+  It does not change Gateway contracts, provider routing or batch local-only
+  safeguards.
 
 ## Acceptance checks
 
