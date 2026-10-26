@@ -152,6 +152,8 @@ class ComposeInvocationTests(unittest.TestCase):
                 "--no-build",
                 "--pull",
                 "never",
+                "--force-recreate",
+                "--no-deps",
                 "--wait",
                 "--wait-timeout",
                 "240",
@@ -163,6 +165,8 @@ class ComposeInvocationTests(unittest.TestCase):
                 "--no-build",
                 "--pull",
                 "never",
+                "--force-recreate",
+                "--no-deps",
                 "--wait",
                 "--wait-timeout",
                 "240",
@@ -180,6 +184,8 @@ class ComposeInvocationTests(unittest.TestCase):
                 "--no-build",
                 "--pull",
                 "never",
+                "--force-recreate",
+                "--no-deps",
                 "--wait",
                 "--wait-timeout",
                 "240",
@@ -190,6 +196,8 @@ class ComposeInvocationTests(unittest.TestCase):
                 "--no-build",
                 "--pull",
                 "never",
+                "--force-recreate",
+                "--no-deps",
                 "--wait",
                 "--wait-timeout",
                 "240",
@@ -390,6 +398,38 @@ class ImageSafetyTests(unittest.TestCase):
             deploy_images.retain(("gateway", "stt"))
         inspect.assert_called_once_with(("gateway", "stt"))
 
+    def test_running_rejects_old_image_from_rebuilt_revision_tag(self):
+        revision = "a" * 40
+        old_container = {
+            "Image": "sha256:" + "b" * 64,
+            "State": {"Status": "running"},
+        }
+        with (
+            patch.object(
+                deploy_images,
+                "built_images",
+                return_value={
+                    "gateway": (
+                        "speech-platform-gateway:" + revision,
+                        "sha256:" + "c" * 64,
+                    )
+                },
+            ),
+            patch.object(
+                deploy_images,
+                "compose_run",
+                return_value=SimpleNamespace(stdout="gateway-container\n"),
+            ),
+            patch.object(
+                deploy_images, "inspect_container", return_value=old_container
+            ),
+            patch.object(deploy_images, "check_owner"),
+            self.assertRaisesRegex(
+                deploy_images.DeployError, "differs from the verified build"
+            ),
+        ):
+            deploy_images.running(("gateway",))
+
     def test_component_selection_validation(self):
         self.assertEqual(
             deploy_images.parse_components("gateway,stt"), ("gateway", "stt")
@@ -541,8 +581,8 @@ class ImageSafetyTests(unittest.TestCase):
                     "scripts/compose.py build gateway stt tts",
                     "scripts/deploy_images.py verify --components gateway,stt,tts",
                     "scripts/deploy_images.py cuda --components gateway,stt,tts",
-                    "scripts/compose.py up -d --no-build --pull never --wait --wait-timeout 240 stt tts",
-                    "scripts/compose.py up -d --no-build --pull never --wait --wait-timeout 240 gateway",
+                    "scripts/compose.py up -d --no-build --pull never --force-recreate --no-deps --wait --wait-timeout 240 stt tts",
+                    "scripts/compose.py up -d --no-build --pull never --force-recreate --no-deps --wait --wait-timeout 240 gateway",
                     "scripts/deploy_images.py running --components gateway,stt,tts",
                     "scripts/compose.py exec -T gateway /healthcheck http://127.0.0.1:8080/readyz",
                     'scripts/compose.py exec -T stt python -c import urllib.request; urllib.request.urlopen("http://127.0.0.1:8081/readyz", timeout=3)',
@@ -583,7 +623,7 @@ class ImageSafetyTests(unittest.TestCase):
             commands = log.read_text().splitlines()
             self.assertIn("scripts/compose.py build gateway", commands)
             self.assertIn(
-                "scripts/compose.py up -d --no-build --pull never --wait --wait-timeout 240 gateway",
+                "scripts/compose.py up -d --no-build --pull never --force-recreate --no-deps --wait --wait-timeout 240 gateway",
                 commands,
             )
             self.assertFalse(
@@ -641,18 +681,62 @@ class ImageSafetyTests(unittest.TestCase):
                     "scripts/compose.py build gateway " + worker, compose_commands
                 )
                 self.assertIn(
-                    "scripts/compose.py up -d --no-build --pull never --wait --wait-timeout 240 "
+                    "scripts/compose.py up -d --no-build --pull never --force-recreate --no-deps --wait --wait-timeout 240 "
                     + worker,
                     compose_commands,
                 )
                 self.assertIn(
-                    "scripts/compose.py up -d --no-build --pull never --wait --wait-timeout 240 gateway",
+                    "scripts/compose.py up -d --no-build --pull never --force-recreate --no-deps --wait --wait-timeout 240 gateway",
                     compose_commands,
                 )
                 unselected = "tts" if worker == "stt" else "stt"
                 self.assertFalse(
                     any(unselected in line.split() for line in compose_commands)
                 )
+
+    def test_install_recreates_selected_services_after_same_revision_tag_rebuild(self):
+        """A rebuilt revision tag must replace old containers with that tag."""
+        makefile = Path(__file__).resolve().parents[1] / "Makefile"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            log = root / "commands.log"
+            fake_python = bin_dir / "python"
+            fake_python.write_text('#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$LOG_FILE"\n')
+            fake_python.chmod(0o755)
+            env = os.environ | {
+                "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                "LOG_FILE": str(log),
+            }
+            result = subprocess.run(
+                [
+                    "make",
+                    "-f",
+                    str(makefile),
+                    "install",
+                    "COMPONENTS=gateway,stt",
+                    "PYTHON=" + str(fake_python),
+                ],
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            activation = [
+                line
+                for line in log.read_text().splitlines()
+                if line.startswith("scripts/compose.py up ")
+            ]
+            self.assertEqual(
+                activation,
+                [
+                    "scripts/compose.py up -d --no-build --pull never --force-recreate --no-deps --wait --wait-timeout 240 stt",
+                    "scripts/compose.py up -d --no-build --pull never --force-recreate --no-deps --wait --wait-timeout 240 gateway",
+                ],
+            )
 
 
 if __name__ == "__main__":

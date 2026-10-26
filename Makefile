@@ -145,8 +145,8 @@ install:
 	$(PYTHON) scripts/compose.py build $(DEPLOY_SELECTION); \
 	$(PYTHON) scripts/deploy_images.py verify --components "$(COMPONENTS)"; \
 	$(PYTHON) scripts/deploy_images.py cuda --components "$(COMPONENTS)"; \
-	$(if $(filter stt tts,$(DEPLOY_SELECTION)),$(PYTHON) scripts/compose.py up -d --no-build --pull never --wait --wait-timeout 240 $(filter stt tts,$(DEPLOY_SELECTION));,) \
-	$(PYTHON) scripts/compose.py up -d --no-build --pull never --wait --wait-timeout 240 gateway; \
+	$(if $(filter stt tts,$(DEPLOY_SELECTION)),$(PYTHON) scripts/compose.py up -d --no-build --pull never --force-recreate --no-deps --wait --wait-timeout 240 $(filter stt tts,$(DEPLOY_SELECTION));,) \
+	$(PYTHON) scripts/compose.py up -d --no-build --pull never --force-recreate --no-deps --wait --wait-timeout 240 gateway; \
 	$(PYTHON) scripts/deploy_images.py running --components "$(COMPONENTS)"; \
 	$(PYTHON) scripts/compose.py exec -T gateway /healthcheck http://127.0.0.1:8080/readyz; \
 	$(if $(filter stt,$(DEPLOY_SELECTION)),$(PYTHON) scripts/compose.py exec -T stt python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8081/readyz", timeout=3)';,) \

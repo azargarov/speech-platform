@@ -35,6 +35,8 @@ def validate_args(args):
         "--no-build",
         "--pull",
         "never",
+        "--force-recreate",
+        "--no-deps",
         "--wait",
         "--wait-timeout",
         "240",

@@ -134,8 +134,11 @@ preflight, fixed Compose ownership, and retains selected container image IDs und
 revision-specific local rollback tags. It builds only selected services through
 Compose, checks source/role/platform labels, and runs network-disabled CUDA
 visibility probes only for selected workers. Workers start first when selected;
-Gateway then starts with `compose up --no-build --pull never`. Bounded readiness
-requests check Gateway and only selected workers. Installation
+Gateway then starts. Each selected service uses Compose
+`up --force-recreate --no-deps --no-build --pull never`, so rebuilding an image
+under the same revision tag replaces its old container without starting or
+recreating unselected services. Bounded readiness requests check Gateway and
+only selected workers. Installation
 never rotates `.env`, downloads models or makes cloud inference requests.
 `GATEWAY_EXPECTED_IMAGE_ID` and `GATEWAY_EXPECTED_SOURCE_REVISION` are obsolete;
 preflight rejects them with a migration message. Remove those reviewed lines from
