@@ -60,6 +60,20 @@ attached automatically by the CLI.
 | `GET /readyz` | `scripts.qualify ready` | Unauthenticated readiness check; 503 code and status are preserved. |
 | `GET /metrics` | `scripts.qualify metrics` | Unauthenticated Prometheus endpoint. CLI reports metric names/count, not metric values. It is not a versioned public API operation. |
 
+## Optional provider diagnostics
+
+The CLI probes capabilities by selecting the provider on its existing inference
+route. STT Groq probes require both `--provider groq` and
+`--allow-cloud-audio`; text probes require an explicit cloud alias,
+`--allow-cloud`, and Gateway policy permission. Use an operator-authorized
+input. `cloud_not_allowed` identifies a policy denial, `provider_unavailable`
+identifies an unavailable selected provider, and success records provider
+provenance. The remote API intentionally does not reveal whether an unavailable
+provider is disabled or enabled without credentials; local config and the
+Gateway's safe startup warning distinguish those states. These probes can
+perform inference if the capability is available, so `--expect-error` is only
+appropriate for a test setup where that possibility is authorized.
+
 The root catch-all and unsupported HTTP methods are not separate capability
 commands. They can be exercised by targeting a non-route with a deliberately
 invalid URL only if a future explicit diagnostic probe is added; the CLI does

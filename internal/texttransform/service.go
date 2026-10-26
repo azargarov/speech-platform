@@ -496,7 +496,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 503, "text_transform_unavailable")
 		return
 	}
-	var invoked, invalid, rejected, protocol, priorFailure bool
+	var invoked, invalid, rejected, protocol, priorFailure, missingCredential bool
 	attemptIndex := 0
 	suppressed := map[string]bool{}
 	totalBudget := -1
@@ -521,6 +521,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		key := s.creds[p.ID]
 		if p.APIKeyEnv != "" && key == "" {
+			missingCredential = true
 			suppressed[p.ID] = true
 			continue
 		}
@@ -601,6 +602,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !invoked {
 		if totalBudget >= 0 {
+			if missingCredential {
+				writeErr(w, 503, "provider_unavailable")
+				return
+			}
 			writeErr(w, 503, "text_transform_unavailable")
 		} else {
 			writeErr(w, 413, "context_limit_exceeded")
@@ -666,7 +671,7 @@ func oneOf(v string, choices ...string) bool {
 	return false
 }
 func writeErr(w http.ResponseWriter, code int, kind string) {
-	msg := map[string]string{"unauthorized": "valid bearer token required", "unsupported_media_type": "application/json is required", "text_transform_unavailable": "text transformation is unavailable", "no_eligible_model": "no eligible model is configured", "invalid_request": "request contains invalid or unsupported fields", "invalid_options": "request options are invalid", "request_too_large": "request size limit exceeded", "context_limit_exceeded": "input exceeds configured context limits", "unknown_model": "model is not configured", "model_disabled": "model is disabled", "cloud_not_allowed": "cloud inference is not permitted", "overloaded": "text transformation capacity is full", "transformation_refused": "provider refused the request", "deadline_exceeded": "text transformation deadline exceeded", "provider_request_rejected": "provider rejected the request", "provider_protocol_error": "provider protocol failed", "invalid_provider_response": "provider returned an invalid response", "text_transform_failed": "text transformation failed"}[kind]
+	msg := map[string]string{"unauthorized": "valid bearer token required", "unsupported_media_type": "application/json is required", "text_transform_unavailable": "text transformation is unavailable", "provider_unavailable": "selected text provider is unavailable", "no_eligible_model": "no eligible model is configured", "invalid_request": "request contains invalid or unsupported fields", "invalid_options": "request options are invalid", "request_too_large": "request size limit exceeded", "context_limit_exceeded": "input exceeds configured context limits", "unknown_model": "model is not configured", "model_disabled": "model is disabled", "cloud_not_allowed": "cloud inference is not permitted", "overloaded": "text transformation capacity is full", "transformation_refused": "provider refused the request", "deadline_exceeded": "text transformation deadline exceeded", "provider_request_rejected": "provider rejected the request", "provider_protocol_error": "provider protocol failed", "invalid_provider_response": "provider returned an invalid response", "text_transform_failed": "text transformation failed"}[kind]
 	if msg == "" {
 		msg = "request failed"
 	}

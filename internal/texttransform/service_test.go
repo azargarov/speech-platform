@@ -378,6 +378,32 @@ func TestProviderFailureLogCarriesGatewayRequestID(t *testing.T) {
 	}
 }
 
+func TestSelectedCloudProviderWithoutCredentialIsExplicitlyUnavailable(t *testing.T) {
+	t.Setenv("SPEECH_PLATFORM_TEST_CLOUD_KEY", "")
+	cfg := testConfig()
+	cfg.Providers[1].APIKeyEnv = "SPEECH_PLATFORM_TEST_CLOUD_KEY"
+	generator := &fakeGenerator{output: "must not be generated"}
+	service, err := New(context.Background(), &cfg, "", generator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	status, body := call(t, service, `{"text":"synthetic","mode":"written","model":"cloud-model","local_only":false}`, false)
+	if status != http.StatusServiceUnavailable || !strings.Contains(string(body), `"code":"provider_unavailable"`) {
+		t.Fatalf("status=%d body=%s, want explicit provider_unavailable", status, body)
+	}
+	if len(generator.calls) != 0 {
+		t.Fatalf("missing-credential provider was called: %v", generator.calls)
+	}
+	status, body = call(t, service, `{"text":"synthetic","mode":"written","model":"local-model","local_only":true}`, false)
+	if status != http.StatusOK || !strings.Contains(string(body), `"provider":"local"`) {
+		t.Fatalf("local request status=%d body=%s, want successful local provider response", status, body)
+	}
+	if !reflect.DeepEqual(generator.calls, []string{"local-model"}) {
+		t.Fatalf("local request used unexpected providers: %v", generator.calls)
+	}
+}
+
 func TestRawPassthroughIsExactAndSkipsGenerator(t *testing.T) {
 	g := &fakeGenerator{}
 	s, _ := New(context.Background(), ptr(testConfig()), "", g)

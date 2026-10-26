@@ -366,6 +366,22 @@ class PreflightTests(unittest.TestCase):
         for group in preflight.GROUPS:
             self.assertIn(group + ":", output.getvalue())
 
+    def test_missing_enabled_optional_cloud_credentials_warn_without_blocking(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(temp)
+            config_path = root / "private/deployment/gateway.yaml"
+            config_path.write_text(
+                "groq_stt:\n  enabled: true\n  api_key_env: GROQ_STT_API_KEY\n"
+            )
+            report = preflight.run_checks(root=root, service="gateway")
+        self.assertFalse(report.failed)
+        entry = next(
+            item
+            for item in report.entries
+            if item[1] == "WARN" and "credentials" in item[2]
+        )
+        self.assertIn("unavailable", entry[3])
+
     def test_insufficient_checkout_and_docker_storage_remain_blocking(self):
         with tempfile.TemporaryDirectory() as temp:
             root, _ = self.fixture(temp)

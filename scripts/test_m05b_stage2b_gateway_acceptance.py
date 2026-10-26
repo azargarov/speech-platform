@@ -607,7 +607,7 @@ class GatewayAcceptanceTest(unittest.TestCase):
             self.assertEqual(ready_status, 200)
             self.assertEqual(ready["status"], "ready")
             self.assertEqual(status, 503)
-            self.assertEqual(body["code"], "text_transform_unavailable")
+            self.assertEqual(body["code"], "provider_unavailable")
             self.assertEqual(len(self.cloud.state.calls), 0)
         self.record(
             "missing_cloud_credential_speech_readiness",

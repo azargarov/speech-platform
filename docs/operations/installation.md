@@ -57,8 +57,10 @@ make status PYTHON=.venv/bin/python
 cryptographically secure API token, and creates `private/`, `private/audio/`
 and `private/deployment/` with mode `0700`. It does not replace existing
 configuration. The generated `.env` is mode `0600`. Local-only operation needs
-no Groq or cloud-text credentials; those remain optional and are configured
-only when the corresponding provider is intentionally enabled. For custom
+no Groq or cloud-text credentials. Cloud credentials remain optional even when
+a provider is enabled: preflight warns about missing or invalid optional
+credentials, Gateway starts, and a request explicitly selecting that provider
+returns `provider_unavailable`. For custom
 Gateway configuration or provider credentials, use files under `private/` and
 review the optional settings in `.env.example`.
 
@@ -110,6 +112,16 @@ is ready. TTS readiness becomes unavailable for a known permanent artifact or
 runtime failure, and recovery is retried after repairing the cause and issuing
 new work. Readiness probes do not load models.
 
+STT and TTS are currently mandatory deployment components: both worker URLs
+are required by Gateway configuration, both Compose services are part of the
+default install, and Gateway `/readyz` requires both workers. To support a
+disabled STT or TTS capability, the minimum change is to add an explicit
+validated enable flag and optional worker URL in Gateway configuration, make
+the corresponding Compose service/profile and worker-specific preflight checks
+conditional, and have Gateway readiness require only enabled workers. Request
+routes would need to return a stable unavailable/disabled error when their
+worker is disabled. This work does not change their lifecycle.
+
 Gateway speech queues are independent and FIFO: STT has one active local
 Faster-Whisper request plus three waiting requests; TTS has one active plus one
 waiting request. Waiting counts against each request's deadline, and queued STT
@@ -151,7 +163,9 @@ or add unrelated keys. That optional file is passed only to Gateway. Preflight
 validates it without contacting paid provider inference endpoints. Public errors
 and reports never include credential values. Groq STT credentials are checked
 independently when `groq_stt.enabled` is true; they do not depend on text
-`allow_cloud`. Cloud audio still requires per-request `X-Allow-Cloud-Audio: true`.
+`allow_cloud`. Missing Groq credentials leave that capability unavailable and
+do not affect local STT/TTS. Cloud audio still requires per-request
+`X-Allow-Cloud-Audio: true`.
 
 ### Updating the text transformation prompt
 

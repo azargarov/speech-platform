@@ -37,13 +37,6 @@ func run() error {
 		return fmt.Errorf("configuration: %w", err)
 	}
 	var groqSTT *gateway.GroqSTTAdapter
-	if c.GroqSTT.Enabled {
-		apiKey := os.Getenv(c.GroqSTT.APIKeyEnv)
-		groqSTT, e = gateway.NewGroqSTTAdapter(apiKey, c.GroqSTT.Model, duration(c.STTTimeout))
-		if e != nil {
-			return fmt.Errorf("configuration: %w", e)
-		}
-	}
 	if *check {
 		return nil
 	}
@@ -55,6 +48,15 @@ func run() error {
 		return nil
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if c.GroqSTT.Enabled {
+		apiKey := os.Getenv(c.GroqSTT.APIKeyEnv)
+		groqSTT, e = gateway.NewGroqSTTAdapter(apiKey, c.GroqSTT.Model, duration(c.STTTimeout))
+		if e != nil {
+			logger.Warn("optional STT provider unavailable", "provider", "groq", "reason", "credential_missing_or_invalid")
+		} else {
+			logger.Info("optional STT provider configured", "provider", "groq")
+		}
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	stt := gateway.NewSTTProxy(c.STTURL, c.APIToken, duration(c.STTTimeout))

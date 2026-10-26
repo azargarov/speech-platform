@@ -54,9 +54,12 @@ Ollama is externally owned. Inspect its existing private network/alias and query
 only version/tags; fail when configured local transformation cannot work. Never
 attach/recreate/upgrade shared Ollama in the product installer. Probe DNS from an
 existing Gateway when available; otherwise report the gap and verify after install.
-Cloud-disabled installations require no credentials. Enabled cloud providers use
-HTTPS plus a private mode-0600 env file, validated without paid API calls. Provider
-routing and cloud authorization are unchanged.
+Cloud-disabled installations require no credentials. Enabled cloud providers
+use HTTPS plus a private mode-0600 env file; preflight validates optional
+credentials when present without paid API calls and warns when a capability
+cannot use them. Mandatory local prerequisites remain blocking. See the later
+[optional Groq STT decision](0024-optional-groq-stt.md) for provider availability
+and routing behavior. Provider authorization requirements are unchanged.
 
 Build from clean committed source; validate image platform, source revision and
 role before applying Compose. Preserve the special immutable Gateway no-build

@@ -120,17 +120,31 @@ CLI choices.
 
 The Gateway only receives cloud credentials from the private environment file
 selected by `GATEWAY_SECRETS_FILE` (default `private/cloud.env`). Text models
-require the configured `GROQ_API_KEY`; Groq STT separately requires
-`GROQ_STT_API_KEY` when `groq_stt.enabled` is true. The credential file must be
-under `private/`, mode `0600`, and contain only the key names required by the
-enabled cloud features. `make preflight PYTHON=.venv/bin/python` validates the
-active Gateway policy and credentials without printing values.
+use their configured `api_key_env`; Groq STT separately uses `GROQ_STT_API_KEY`
+when `groq_stt.enabled` is true. The credential file must be under `private/`,
+mode `0600`, and contain only the key names required by enabled cloud features.
+`make preflight PYTHON=.venv/bin/python` validates credentials when present,
+reports missing or invalid optional credentials as a warning, and never prints
+values. Gateway startup also warns when enabled cloud credentials are
+unavailable. Local routes and readiness remain usable.
 
 Text-cloud routing also requires `text_transform.selection.allow_cloud: true`.
 This is a Gateway startup setting; prompt SIGHUP reload does not change it.
 Even with that setting enabled, ordinary qualification remains local-only.
 Select a cloud alias explicitly and pass `--allow-cloud` for text, or select
 `--provider groq --allow-cloud-audio` for STT. Both controls are per request.
+To diagnose one capability, run its existing single-request command with an
+operator-approved synthetic or otherwise authorized input. For example, with
+an existing operator-authorized audio file,
+`python -m scripts.qualify stt --audio private/authorized-sample.wav --provider groq --allow-cloud-audio --expect-error provider_unavailable`
+checks that Groq STT is unavailable without accepting a different provider;
+omit `--expect-error` only for an authorized inference qualification. For text,
+select a cloud model with `--allow-cloud`; `cloud_not_allowed` identifies
+Gateway policy denial, while `provider_unavailable` identifies a selected
+provider lacking usable credentials. A successful response records provider
+provenance. A remote Gateway does not disclose whether an unavailable provider
+is disabled or enabled without credentials; inspect its local config and safe
+startup warning to distinguish those states.
 The default model selection policy should remain local-first/local-only unless
 an operator intentionally changes it. Groq TTS is not provided. The current
 batch STT/text tool and TTS → STT round-trip tool remain local-only. The

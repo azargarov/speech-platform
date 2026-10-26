@@ -237,7 +237,7 @@ def _safe_headers(headers):
 def _troubleshooting(classification, api_code=None):
     code_hints = {
         "resource_exhausted": "The selected worker reported resource exhaustion; check available GPU/worker capacity and service logs. Do not retry automatically.",
-        "provider_unavailable": "The selected provider is disabled or unavailable in this Gateway configuration; verify provider enablement and required credentials.",
+        "provider_unavailable": "The selected provider is disabled or unavailable. Check its enablement and private credential configuration; the Gateway did not substitute another provider.",
         "cloud_not_allowed": "Gateway cloud text policy denied this request; no CLI consent flag can override server policy.",
         "cloud_audio_not_authorized": "Groq STT requires explicit X-Allow-Cloud-Audio consent and an enabled provider.",
         "deadline_exceeded": "The Gateway deadline expired; inspect service readiness and configured request deadlines before retrying.",

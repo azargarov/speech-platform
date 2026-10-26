@@ -21,9 +21,11 @@ URLs, or caller-selected provider model IDs.
 ## Decision
 
 - Groq STT is disabled by default. When enabled, `GROQ_STT_API_KEY` (or the
-  configured environment-variable name) is required at Gateway startup and is
-  provided only through the private Gateway secrets file. It is separate from
-  `GROQ_API_KEY` used for text transformation.
+  configured environment-variable name) is read from the Gateway environment.
+  A missing or malformed key marks Groq STT unavailable and emits a
+  provider-specific warning; it does not prevent Gateway startup or local STT.
+  Deployment preflight reports optional cloud credential problems as warnings.
+  The key is separate from `GROQ_API_KEY` used for text transformation.
 - Cloud audio requires both the operator enabling the provider and the request
   setting `X-Allow-Cloud-Audio: true`. Text `allow_cloud` does not authorize
   audio. Omitted provider selection remains local-only without this consent.
@@ -68,6 +70,13 @@ host workloads. Real Groq behavior, costs, account retention settings and
 combined production resource capacity are not established by offline tests.
 
 ## Verification
+
+The original startup requirement for an enabled provider credential was
+relaxed: cloud providers are optional capabilities, while Gateway configuration
+and mandatory local worker prerequisites remain strict. Explicit selection of
+an unavailable Groq provider returns `provider_unavailable`; the Gateway never
+dispatches that request elsewhere. `/readyz` continues to represent required
+local STT/TTS worker readiness.
 
 Stage A offline verification uses mocked HTTP providers and synthetic multipart
 audio. A separately authorized live qualification on 2026-10-24 sent only three

@@ -937,11 +937,12 @@ def run_checks(
     if gateway_document is not None and "gateway" in selected:
         cloud = check(
             "External Providers",
-            "Enabled provider credentials (no inference)",
+            "Optional provider credentials (no inference)",
             lambda: cloud_credentials(
                 root, values, gateway_document, credential_env_names
             ),
-            "For enabled cloud providers, set api_key_env and its value in a regular mode-0600 file under private/.",
+            "Enabled cloud providers without valid private credentials will be unavailable; set each configured api_key_env in a regular mode-0600 file under private/ to use them.",
+            warning=True,
         )
         if cloud is False:
             report.entries[-1] = (
