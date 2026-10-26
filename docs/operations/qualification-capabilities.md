@@ -1,7 +1,7 @@
 # Qualification CLI capability coverage
 
 This matrix is tied to `api/openapi/public-v1.yaml` and the public Gateway
-handler inspected on 2026-10-25. CLI enums are guarded by offline contract
+handler inspected on 2026-10-26. CLI enums are guarded by offline contract
 drift tests. Gateway model aliases remain target configuration, not CLI enum
 choices. Use `python -m scripts.qualify --help` and each command's `--help` for
 the current syntax.
@@ -66,23 +66,24 @@ The CLI probes capabilities by selecting the provider on its existing inference
 route. STT Groq probes require both `--provider groq` and
 `--allow-cloud-audio`; text probes require an explicit cloud alias,
 `--allow-cloud`, and Gateway policy permission. Use an operator-authorized
-input. `cloud_not_allowed` identifies a policy denial, `provider_unavailable`
-identifies an unavailable selected provider, and success records provider
-provenance. The remote API intentionally does not reveal whether an unavailable
-provider is disabled or enabled without credentials; local config and the
-Gateway's safe startup warning distinguish those states. These probes can
-perform inference if the capability is available, so `--expect-error` is only
-appropriate for a test setup where that possibility is authorized.
+input. `cloud_not_allowed` identifies a policy denial, `capability_disabled`
+identifies a disabled speech route, and `provider_unavailable` identifies a
+provider unavailable before dispatch. For compatibility, explicitly selected
+disabled Groq STT retains `provider_unavailable` and adds
+`X-Speech-Capability-State: disabled`; missing credentials report the same
+error code with state `unavailable`. Success records provider provenance. The
+CLI's `capability_state` records available, disabled, configured
+but unavailable, failing during execution, or not established. Cloud probes can
+perform inference if the capability is available; only use them when that
+possibility is authorized.
 
 The root catch-all and unsupported HTTP methods are not separate capability
 commands. They can be exercised by targeting a non-route with a deliberately
 invalid URL only if a future explicit diagnostic probe is added; the CLI does
 not accept arbitrary paths or raw request bodies. Public logs are not exposed
 by the Gateway API. The report's client-side operation ID is local to the
-report and is not sent to the Gateway, so it cannot correlate server logs.
-Current Gateway responses do not emit a documented request ID; the CLI reports
-a server ID only if a whitelisted correlation header is actually returned. It
-never invents one.
+report and is not sent to the Gateway. The CLI reports the actual Gateway
+`X-Request-ID` only when returned; it never invents one.
 
 ## Shared diagnostics and safety
 
@@ -116,7 +117,7 @@ reports also remain under `private/`.
 
 ## Current provider and live qualification status
 
-Read-only configuration inspection on 2026-10-25 found text aliases
+Read-only configuration inspection on 2026-10-26 found text aliases
 `local-qwen`, `groq-qwen`, and `groq-gpt-oss`; configured STT provider choices
 are `local` and optional `groq`. TTS has no API provider selector. The active
 Gateway policy has text cloud disabled and Groq STT disabled. A private
@@ -124,13 +125,15 @@ Gateway policy has text cloud disabled and Groq STT disabled. A private
 the active configured cloud secret file and policy must be enabled through an
 approved deployment path. No CLI path bypasses those settings.
 
-Local STT, TTS and local-Qwen transformation have prior observed live HTTP 200
-results recorded in the M07B2 verification record. They establish technical
-operation only for those requests. Groq STT and Groq text inference are NOT
-ESTABLISHED because the active Gateway policy blocks them and the configured
-Gateway secret file is absent. `make preflight PYTHON=.venv/bin/python` also
-failed the pinned STT/TTS model-store metadata checks; deployment was not
-attempted. Do not describe the full provider matrix as qualified.
+Local STT, TTS and local-Qwen transformation have observed live HTTP 200 results
+recorded in the M07B2 verification record and 2026-10-26 deployment report.
+They establish technical operation only for those requests. On 2026-10-26,
+cloud text policy returned HTTP 403 `cloud_not_allowed`, and disabled Groq STT
+returned HTTP 503 `provider_unavailable`; no cloud inference was attempted.
+Groq inference with valid credentials remains NOT ESTABLISHED. Initial model
+metadata preflight failures were resolved by running in the operator's already
+assigned model-reader group. The supported install then completed for revision
+`4ec5878`. These records do not qualify the full provider matrix.
 
 ## Remaining verified limits
 

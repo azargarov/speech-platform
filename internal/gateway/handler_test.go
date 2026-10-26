@@ -120,6 +120,118 @@ func TestHandlerHealthReadinessAndUnavailableRoutes(t *testing.T) {
 	}
 }
 
+func TestOptionalServicesReadinessDisabledRoutesAndAuthentication(t *testing.T) {
+	const token = "01234567890123456789012345678901"
+	h := HandlerWithOptionalServices(WorkersReadiness{}, 1024, token, false, false, nil, nil, nil, time.Minute, context.Background(), nil, false, 2)
+	ready := httptest.NewRecorder()
+	h.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if ready.Code != http.StatusOK {
+		t.Fatalf("Gateway-only readiness=%d body=%s", ready.Code, ready.Body.String())
+	}
+	for _, tc := range []struct {
+		path, contentType, body string
+	}{{"/v1/stt/transcriptions", "multipart/form-data; boundary=x", ""}, {"/v1/tts/speech", "application/json", `{}`}} {
+		unauthorized := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+		r.Header.Set("Content-Type", tc.contentType)
+		h.ServeHTTP(unauthorized, r)
+		if unauthorized.Code != http.StatusUnauthorized {
+			t.Fatalf("disabled unauthenticated %s status=%d body=%s", tc.path, unauthorized.Code, unauthorized.Body.String())
+		}
+		authorized := httptest.NewRecorder()
+		r = httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+		r.Header.Set("Content-Type", tc.contentType)
+		r.Header.Set("Authorization", "Bearer "+token)
+		h.ServeHTTP(authorized, r)
+		if authorized.Code != http.StatusServiceUnavailable || !strings.Contains(authorized.Body.String(), `"code":"capability_disabled"`) {
+			t.Fatalf("disabled authorized %s status=%d body=%s", tc.path, authorized.Code, authorized.Body.String())
+		}
+	}
+}
+
+func TestEnabledGroqWithoutCredentialsIsUnavailableAndCloudConsentStillApplies(t *testing.T) {
+	const token = "01234567890123456789012345678901"
+	h := HandlerWithOptionalServices(WorkersReadiness{}, 1024, token, false, false, nil, nil, nil, time.Minute, context.Background(), nil, true, 2)
+	for _, tc := range []struct {
+		consent, code string
+		status        int
+	}{{"", "cloud_audio_not_authorized", http.StatusForbidden}, {"true", "provider_unavailable", http.StatusServiceUnavailable}} {
+		r := httptest.NewRequest(http.MethodPost, "/v1/stt/transcriptions", strings.NewReader(""))
+		r.Header.Set("Content-Type", "multipart/form-data; boundary=x")
+		r.Header.Set("Authorization", "Bearer "+token)
+		r.Header.Set("X-STT-Provider", "groq")
+		if tc.consent != "" {
+			r.Header.Set("X-Allow-Cloud-Audio", tc.consent)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != tc.status || !strings.Contains(w.Body.String(), `"code":"`+tc.code+`"`) {
+			t.Fatalf("consent=%q status=%d body=%s", tc.consent, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestDisabledGroqStillRequiresExplicitCloudAudioConsent(t *testing.T) {
+	const token = "01234567890123456789012345678901"
+	h := HandlerWithOptionalServices(WorkersReadiness{}, 1024, token, false, false, nil, nil, nil, time.Minute, context.Background(), nil, false, 2)
+	for _, tc := range []struct {
+		consent string
+		status  int
+		code    string
+	}{{"", http.StatusForbidden, "cloud_audio_not_authorized"}, {"true", http.StatusServiceUnavailable, "capability_disabled"}} {
+		r := httptest.NewRequest(http.MethodPost, "/v1/stt/transcriptions", strings.NewReader(""))
+		r.Header.Set("Content-Type", "multipart/form-data; boundary=x")
+		r.Header.Set("Authorization", "Bearer "+token)
+		r.Header.Set("X-STT-Provider", "groq")
+		if tc.consent != "" {
+			r.Header.Set("X-Allow-Cloud-Audio", tc.consent)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != tc.status || !strings.Contains(w.Body.String(), `"code":"`+tc.code+`"`) {
+			t.Fatalf("consent=%q status=%d body=%s", tc.consent, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestSelectedDisabledGroqPreservesLegacyErrorWithCapabilityState(t *testing.T) {
+	const token = "01234567890123456789012345678901"
+	var workerCalls atomic.Int32
+	worker := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { workerCalls.Add(1) }))
+	defer worker.Close()
+	stt := NewSTTProxy(worker.URL, token, time.Second)
+	h := HandlerWithOptionalServices(WorkersReadiness{STT: stt}, 1024, token, true, false, stt, nil, nil, time.Minute, context.Background(), nil, false, 2)
+	r := httptest.NewRequest(http.MethodPost, "/v1/stt/transcriptions", strings.NewReader(""))
+	r.Header.Set("Content-Type", "multipart/form-data; boundary=x")
+	r.Header.Set("Authorization", "Bearer "+token)
+	r.Header.Set("X-STT-Provider", "groq")
+	r.Header.Set("X-Allow-Cloud-Audio", "true")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"code":"provider_unavailable"`) || w.Header().Get("X-Speech-Capability-State") != "disabled" || workerCalls.Load() != 0 {
+		t.Fatalf("status=%d body=%s state=%q local_calls=%d", w.Code, w.Body.String(), w.Header().Get("X-Speech-Capability-State"), workerCalls.Load())
+	}
+}
+
+func TestReadinessChecksOnlyConfiguredWorkers(t *testing.T) {
+	var calls atomic.Int32
+	ttsWorker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/readyz" {
+			t.Errorf("unexpected readiness path %q", r.URL.Path)
+		}
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ttsWorker.Close()
+	readiness := NewWorkersReadiness(nil, NewTTSProxy(ttsWorker.URL, "", time.Second))
+	if !readiness.Ready() || calls.Load() != 1 {
+		t.Fatalf("TTS-only readiness=%t calls=%d", readiness.Ready(), calls.Load())
+	}
+	if !NewWorkersReadiness(nil, nil).Ready() {
+		t.Fatal("Gateway-only readiness must not require a worker")
+	}
+}
+
 func TestRequestSizeLimit(t *testing.T) {
 	h := Handler(unreadyState{}, 4)
 	for _, tc := range []struct {

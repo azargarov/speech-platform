@@ -1,5 +1,8 @@
 listen_host: 0.0.0.0
 listen_port: 8080
+capabilities:
+  stt: true
+  tts: true
 stt_url: http://stt:8081
 stt_timeout: 180s
 tts_url: http://tts:8082

@@ -43,6 +43,7 @@ def rendered(port=8080, bind="127.0.0.1"):
 
 def worker(network):
     return {
+        "profiles": ["stt" if network == "stt_private" else "tts"],
         "read_only": True,
         "user": "65532:65532",
         "cap_drop": ["ALL"],
@@ -97,6 +98,28 @@ class ComposeConfig(unittest.TestCase):
         ]
         with self.assertRaisesRegex(ValueError, "private and independent"):
             validate(config, 8080, "127.0.0.1")
+
+    def test_gateway_does_not_require_optional_compose_workers(self):
+        config = rendered()
+        config["services"]["gateway"]["depends_on"] = {
+            "stt": {"condition": "service_healthy"}
+        }
+        with self.assertRaisesRegex(
+            ValueError, "Gateway must not require optional workers"
+        ):
+            validate(config, 8080, "127.0.0.1")
+
+    def test_each_worker_has_an_independent_profile(self):
+        config = rendered()
+        config["networks"]["publish"] = config["networks"].pop("gateway_publish")
+        config["services"]["gateway"]["networks"]["publish"] = config["services"][
+            "gateway"
+        ]["networks"].pop("gateway_publish")
+        config["services"]["tts"]["profiles"] = ["stt"]
+        with self.assertRaisesRegex(
+            ValueError, "TTS must use its independent Compose profile"
+        ):
+            validate(config, 8080, "127.0.0.1", require_optional_profiles=True)
 
     def test_workers_must_not_share_network(self):
         config = rendered()

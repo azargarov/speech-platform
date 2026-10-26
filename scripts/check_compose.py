@@ -10,7 +10,13 @@ from pathlib import Path
 import yaml
 
 
-def validate(config, expected_port, expected_bind, expected_config_gid="65532"):
+def validate(
+    config,
+    expected_port,
+    expected_bind,
+    expected_config_gid="65532",
+    require_optional_profiles=False,
+):
     if type(expected_port) is not int or not 1 <= expected_port <= 65535:
         raise ValueError("effective Gateway listen port must be in 1..65535")
     try:
@@ -19,9 +25,10 @@ def validate(config, expected_port, expected_bind, expected_config_gid="65532"):
         raise ValueError("Gateway bind address must be an IP address") from exc
 
     networks = config["networks"]
-    if set(networks) != {"gateway_publish", "stt_private", "tts_private"}:
+    gateway_network = "publish" if require_optional_profiles else "gateway_publish"
+    if set(networks) != {gateway_network, "stt_private", "tts_private"}:
         raise ValueError("Gateway publication and private worker networks are required")
-    gateway_publish = networks["gateway_publish"]
+    gateway_publish = networks[gateway_network]
     if (
         set(gateway_publish) - {"name", "driver", "driver_opts", "ipam"}
         or ("name" in gateway_publish and not gateway_publish["name"])
@@ -47,6 +54,16 @@ def validate(config, expected_port, expected_bind, expected_config_gid="65532"):
     if set(services) != {"gateway", "stt", "tts"}:
         raise ValueError("unexpected Compose service set")
     gateway = services["gateway"]
+    if gateway.get("depends_on"):
+        raise ValueError(
+            "Gateway must not require optional workers through Compose dependencies"
+        )
+    if require_optional_profiles:
+        for name in ("stt", "tts"):
+            if services[name].get("profiles") != [name]:
+                raise ValueError(
+                    f"{name.upper()} must use its independent Compose profile"
+                )
     prompt_mounts = [
         volume
         for volume in gateway.get("volumes", [])
@@ -54,13 +71,15 @@ def validate(config, expected_port, expected_bind, expected_config_gid="65532"):
     ]
     if len(prompt_mounts) != 1 or prompt_mounts[0].get("read_only") is not True:
         raise ValueError("Gateway prompt directory must be mounted read-only")
-    if set(gateway["networks"]) != {"gateway_publish", "stt_private", "tts_private"}:
+    if set(gateway["networks"]) != {gateway_network, "stt_private", "tts_private"}:
         raise ValueError("Gateway must connect to its publication and worker networks")
     if set(services["stt"]["networks"]) != {"stt_private"}:
         raise ValueError("STT must connect only to the STT-private network")
     if set(services["tts"]["networks"]) != {"tts_private"}:
         raise ValueError("TTS must connect only to the TTS-private network")
-    if services["tts"].get("group_add") != [str(expected_config_gid)]:
+    if not require_optional_profiles and services["tts"].get("group_add") != [
+        str(expected_config_gid)
+    ]:
         raise ValueError("TTS configuration reader supplementary group does not match")
     if gateway["environment"].get("SPEECH_LISTEN_PORT") != str(expected_port):
         raise ValueError(
@@ -170,7 +189,13 @@ def main():
     config_gid = os.environ.get("SERVICE_CONFIG_READER_GID") or "65532"
     if not config_gid.isdecimal() or not 1 <= int(config_gid) <= 65535:
         raise ValueError("SERVICE_CONFIG_READER_GID must be in 1..65535")
-    validate(rendered, port, bind, config_gid)
+    validate(
+        rendered,
+        port,
+        bind,
+        config_gid,
+        require_optional_profiles=os.environ.get("EXPECT_OPTIONAL_PROFILES") == "1",
+    )
     if os.environ.get("STT_CUDA_STATIC_CHECK") == "1":
         validate_cuda_deployment(
             rendered,

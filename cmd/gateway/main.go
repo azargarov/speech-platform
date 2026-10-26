@@ -59,8 +59,14 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	stt := gateway.NewSTTProxy(c.STTURL, c.APIToken, duration(c.STTTimeout))
-	tts := gateway.NewTTSProxy(c.TTSURL, c.APIToken, duration(c.TTSTimeout))
+	var stt *gateway.STTProxy
+	if c.STTEnabled() {
+		stt = gateway.NewSTTProxy(c.STTURL, c.APIToken, duration(c.STTTimeout))
+	}
+	var tts *gateway.TTSProxy
+	if c.TTSEnabled() {
+		tts = gateway.NewTTSProxy(c.TTSURL, c.APIToken, duration(c.TTSTimeout))
+	}
 	textService, err := texttransform.New(ctx, c.TextTransform, c.APIToken, nil, logger)
 	if err != nil {
 		return fmt.Errorf("text transformation: %w", err)
@@ -72,7 +78,7 @@ func run() error {
 		defer textService.Close()
 	}
 	ready := gateway.NewWorkersReadiness(stt, tts)
-	handler := gateway.HandlerWithWarmupContextAndGroqSTT(ready, c.MaxRequestBytes, stt, tts, textService, duration(c.WarmupTimeout), ctx, groqSTT, c.GroqSTT.Enabled, *c.GroqSTT.Capacity)
+	handler := gateway.HandlerWithOptionalServices(ready, c.MaxRequestBytes, c.APIToken, c.STTEnabled(), c.TTSEnabled(), stt, tts, textService, duration(c.WarmupTimeout), ctx, groqSTT, c.GroqSTT.Enabled, *c.GroqSTT.Capacity)
 	srv := &http.Server{Addr: net.JoinHostPort(c.ListenHost, fmt.Sprint(c.ListenPort)), Handler: gateway.WithRequestID(handler, logger), ReadTimeout: duration(c.ReadTimeout), ReadHeaderTimeout: duration(c.ReadTimeout), WriteTimeout: duration(c.WriteTimeout), IdleTimeout: duration(c.IdleTimeout), MaxHeaderBytes: c.MaxHeaderBytes}
 	if c.TextTransform != nil && c.TextTransform.Enabled != nil && *c.TextTransform.Enabled {
 		reloadSignals := make(chan os.Signal, 1)

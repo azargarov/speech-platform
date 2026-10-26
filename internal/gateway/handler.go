@@ -98,7 +98,10 @@ type WorkersReadiness struct {
 
 func (w WorkersReadiness) Ready() bool {
 	if w.STT == nil {
-		return false
+		if w.TTS == nil {
+			return true
+		}
+		return w.TTS.Ready()
 	}
 	if w.TTS == nil {
 		return w.STT.Ready()
@@ -128,6 +131,18 @@ func HandlerWithWarmupContext(state Readiness, maxBytes int64, stt *STTProxy, tt
 // HandlerWithWarmupContextAndGroqSTT adds an explicitly authorized Groq STT
 // path while retaining the existing local-only behavior for existing callers.
 func HandlerWithWarmupContextAndGroqSTT(state Readiness, maxBytes int64, stt *STTProxy, tts *TTSProxy, text http.Handler, timeout time.Duration, warmupRoot context.Context, groq *GroqSTTAdapter, groqEnabled bool, groqCapacity int) http.Handler {
+	token := ""
+	if stt != nil {
+		token = stt.Token
+	} else if tts != nil {
+		token = tts.Token
+	}
+	return HandlerWithOptionalServices(state, maxBytes, token, true, true, stt, tts, text, timeout, warmupRoot, groq, groqEnabled, groqCapacity)
+}
+
+// HandlerWithOptionalServices builds public routes for configured capabilities
+// while keeping authentication active when a worker is disabled.
+func HandlerWithOptionalServices(state Readiness, maxBytes int64, token string, sttEnabled, ttsEnabled bool, stt *STTProxy, tts *TTSProxy, text http.Handler, timeout time.Duration, warmupRoot context.Context, groq *GroqSTTAdapter, groqEnabled bool, groqCapacity int) http.Handler {
 	mux := http.NewServeMux()
 	warmup := newWarmupCoordinator()
 	warmupSlots := make(chan struct{}, 4)
@@ -167,14 +182,7 @@ func HandlerWithWarmupContextAndGroqSTT(state Readiness, maxBytes int64, stt *ST
 		transport.JSON(w, 200, map[string]string{"status": "ready"})
 	})
 	mux.HandleFunc("/v1/models/warmup", func(w http.ResponseWriter, r *http.Request) {
-		token := ""
-		if stt != nil {
-			token = stt.Token
-		}
-		if token == "" && tts != nil {
-			token = tts.Token
-		}
-		serveWarmup(w, r, token, warmup, warmupSlots, stt, tts, text, timeout, warmupRoot)
+		serveWarmup(w, r, token, warmup, warmupSlots, stt, tts, text, timeout, warmupRoot, sttEnabled, ttsEnabled)
 	})
 	if text == nil {
 		mux.HandleFunc("/v1/text/transformations", func(w http.ResponseWriter, r *http.Request) {
@@ -182,6 +190,7 @@ func HandlerWithWarmupContextAndGroqSTT(state Readiness, maxBytes int64, stt *ST
 				transport.JSON(w, 405, transport.Error{Code: "method_not_allowed", Message: "POST is required"})
 				return
 			}
+			w.Header().Set("X-Speech-Capability-State", "disabled")
 			transport.JSON(w, 503, transport.Error{Code: "text_transform_unavailable", Message: "text transformation is unavailable"})
 		})
 	} else {
@@ -192,16 +201,31 @@ func HandlerWithWarmupContextAndGroqSTT(state Readiness, maxBytes int64, stt *ST
 			transport.JSON(w, 405, transport.Error{Code: "method_not_allowed", Message: "POST is required"})
 			return
 		}
-		if stt != nil && stt.Token != "" && !validBearer(r.Header.Get("Authorization"), stt.Token) {
+		if token != "" && !validBearer(r.Header.Get("Authorization"), token) {
 			transport.JSON(w, 401, transport.Error{Code: "unauthorized", Message: "valid bearer token required"})
+			return
+		}
+		if !sttEnabled && !groqEnabled {
+			_, providerErr := selectSTTProvidersConfigured(r.Header, false, false, false)
+			if providerErr != nil {
+				if providerErr.Code != "cloud_audio_not_authorized" {
+					providerErr.Code = "capability_disabled"
+				}
+				transport.JSON(w, providerErr.Status, transport.Error{Code: providerErr.Code, Message: providerErr.Message})
+				return
+			}
+			transport.JSON(w, http.StatusServiceUnavailable, transport.Error{Code: "capability_disabled", Message: "STT capability is disabled"})
 			return
 		}
 		if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data;") {
 			transport.JSON(w, 415, transport.Error{Code: "unsupported_media_type", Message: "multipart/form-data is required"})
 			return
 		}
-		eligibleProviders, providerErr := selectSTTProviders(r.Header, groqEnabled && groq != nil)
+		eligibleProviders, providerErr := selectSTTProvidersConfigured(r.Header, sttEnabled, groqEnabled, groqEnabled && groq != nil)
 		if providerErr != nil {
+			if providerErr.CapabilityState != "" {
+				w.Header().Set("X-Speech-Capability-State", providerErr.CapabilityState)
+			}
 			transport.JSON(w, providerErr.Status, transport.Error{Code: providerErr.Code, Message: providerErr.Message})
 			return
 		}
@@ -355,8 +379,12 @@ func HandlerWithWarmupContextAndGroqSTT(state Readiness, maxBytes int64, stt *ST
 			transport.JSON(w, 405, transport.Error{Code: "method_not_allowed", Message: "POST is required"})
 			return
 		}
-		if tts != nil && tts.Token != "" && !validBearer(r.Header.Get("Authorization"), tts.Token) {
+		if token != "" && !validBearer(r.Header.Get("Authorization"), token) {
 			transport.JSON(w, 401, transport.Error{Code: "unauthorized", Message: "valid bearer token required"})
+			return
+		}
+		if !ttsEnabled {
+			transport.JSON(w, http.StatusServiceUnavailable, transport.Error{Code: "capability_disabled", Message: "TTS capability is disabled"})
 			return
 		}
 		if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
@@ -559,8 +587,12 @@ func HandlerWithWarmupContextAndGroqSTT(state Readiness, maxBytes int64, stt *ST
 		_, _ = w.Write(responseBody)
 	})
 	mux.HandleFunc("GET /v1/tts/voices", func(w http.ResponseWriter, r *http.Request) {
-		if tts != nil && tts.Token != "" && !validBearer(r.Header.Get("Authorization"), tts.Token) {
+		if token != "" && !validBearer(r.Header.Get("Authorization"), token) {
 			transport.JSON(w, 401, transport.Error{Code: "unauthorized", Message: "valid bearer token required"})
+			return
+		}
+		if !ttsEnabled {
+			transport.JSON(w, http.StatusServiceUnavailable, transport.Error{Code: "capability_disabled", Message: "TTS capability is disabled"})
 			return
 		}
 		if tts == nil {

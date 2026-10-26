@@ -222,7 +222,16 @@ class FirstTimeSetupTests(unittest.TestCase):
 
 
 class PreflightTests(unittest.TestCase):
-    def fixture(self, directory, *, transform=None, dirty=False, fail_model=False):
+    def fixture(
+        self,
+        directory,
+        *,
+        transform=None,
+        dirty=False,
+        fail_model=False,
+        existing_workers=(),
+        unhealthy_workers=(),
+    ):
         root = Path(directory)
         self.enterContext(
             patch.object(
@@ -243,9 +252,12 @@ class PreflightTests(unittest.TestCase):
         )
         shutil.copy(preflight.ROOT / "configs/tts.yaml", root / "configs/tts.yaml")
         config = root / "private/deployment/gateway.yaml"
-        config.write_text(
-            yaml.safe_dump({"text_transform": transform} if transform else {})
-        )
+        gateway_config = {
+            "capabilities": {"stt": False, "tts": False},
+        }
+        if transform:
+            gateway_config["text_transform"] = transform
+        config.write_text(yaml.safe_dump(gateway_config))
         env_values = {
             "MODEL_STORE": str(root / "models"),
             "MODEL_MANIFEST_SHA256": preflight.STT_MANIFEST_SHA256,
@@ -271,6 +283,78 @@ class PreflightTests(unittest.TestCase):
 
         def run(args, *, root=root, timeout=60, env=None):
             calls.append(args)
+            if args[:2] == ["docker", "ps"] and "--filter" in args:
+                selected_worker = next(
+                    (
+                        value.rsplit("=", 1)[1]
+                        for value in args
+                        if value.startswith("label=com.docker.compose.service=")
+                    ),
+                    "",
+                )
+                return (
+                    f"worker-{selected_worker}"
+                    if selected_worker in existing_workers
+                    else ""
+                )
+            if args[:2] == ["docker", "inspect"] and str(args[2]).startswith("worker-"):
+                worker = str(args[2]).removeprefix("worker-")
+                image = "sha256:" + ("a" if worker == "stt" else "b") * 64
+                return json.dumps(
+                    [
+                        {
+                            "Image": image,
+                            "Config": {
+                                "Labels": {
+                                    "com.docker.compose.project": "speech-platform",
+                                    "com.docker.compose.service": worker,
+                                    "com.docker.compose.project.working_dir": str(
+                                        root.resolve()
+                                    ),
+                                    "com.docker.compose.project.config_files": str(
+                                        (root / "compose.yaml").resolve()
+                                    ),
+                                }
+                            },
+                            "State": {
+                                "Running": True,
+                                "Health": {
+                                    "Status": (
+                                        "unhealthy"
+                                        if worker in unhealthy_workers
+                                        else "healthy"
+                                    )
+                                },
+                            },
+                            "NetworkSettings": {
+                                "Networks": {
+                                    f"speech-platform_{worker}_private": {
+                                        "IPAddress": "172.30.0.2"
+                                    }
+                                }
+                            },
+                        }
+                    ]
+                )
+            if args[:3] == ["docker", "image", "inspect"]:
+                worker = "stt" if str(args[3]).endswith("a" * 64) else "tts"
+                role = "stt-worker" if worker == "stt" else "tts-worker"
+                return json.dumps(
+                    [
+                        {
+                            "Os": "linux",
+                            "Architecture": "amd64",
+                            "Config": {
+                                "Labels": {
+                                    "org.opencontainers.image.revision": "b" * 40,
+                                    "com.speech-platform.service": worker,
+                                    "com.speech-platform.service-role": role,
+                                    "com.speech-platform.runtime-variant": "cuda",
+                                }
+                            },
+                        }
+                    ]
+                )
             if args[:3] == ["git", "rev-parse", "HEAD"]:
                 return "a" * 40
             if args[:3] == ["git", "status", "--porcelain"]:
@@ -413,6 +497,241 @@ class PreflightTests(unittest.TestCase):
             root, _ = self.fixture(temp, fail_model=True)
             self.assertTrue(preflight.run_checks(root=root, service="tts").failed)
             self.assertFalse(preflight.run_checks(root=root, service="gateway").failed)
+
+    def test_gateway_only_preflight_skips_worker_artifacts_gpu_and_compose_profiles(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temp:
+            root, calls = self.fixture(temp, fail_model=True)
+            config_path = root / "private/deployment/gateway.yaml"
+            config_path.write_text("capabilities:\n  stt: false\n  tts: false\n")
+            env_path = root / ".env"
+            values = preflight.load_env(root)
+            for key in (
+                "MODEL_STORE",
+                "MODEL_MANIFEST_SHA256",
+                "TTS_MODEL_MANIFEST_SHA256",
+                "STT_GPU_DEVICE",
+                "TTS_GPU_DEVICE",
+            ):
+                values.pop(key, None)
+            env_path.write_text("".join(f"{k}={v}\n" for k, v in values.items()))
+            env_path.chmod(0o600)
+            report = preflight.run_checks(root=root, components="gateway")
+        self.assertFalse(report.failed, report.entries)
+        self.assertTrue(
+            any(
+                name == "Existing STT worker" and status == "SKIP"
+                for _, status, name, _ in report.entries
+            )
+        )
+        self.assertTrue(
+            any(
+                status == "SKIP"
+                and name in {"stt model metadata", "tts model metadata"}
+                for _, status, name, _ in report.entries
+            )
+        )
+        compose_config = next(
+            args
+            for args in calls
+            if "config" in args
+            and "--quiet" in args
+            and args[:2] == ["docker", "compose"]
+        )
+        self.assertNotIn("--profile", compose_config)
+
+    def test_scoped_worker_preflight_requires_matching_gateway_capability(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(temp)
+            config_path = root / "private/deployment/gateway.yaml"
+            config_path.write_text("capabilities:\n  stt: true\n  tts: false\n")
+            report = preflight.run_checks(root=root, components="gateway,stt")
+        self.assertFalse(report.failed, report.entries)
+        self.assertTrue(
+            any(
+                name == "stt pinned manifest/file metadata" and status == "PASS"
+                for _, status, name, _ in report.entries
+            )
+        )
+        self.assertTrue(
+            any(
+                name == "tts model metadata" and status == "SKIP"
+                for _, status, name, _ in report.entries
+            )
+        )
+
+    def test_tts_only_preflight_requires_only_tts_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(temp, fail_model=True)
+            config_path = root / "private/deployment/gateway.yaml"
+            config_path.write_text("capabilities:\n  stt: false\n  tts: true\n")
+            env_path = root / ".env"
+            values = preflight.load_env(root)
+            for key in ("MODEL_MANIFEST_SHA256", "STT_GPU_DEVICE", "MODEL_READ_GID"):
+                values.pop(key, None)
+            values["TTS_MODEL_STORE"] = str(root / "models")
+            env_path.write_text("".join(f"{k}={v}\n" for k, v in values.items()))
+            env_path.chmod(0o600)
+            report = preflight.run_checks(root=root, components="gateway,tts")
+        self.assertTrue(
+            report.failed, "selected TTS model metadata failure must remain blocking"
+        )
+        self.assertTrue(
+            any(
+                name == "tts pinned manifest/file metadata" and status == "FAIL"
+                for _, status, name, _ in report.entries
+            )
+        )
+        self.assertTrue(
+            any(
+                name == "stt model metadata" and status == "SKIP"
+                for _, status, name, _ in report.entries
+            )
+        )
+
+    def test_gateway_only_update_accepts_enabled_healthy_unselected_workers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, calls = self.fixture(temp, existing_workers=("stt", "tts"))
+            config_path = root / "private/deployment/gateway.yaml"
+            config_path.write_text(
+                "capabilities:\n  stt: true\n  tts: true\n"
+                "stt_url: http://stt:8081\ntts_url: http://tts:8082\n"
+            )
+            report = preflight.run_checks(root=root, components="gateway")
+        self.assertFalse(report.failed, (report.entries, calls))
+        for worker in ("stt", "tts"):
+            self.assertIn(
+                (
+                    "Deployment",
+                    "PASS",
+                    f"Existing {worker.upper()} worker compatibility",
+                    "",
+                ),
+                report.entries,
+            )
+        self.assertTrue(any(args[:2] == ["docker", "ps"] for args in calls))
+
+    def test_gateway_only_update_fails_actionably_when_enabled_worker_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(temp)
+            config_path = root / "private/deployment/gateway.yaml"
+            config_path.write_text(
+                "capabilities:\n  stt: true\n  tts: false\nstt_url: http://stt:8081\n"
+            )
+            report = preflight.run_checks(root=root, components="gateway")
+        failure = next(
+            entry
+            for entry in report.entries
+            if entry[2] == "Existing STT worker compatibility"
+        )
+        self.assertEqual(failure[1], "FAIL")
+        self.assertIn("make install COMPONENTS=gateway,stt", failure[3])
+        self.assertTrue(
+            any(
+                name == "Existing TTS worker" and status == "SKIP"
+                for _, status, name, _ in report.entries
+            )
+        )
+
+    def test_gateway_only_update_rejects_an_unhealthy_enabled_worker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(
+                temp, existing_workers=("stt",), unhealthy_workers=("stt",)
+            )
+            config_path = root / "private/deployment/gateway.yaml"
+            config_path.write_text(
+                "capabilities:\n  stt: true\n  tts: false\nstt_url: http://stt:8081\n"
+            )
+            report = preflight.run_checks(root=root, components="gateway")
+        self.assertTrue(
+            any(
+                name == "Existing STT worker compatibility" and status == "FAIL"
+                for _, status, name, _ in report.entries
+            )
+        )
+
+    def test_gateway_only_update_rejects_a_noncanonical_worker_endpoint(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(temp, existing_workers=("stt",))
+            config_path = root / "private/deployment/gateway.yaml"
+            config_path.write_text(
+                "capabilities:\n  stt: true\n  tts: false\n"
+                "stt_url: http://127.0.0.1:8081\n"
+            )
+            report = preflight.run_checks(root=root, components="gateway")
+        self.assertTrue(
+            any(
+                name == "Existing STT worker compatibility" and status == "FAIL"
+                for _, status, name, _ in report.entries
+            )
+        )
+
+    def test_partial_update_checks_enabled_unselected_worker_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(temp, existing_workers=("tts",))
+            config_path = root / "private/deployment/gateway.yaml"
+            config_path.write_text(
+                "capabilities:\n  stt: true\n  tts: true\n"
+                "stt_url: http://stt:8081\ntts_url: http://tts:8082\n"
+            )
+            report = preflight.run_checks(root=root, components="gateway,stt")
+        self.assertFalse(report.failed, report.entries)
+        self.assertTrue(
+            any(
+                name == "stt pinned manifest/file metadata" and status == "PASS"
+                for _, status, name, _ in report.entries
+            )
+        )
+        self.assertTrue(
+            any(
+                name == "Existing TTS worker compatibility" and status == "PASS"
+                for _, status, name, _ in report.entries
+            )
+        )
+        self.assertTrue(
+            any(
+                name == "tts model metadata" and status == "SKIP"
+                for _, status, name, _ in report.entries
+            )
+        )
+
+    def test_gateway_tts_update_checks_existing_stt_without_requiring_stt_artifacts(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temp:
+            root, _ = self.fixture(temp, existing_workers=("stt",))
+            config_path = root / "private/deployment/gateway.yaml"
+            config_path.write_text(
+                "capabilities:\n  stt: true\n  tts: true\n"
+                "stt_url: http://stt:8081\ntts_url: http://tts:8082\n"
+            )
+            values = preflight.load_env(root)
+            values.pop("MODEL_MANIFEST_SHA256", None)
+            values.pop("STT_GPU_DEVICE", None)
+            env_path = root / ".env"
+            env_path.write_text("".join(f"{k}={v}\n" for k, v in values.items()))
+            env_path.chmod(0o600)
+            report = preflight.run_checks(root=root, components="gateway,tts")
+        self.assertFalse(report.failed, report.entries)
+        self.assertTrue(
+            any(
+                name == "Existing STT worker compatibility" and status == "PASS"
+                for _, status, name, _ in report.entries
+            )
+        )
+        self.assertTrue(
+            any(
+                name == "tts pinned manifest/file metadata" and status == "PASS"
+                for _, status, name, _ in report.entries
+            )
+        )
+        self.assertTrue(
+            any(
+                name == "stt model metadata" and status == "SKIP"
+                for _, status, name, _ in report.entries
+            )
+        )
 
     def test_bad_env_and_unavailable_docker_still_return_grouped_failure(self):
         with tempfile.TemporaryDirectory() as temp:

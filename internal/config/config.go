@@ -14,6 +14,7 @@ import (
 )
 
 type Config struct {
+	Capabilities    Capabilities   `yaml:"capabilities"`
 	ListenHost      string         `yaml:"listen_host"`
 	ListenPort      int            `yaml:"listen_port"`
 	MaxHeaderBytes  int            `yaml:"max_header_bytes"`
@@ -31,6 +32,16 @@ type Config struct {
 	GroqSTT         GroqSTT        `yaml:"groq_stt"`
 	TextTransform   *TextTransform `yaml:"text_transform"`
 }
+
+// Capabilities controls the optional local speech workers. Omitted fields keep
+// the historical full-stack configuration enabled.
+type Capabilities struct {
+	STT *bool `yaml:"stt"`
+	TTS *bool `yaml:"tts"`
+}
+
+func (c Config) STTEnabled() bool { return c.Capabilities.STT == nil || *c.Capabilities.STT }
+func (c Config) TTSEnabled() bool { return c.Capabilities.TTS == nil || *c.Capabilities.TTS }
 
 type GroqSTT struct {
 	Enabled   bool   `yaml:"enabled"`
@@ -104,7 +115,18 @@ func (c Config) Validate() error {
 	if err != nil || warmup < time.Second || warmup > 10*time.Minute || warmup+5*time.Second > writeTimeout {
 		return fmt.Errorf("warmup_timeout must be from 1s to 10m and fit write_timeout")
 	}
-	for name, raw := range map[string]string{"stt_url": c.STTURL, "tts_url": c.TTSURL} {
+	workers := map[string]struct {
+		enabled bool
+		address string
+	}{
+		"stt_url": {c.STTEnabled(), c.STTURL},
+		"tts_url": {c.TTSEnabled(), c.TTSURL},
+	}
+	for name, worker := range workers {
+		if !worker.enabled {
+			continue
+		}
+		raw := worker.address
 		workerURL, err := url.Parse(raw)
 		if err != nil || workerURL.Scheme != "http" || workerURL.Host == "" || workerURL.User != nil || workerURL.RawQuery != "" || workerURL.Fragment != "" || workerURL.Path != "" && workerURL.Path != "/" {
 			return fmt.Errorf("%s is required", name)
@@ -122,13 +144,17 @@ func (c Config) Validate() error {
 	if !envName.MatchString(c.GroqSTT.APIKeyEnv) {
 		return fmt.Errorf("groq_stt.api_key_env is invalid")
 	}
-	sttTimeout, err := time.ParseDuration(c.STTTimeout)
-	if err != nil || sttTimeout <= 0 || sttTimeout > 10*time.Minute {
-		return fmt.Errorf("stt_timeout must be a positive duration no greater than 10m")
+	if c.STTEnabled() || c.GroqSTT.Enabled {
+		sttTimeout, err := time.ParseDuration(c.STTTimeout)
+		if err != nil || sttTimeout <= 0 || sttTimeout > 10*time.Minute {
+			return fmt.Errorf("stt_timeout must be a positive duration no greater than 10m")
+		}
 	}
-	ttsTimeout, err := time.ParseDuration(c.TTSTimeout)
-	if err != nil || ttsTimeout <= 0 || ttsTimeout > 10*time.Minute {
-		return fmt.Errorf("tts_timeout must be a positive duration no greater than 10m")
+	if c.TTSEnabled() {
+		ttsTimeout, err := time.ParseDuration(c.TTSTimeout)
+		if err != nil || ttsTimeout <= 0 || ttsTimeout > 10*time.Minute {
+			return fmt.Errorf("tts_timeout must be a positive duration no greater than 10m")
+		}
 	}
 	if err := c.validateText(); err != nil {
 		return err

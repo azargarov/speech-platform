@@ -142,6 +142,96 @@ class ComposeInvocationTests(unittest.TestCase):
             with self.subTest(args=args), self.assertRaises(ValueError):
                 compose.run(list(args))
 
+    def test_build_and_up_accept_only_explicit_unique_component_selections(self):
+        for args in (
+            ["build", "gateway"],
+            ["build", "gateway", "stt"],
+            [
+                "up",
+                "-d",
+                "--no-build",
+                "--pull",
+                "never",
+                "--wait",
+                "--wait-timeout",
+                "240",
+                "gateway",
+            ],
+            [
+                "up",
+                "-d",
+                "--no-build",
+                "--pull",
+                "never",
+                "--wait",
+                "--wait-timeout",
+                "240",
+                "gateway",
+                "tts",
+            ],
+        ):
+            with self.subTest(args=args):
+                compose.validate_args(args)
+        for args in (
+            ["build", "gateway", "gateway"],
+            [
+                "up",
+                "-d",
+                "--no-build",
+                "--pull",
+                "never",
+                "--wait",
+                "--wait-timeout",
+                "240",
+            ],
+            [
+                "up",
+                "-d",
+                "--no-build",
+                "--pull",
+                "never",
+                "--wait",
+                "--wait-timeout",
+                "240",
+                "gateway",
+                "ollama",
+            ],
+        ):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                compose.validate_args(args)
+
+    def test_global_compose_inventory_enables_profiles_for_read_only_ps(self):
+        with (
+            patch.object(compose, "setup", return_value=(["docker", "compose"], {})),
+            patch.object(compose, "verify_project"),
+            patch.object(
+                compose.subprocess, "run", return_value=SimpleNamespace(returncode=0)
+            ) as run,
+        ):
+            compose.run(["ps", "--all", "--format", "json"])
+        command = run.call_args.args[0]
+        self.assertIn("--profile", command)
+        self.assertEqual(command[command.index("--profile") + 1], "stt")
+
+    def test_unscoped_logs_and_stop_include_all_profiles(self):
+        for args in (["logs", "--tail", "100"], ["stop"]):
+            with (
+                self.subTest(args=args),
+                patch.object(
+                    compose, "setup", return_value=(["docker", "compose"], {})
+                ),
+                patch.object(compose, "verify_project"),
+                patch.object(
+                    compose.subprocess,
+                    "run",
+                    return_value=SimpleNamespace(returncode=0),
+                ) as run,
+            ):
+                compose.run(args)
+                command = run.call_args.args[0]
+                self.assertIn("--profile", command)
+                self.assertEqual(command[command.index("--profile") + 1], "stt")
+
     def test_service_scoped_stop_logs_status_do_not_expand_project_scope(self):
         for args in (
             ("stop", "tts"),
@@ -290,6 +380,24 @@ class ImageSafetyTests(unittest.TestCase):
             ],
         )
 
+    def test_retain_is_scoped_to_selected_components(self):
+        with (
+            patch.object(
+                deploy_images, "project_containers", return_value=[]
+            ) as inspect,
+            patch("builtins.print"),
+        ):
+            deploy_images.retain(("gateway", "stt"))
+        inspect.assert_called_once_with(("gateway", "stt"))
+
+    def test_component_selection_validation(self):
+        self.assertEqual(
+            deploy_images.parse_components("gateway,stt"), ("gateway", "stt")
+        )
+        for raw in ("", "stt", "gateway,stt,stt", "gateway,ollama"):
+            with self.subTest(raw=raw), self.assertRaises(deploy_images.DeployError):
+                deploy_images.parse_components(raw)
+
     def test_retained_containers_must_belong_to_this_project_and_checkout(self):
         container = {
             "Config": {
@@ -428,18 +536,123 @@ class ImageSafetyTests(unittest.TestCase):
                 commands,
                 [
                     "scripts/deploy_images.py source",
-                    "scripts/preflight.py",
-                    "scripts/deploy_images.py retain",
+                    "scripts/preflight.py --components gateway,stt,tts",
+                    "scripts/deploy_images.py retain --components gateway,stt,tts",
                     "scripts/compose.py build gateway stt tts",
-                    "scripts/deploy_images.py verify",
-                    "scripts/deploy_images.py cuda",
-                    "scripts/compose.py up -d --no-build --pull never --wait --wait-timeout 240",
-                    "scripts/deploy_images.py running",
+                    "scripts/deploy_images.py verify --components gateway,stt,tts",
+                    "scripts/deploy_images.py cuda --components gateway,stt,tts",
+                    "scripts/compose.py up -d --no-build --pull never --wait --wait-timeout 240 stt tts",
+                    "scripts/compose.py up -d --no-build --pull never --wait --wait-timeout 240 gateway",
+                    "scripts/deploy_images.py running --components gateway,stt,tts",
                     "scripts/compose.py exec -T gateway /healthcheck http://127.0.0.1:8080/readyz",
                     'scripts/compose.py exec -T stt python -c import urllib.request; urllib.request.urlopen("http://127.0.0.1:8081/readyz", timeout=3)',
                     'scripts/compose.py exec -T tts python -c import urllib.request; urllib.request.urlopen("http://127.0.0.1:8082/readyz", timeout=3)',
                 ],
             )
+
+    def test_gateway_only_install_does_not_build_or_start_workers(self):
+        makefile = Path(__file__).resolve().parents[1] / "Makefile"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            log = root / "commands.log"
+            fake_python = bin_dir / "python"
+            fake_python.write_text('#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$LOG_FILE"\n')
+            fake_python.chmod(0o755)
+            env = os.environ | {
+                "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                "LOG_FILE": str(log),
+            }
+            result = subprocess.run(
+                [
+                    "make",
+                    "-f",
+                    str(makefile),
+                    "install",
+                    "COMPONENTS=gateway",
+                    "PYTHON=" + str(fake_python),
+                ],
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            commands = log.read_text().splitlines()
+            self.assertIn("scripts/compose.py build gateway", commands)
+            self.assertIn(
+                "scripts/compose.py up -d --no-build --pull never --wait --wait-timeout 240 gateway",
+                commands,
+            )
+            self.assertFalse(
+                any(
+                    item.endswith("stt")
+                    or item.endswith("tts")
+                    or " stt " in item
+                    or " tts " in item
+                    for item in commands
+                )
+            )
+
+    def test_each_partial_install_targets_only_its_selected_worker(self):
+        makefile = Path(__file__).resolve().parents[1] / "Makefile"
+        for selection, worker in (("gateway,stt", "stt"), ("gateway,tts", "tts")):
+            with (
+                self.subTest(selection=selection),
+                tempfile.TemporaryDirectory() as temp,
+            ):
+                root = Path(temp)
+                bin_dir = root / "bin"
+                bin_dir.mkdir()
+                log = root / "commands.log"
+                fake_python = bin_dir / "python"
+                fake_python.write_text(
+                    '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$LOG_FILE"\n'
+                )
+                fake_python.chmod(0o755)
+                env = os.environ | {
+                    "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                    "LOG_FILE": str(log),
+                }
+                result = subprocess.run(
+                    [
+                        "make",
+                        "-f",
+                        str(makefile),
+                        "install",
+                        "COMPONENTS=" + selection,
+                        "PYTHON=" + str(fake_python),
+                    ],
+                    cwd=root,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                compose_commands = [
+                    line
+                    for line in log.read_text().splitlines()
+                    if line.startswith("scripts/compose.py")
+                ]
+                self.assertIn(
+                    "scripts/compose.py build gateway " + worker, compose_commands
+                )
+                self.assertIn(
+                    "scripts/compose.py up -d --no-build --pull never --wait --wait-timeout 240 "
+                    + worker,
+                    compose_commands,
+                )
+                self.assertIn(
+                    "scripts/compose.py up -d --no-build --pull never --wait --wait-timeout 240 gateway",
+                    compose_commands,
+                )
+                unselected = "tts" if worker == "stt" else "stt"
+                self.assertFalse(
+                    any(unselected in line.split() for line in compose_commands)
+                )
 
 
 if __name__ == "__main__":

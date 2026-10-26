@@ -23,9 +23,14 @@ SERVICES = {"gateway", "stt", "tts"}
 
 def validate_args(args):
     action, rest = args[0], args[1:]
-    if action == "build" and rest == ["gateway", "stt", "tts"]:
+    if (
+        action == "build"
+        and rest
+        and set(rest) <= SERVICES
+        and len(rest) == len(set(rest))
+    ):
         return
-    if action == "up" and rest == [
+    up_prefix = [
         "-d",
         "--no-build",
         "--pull",
@@ -33,22 +38,32 @@ def validate_args(args):
         "--wait",
         "--wait-timeout",
         "240",
-    ]:
+    ]
+    if (
+        action == "up"
+        and rest[: len(up_prefix)] == up_prefix
+        and rest[len(up_prefix) :]
+        and set(rest[len(up_prefix) :]) <= SERVICES
+        and len(rest[len(up_prefix) :]) == len(set(rest[len(up_prefix) :]))
+    ):
         return
     if action == "stop" and (not rest or (len(rest) == 1 and rest[0] in SERVICES)):
         return
-    if action == "ps" and rest in (
-        ["--all"],
-        ["--all", "--format", "json"],
-        ["--all", "--format", "json", "gateway"],
-        ["--all", "--format", "json", "stt"],
-        ["--all", "--format", "json", "tts"],
-        ["--all", "gateway"],
-        ["--all", "stt"],
-        ["--all", "tts"],
-        ["--quiet", "gateway"],
-        ["--quiet", "stt"],
-        ["--quiet", "tts"],
+    if action == "ps" and (
+        rest == ["--all"]
+        or rest[:3] == ["--all", "--format", "json"]
+        and (
+            not rest[3:]
+            or set(rest[3:]) <= SERVICES
+            and len(rest[3:]) == len(set(rest[3:]))
+        )
+        or rest == ["--quiet", "gateway"]
+        or rest == ["--quiet", "stt"]
+        or rest == ["--quiet", "tts"]
+        or rest[:1] == ["--all"]
+        and len(rest) > 1
+        and set(rest[1:]) <= SERVICES
+        and len(rest[1:]) == len(set(rest[1:]))
     ):
         return
     if action == "logs" and (
@@ -128,6 +143,15 @@ def setup(root=ROOT):
     return command, env
 
 
+def with_profiles(command, profiles):
+    args = []
+    for profile in profiles:
+        if profile not in {"stt", "tts"}:
+            raise ValueError("unsupported Compose profile")
+        args.extend(["--profile", profile])
+    return [*command, *args]
+
+
 def verify_project(root=ROOT):
     _command, env = setup(root)
     result = subprocess.run(
@@ -168,6 +192,16 @@ def run(args, *, root=ROOT, timeout=300, capture=False):
     command, env = setup(root)
     if args[0] in {"exec", "logs", "ps", "stop", "up"}:
         verify_project(root)
+    all_profile_inventory = (
+        args[0] == "ps"
+        and not any(service in args[1:] for service in SERVICES)
+        or args[0] == "logs"
+        and not any(service in args[1:] for service in SERVICES)
+        or args[0] == "stop"
+        and not args[1:]
+    )
+    if all_profile_inventory:
+        command = with_profiles(command, ("stt", "tts"))
     return subprocess.run(
         [*command, *args],
         cwd=root,

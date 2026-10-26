@@ -282,6 +282,7 @@ class QualificationTests(unittest.TestCase):
             {"code": "cloud_not_allowed", "matched": True},
         )
         self.assertEqual(report["outcome"], "pass")
+        self.assertEqual(report["capability_state"], "disabled")
         self.assertIn("expected API error cloud_not_allowed", stdout.getvalue())
         self.assertNotIn("not exposed", report_path.read_text())
 
@@ -1191,6 +1192,46 @@ class QualificationTests(unittest.TestCase):
         self.assertNotIn("secret input", report_text)
         self.assertNotIn("private output", report_text)
         self.assertEqual(report["schema_version"], "1.0")
+        self.assertEqual(report["capability_state"], "available")
+
+    def test_capability_state_distinguishes_disabled_unavailable_and_execution_failure(
+        self,
+    ):
+        cases = (
+            (
+                {"api_code": "capability_disabled"},
+                {"status": 503, "success": False},
+                "fail",
+                "disabled",
+            ),
+            (
+                {"api_code": "provider_unavailable"},
+                {"status": 503, "success": False},
+                "fail",
+                "configured_but_unavailable",
+            ),
+            (
+                {"api_code": "worker_unavailable"},
+                {"status": 503, "success": False},
+                "fail",
+                "configured_but_unavailable",
+            ),
+            (
+                {"api_code": "invalid_worker_response"},
+                {"status": 502, "success": False},
+                "fail",
+                "failing_during_execution",
+            ),
+            ({"api_code": None}, {"status": 200, "success": True}, "pass", "available"),
+        )
+        for error, http, outcome, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    qualify._capability_state(
+                        {"error": error, "http": http, "outcome": outcome}
+                    ),
+                    expected,
+                )
 
     def test_preflight_failure_can_be_recorded_without_sensitive_input(self):
         report_path = self.root / "private" / "failed.json"

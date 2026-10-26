@@ -55,16 +55,26 @@ endif
 endif
 .PHONY: init preflight stop verify fmt lint config test build image publish compose-check bootstrap governance-check stt-lock-check tts-lock-check release-check model-check model-fetch tts-model-check tts-model-fetch tts-warmup tts-state install status logs test-stt test-tts test-roundtrip stt-cpu-integration stt-cuda-http-integration
 DEPLOY_SERVICES := gateway stt tts
+comma := ,
+COMPONENTS ?= gateway,stt,tts
+DEPLOY_SELECTION := $(strip $(subst $(comma), ,$(COMPONENTS)))
+ifneq ($(filter-out $(DEPLOY_SERVICES),$(DEPLOY_SELECTION)),)
+$(error COMPONENTS may contain only gateway,stt,tts)
+endif
+ifneq ($(firstword $(DEPLOY_SELECTION)),gateway)
+$(error COMPONENTS must start with gateway)
+endif
+ifneq ($(words $(DEPLOY_SELECTION)),$(words $(sort $(DEPLOY_SELECTION))))
+$(error COMPONENTS must not contain duplicates)
+endif
+ifeq ($(filter gateway,$(DEPLOY_SELECTION)),)
+$(error COMPONENTS must include gateway)
+endif
 ifneq ($(filter status logs stop,$(MAKECMDGOALS)),)
 ifneq ($(strip $(SERVICE)),)
 ifeq ($(filter $(SERVICE),$(DEPLOY_SERVICES)),)
 $(error SERVICE must be gateway, stt, or tts)
 endif
-endif
-endif
-ifneq ($(filter install,$(MAKECMDGOALS)),)
-ifneq ($(strip $(SERVICE)),)
-$(error make install deploys the complete SpeechPlatform stack; omit SERVICE)
 endif
 endif
 bootstrap:
@@ -85,9 +95,10 @@ config:
 	$(PYTHON) -m services.stt.main --config configs/stt.yaml --application-config configs/stt-product-application.yaml --deployment-config configs/stt-product-deployment.yaml --check-config
 	$(PYTHON) -m services.tts.main --config configs/tts.yaml --check-config
 compose-check:
-	$(COMPOSE) config --quiet
-	docker compose --env-file .env.example -f compose.yaml config --quiet
-	docker compose --env-file .env.example -f compose.yaml -f deployments/compose/compose.ollama.yaml config --format json | $(PYTHON) -c 'import json,sys; c=json.load(sys.stdin); g=c["services"]["gateway"]; n=c["networks"]["ollama_private"]; assert set(g["networks"]) == {"publish", "stt_private", "tts_private", "ollama_private"}; assert set(c["services"]["stt"]["networks"]) == {"stt_private"}; assert set(c["services"]["tts"]["networks"]) == {"tts_private"}; assert n["external"] is True and n["name"] == "speech-platform_ollama_private"; assert g["ports"][0]["host_ip"] == "127.0.0.1"; print("PASS: optional Ollama network Compose overlay")'
+	$(COMPOSE) --profile stt --profile tts config --quiet
+	docker compose --env-file .env.example -f compose.yaml --profile stt --profile tts config --quiet
+	docker compose --env-file .env.example -f compose.yaml --profile stt --profile tts config --format json | EXPECT_OPTIONAL_PROFILES=1 $(PYTHON) scripts/check_compose.py
+	docker compose --env-file .env.example -f compose.yaml -f deployments/compose/compose.ollama.yaml --profile stt --profile tts config --format json | $(PYTHON) -c 'import json,sys; c=json.load(sys.stdin); g=c["services"]["gateway"]; n=c["networks"]["ollama_private"]; assert set(g["networks"]) == {"publish", "stt_private", "tts_private", "ollama_private"}; assert set(c["services"]["stt"]["networks"]) == {"stt_private"}; assert set(c["services"]["tts"]["networks"]) == {"tts_private"}; assert n["external"] is True and n["name"] == "speech-platform_ollama_private"; assert g["ports"][0]["host_ip"] == "127.0.0.1"; print("PASS: optional Ollama network Compose overlay")'
 	$(COMPOSE) config --format json | $(PYTHON) scripts/check_compose.py
 	STT_CPU_LOCK_SHA256=$$(sha256sum services/requirements-stt-cpu.lock | cut -d' ' -f1) STT_APPLICATION_CONFIG=$(CURDIR)/configs/stt-application-cpu.example.yaml STT_DEPLOYMENT_CONFIG=$(CURDIR)/configs/stt-deployment-cpu.example.yaml STT_MODEL_ROOT=/models docker compose -f deployments/compose/compose.yaml -f deployments/compose/compose.stt-cpu.yaml config --format json | $(PYTHON) scripts/check_compose.py
 	SOURCE_REVISION=$$(git rev-parse HEAD) STT_CUDA_LOCK_SHA256=$$(sha256sum services/requirements-stt-cuda.lock | cut -d' ' -f1) STT_APPLICATION_CONFIG=$(CURDIR)/configs/stt-application-cpu.example.yaml STT_DEPLOYMENT_CONFIG=$(CURDIR)/configs/stt-deployment-cpu.example.yaml STT_MODEL_ROOT=/models docker compose -f deployments/compose/compose.yaml -f deployments/compose/compose.stt-cuda-build.yaml config --quiet
@@ -125,21 +136,22 @@ tts-state:
 init:
 	sh scripts/init.sh
 preflight:
-	$(PYTHON) scripts/preflight.py $(if $(SERVICE),--service "$(SERVICE)")
+	$(if $(strip $(SERVICE)),$(PYTHON) scripts/preflight.py --service "$(SERVICE)",$(PYTHON) scripts/preflight.py --components "$(COMPONENTS)")
 install:
 	@set -eu; \
 	$(PYTHON) scripts/deploy_images.py source; \
-	$(PYTHON) scripts/preflight.py; \
-	$(PYTHON) scripts/deploy_images.py retain; \
-	$(PYTHON) scripts/compose.py build gateway stt tts; \
-	$(PYTHON) scripts/deploy_images.py verify; \
-	$(PYTHON) scripts/deploy_images.py cuda; \
-	$(PYTHON) scripts/compose.py up -d --no-build --pull never --wait --wait-timeout 240; \
-	$(PYTHON) scripts/deploy_images.py running; \
+	$(PYTHON) scripts/preflight.py --components "$(COMPONENTS)"; \
+	$(PYTHON) scripts/deploy_images.py retain --components "$(COMPONENTS)"; \
+	$(PYTHON) scripts/compose.py build $(DEPLOY_SELECTION); \
+	$(PYTHON) scripts/deploy_images.py verify --components "$(COMPONENTS)"; \
+	$(PYTHON) scripts/deploy_images.py cuda --components "$(COMPONENTS)"; \
+	$(if $(filter stt tts,$(DEPLOY_SELECTION)),$(PYTHON) scripts/compose.py up -d --no-build --pull never --wait --wait-timeout 240 $(filter stt tts,$(DEPLOY_SELECTION));,) \
+	$(PYTHON) scripts/compose.py up -d --no-build --pull never --wait --wait-timeout 240 gateway; \
+	$(PYTHON) scripts/deploy_images.py running --components "$(COMPONENTS)"; \
 	$(PYTHON) scripts/compose.py exec -T gateway /healthcheck http://127.0.0.1:8080/readyz; \
-	$(PYTHON) scripts/compose.py exec -T stt python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8081/readyz", timeout=3)'; \
-	$(PYTHON) scripts/compose.py exec -T tts python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8082/readyz", timeout=3)'; \
-	echo "PASS: Gateway, STT, and TTS are healthy and ready"
+	$(if $(filter stt,$(DEPLOY_SELECTION)),$(PYTHON) scripts/compose.py exec -T stt python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8081/readyz", timeout=3)';,) \
+	$(if $(filter tts,$(DEPLOY_SELECTION)),$(PYTHON) scripts/compose.py exec -T tts python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8082/readyz", timeout=3)';,) \
+	echo "PASS: selected SpeechPlatform components are healthy and ready"
 status:
 	$(PYTHON) scripts/deploy_images.py status $(SERVICE)
 logs:

@@ -337,7 +337,13 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 405, "method_not_allowed")
 		return
 	}
-	if s.cfg.Enabled == nil || !*s.cfg.Enabled || s.stopped.Load() || s.root == nil || s.root.Err() != nil {
+	if s.cfg.Enabled == nil || !*s.cfg.Enabled {
+		w.Header().Set("X-Speech-Capability-State", "disabled")
+		writeErr(w, 503, "text_transform_unavailable")
+		return
+	}
+	if s.stopped.Load() || s.root == nil || s.root.Err() != nil {
+		w.Header().Set("X-Speech-Capability-State", "unavailable")
 		writeErr(w, 503, "text_transform_unavailable")
 		return
 	}

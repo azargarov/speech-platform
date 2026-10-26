@@ -197,6 +197,14 @@ All requested output destinations are canonicalized and checked for collisions b
 
 The CLI checks protocol success and deterministic response properties. It does not score semantic preservation or linguistic quality. Live qualification requires separate authorization and must not be inferred from offline tests.
 
+Each report includes `capability_state`: `available` after a valid successful
+operation; `disabled` after `capability_disabled`, the legacy disabled-text
+code, or a policy rejection; `configured_but_unavailable` after
+`provider_unavailable`/`worker_unavailable`; `failing_during_execution` after
+another Gateway response or invalid response; and `not_established` when local
+validation or authentication prevented a meaningful operation result. The
+actual HTTP status, API error, diagnostic stage and request ID remain recorded.
+
 For text transformation, JSON report metadata records the optional
 `X-Speech-Prompt-SHA256` response header when returned. This identifies the
 active prompt snapshot used by the Gateway without adding prompt contents to

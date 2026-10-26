@@ -38,15 +38,20 @@ type groqSTTInput struct {
 }
 
 type groqSTTFailure struct {
-	Status     int
-	Code       string
-	Message    string
-	RetryAfter string
+	Status          int
+	Code            string
+	Message         string
+	RetryAfter      string
+	CapabilityState string
 }
 
 func (e *groqSTTFailure) Error() string { return e.Message }
 
 func selectSTTProviders(header http.Header, groqAvailable bool) ([]speechProviderID, *groqSTTFailure) {
+	return selectSTTProvidersConfigured(header, true, groqAvailable, groqAvailable)
+}
+
+func selectSTTProvidersConfigured(header http.Header, localEnabled, groqEnabled, groqAvailable bool) ([]speechProviderID, *groqSTTFailure) {
 	consent := false
 	if values := header.Values("X-Allow-Cloud-Audio"); len(values) > 0 {
 		if len(values) != 1 || (values[0] != "true" && values[0] != "false") {
@@ -60,18 +65,40 @@ func selectSTTProviders(header http.Header, groqAvailable bool) ([]speechProvide
 	}
 	switch provider {
 	case "":
+		if !localEnabled && !consent && groqEnabled {
+			return nil, sttInputFailure(http.StatusForbidden, "cloud_audio_not_authorized", "explicit cloud-audio authorization is required")
+		}
+		if !localEnabled && groqEnabled && !groqAvailable {
+			return nil, sttInputFailure(http.StatusServiceUnavailable, "provider_unavailable", "selected STT provider is unavailable")
+		}
+		if consent && groqAvailable && !localEnabled {
+			return []speechProviderID{groqWhisperProvider}, nil
+		}
 		if consent && groqAvailable {
 			return []speechProviderID{localWhisperProvider, groqWhisperProvider}, nil
 		}
+		if !localEnabled {
+			return nil, sttInputFailure(http.StatusServiceUnavailable, "capability_disabled", "STT capability is disabled")
+		}
 		return []speechProviderID{localWhisperProvider}, nil
 	case "local":
+		if !localEnabled {
+			return nil, sttInputFailure(http.StatusServiceUnavailable, "capability_disabled", "local STT capability is disabled")
+		}
 		return []speechProviderID{localWhisperProvider}, nil
 	case "groq":
 		if !consent {
 			return nil, sttInputFailure(http.StatusForbidden, "cloud_audio_not_authorized", "explicit cloud-audio authorization is required")
 		}
+		if !groqEnabled {
+			failure := sttInputFailure(http.StatusServiceUnavailable, "provider_unavailable", "selected STT provider is unavailable")
+			failure.CapabilityState = "disabled"
+			return nil, failure
+		}
 		if !groqAvailable {
-			return nil, sttInputFailure(http.StatusServiceUnavailable, "provider_unavailable", "selected STT provider is unavailable")
+			failure := sttInputFailure(http.StatusServiceUnavailable, "provider_unavailable", "selected STT provider is unavailable")
+			failure.CapabilityState = "unavailable"
+			return nil, failure
 		}
 		return []speechProviderID{groqWhisperProvider}, nil
 	default:
@@ -86,6 +113,9 @@ func writeGroqSTTFailure(w http.ResponseWriter, err error) {
 	}
 	if failure.RetryAfter != "" {
 		w.Header().Set("Retry-After", failure.RetryAfter)
+	}
+	if failure.CapabilityState != "" {
+		w.Header().Set("X-Speech-Capability-State", failure.CapabilityState)
 	}
 	transport.JSON(w, failure.Status, transport.Error{Code: failure.Code, Message: failure.Message})
 }

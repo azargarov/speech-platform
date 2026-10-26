@@ -72,6 +72,47 @@ func TestConfig(t *testing.T) {
 	})
 }
 
+func TestDisabledWorkersDoNotRequireURLsOrTimeoutsAndDefaultEnabled(t *testing.T) {
+	t.Setenv("SPEECH_LISTEN_PORT", "")
+	t.Setenv("SPEECH_API_TOKEN", "offline-test-token-0123456789abcdef")
+	raw, err := os.ReadFile("../../configs/gateway.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "gateway.yaml")
+	for _, tc := range []struct {
+		stt, tts bool
+	}{{false, false}, {true, false}, {false, true}, {true, true}} {
+		body := string(raw)
+		if !tc.stt {
+			body = strings.Replace(body, "  stt: true\n", "  stt: false\n", 1)
+			for _, line := range []string{"stt_url: http://stt:8081\n", "stt_timeout: 180s\n"} {
+				body = strings.Replace(body, line, "", 1)
+			}
+		}
+		if !tc.tts {
+			body = strings.Replace(body, "  tts: true\n", "  tts: false\n", 1)
+			for _, line := range []string{"tts_url: http://tts:8082\n", "tts_timeout: 600s\n"} {
+				body = strings.Replace(body, line, "", 1)
+			}
+		}
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := Load(path)
+		if err != nil || c.STTEnabled() != tc.stt || c.TTSEnabled() != tc.tts {
+			t.Fatalf("expected stt=%t tts=%t got=%+v err=%v", tc.stt, tc.tts, c.Capabilities, err)
+		}
+	}
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil || !c.STTEnabled() || !c.TTSEnabled() {
+		t.Fatalf("legacy defaults config=%+v err=%v", c.Capabilities, err)
+	}
+}
+
 func TestGroqSTTConfigurationDefaultsAndValidation(t *testing.T) {
 	t.Setenv("SPEECH_LISTEN_PORT", "")
 	t.Setenv("SPEECH_API_TOKEN", "offline-test-token-0123456789abcdef")

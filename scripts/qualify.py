@@ -226,6 +226,7 @@ def _safe_headers(headers):
         "X-Speech-Provider",
         "X-Speech-Model",
         "X-Speech-Prompt-SHA256",
+        "X-Speech-Capability-State",
     )
     return {
         name.lower(): headers.get(name)
@@ -238,6 +239,7 @@ def _troubleshooting(classification, api_code=None):
     code_hints = {
         "resource_exhausted": "The selected worker reported resource exhaustion; check available GPU/worker capacity and service logs. Do not retry automatically.",
         "provider_unavailable": "The selected provider is disabled or unavailable. Check its enablement and private credential configuration; the Gateway did not substitute another provider.",
+        "capability_disabled": "This operation is disabled in Gateway configuration. Enable it and select the matching worker component before retrying.",
         "cloud_not_allowed": "Gateway cloud text policy denied this request; no CLI consent flag can override server policy.",
         "cloud_audio_not_authorized": "Groq STT requires explicit X-Allow-Cloud-Audio consent and an enabled provider.",
         "deadline_exceeded": "The Gateway deadline expired; inspect service readiness and configured request deadlines before retrying.",
@@ -406,6 +408,7 @@ def _base(operation, params, input_meta):
         "http": {"status": None, "success": False},
         "elapsed_seconds": None,
         "error": {"classification": None, "api_code": None},
+        "capability_state": "not_established",
         "diagnostics": {
             "client_request_id": str(uuid.uuid4()),
             "server_request_id": None,
@@ -439,6 +442,33 @@ def _expect_api_error(report, expected):
                 "troubleshooting": "Check whether the target configuration and request actually exercise the expected rejection.",
             }
         )
+
+
+def _capability_state(report):
+    header_state = (
+        report.get("diagnostics", {})
+        .get("response_headers", {})
+        .get("x-speech-capability-state")
+    )
+    if header_state == "disabled":
+        return "disabled"
+    if header_state == "unavailable":
+        return "configured_but_unavailable"
+    code = report.get("error", {}).get("api_code")
+    if code in {
+        "capability_disabled",
+        "model_disabled",
+        "cloud_not_allowed",
+        "cloud_audio_not_authorized",
+    }:
+        return "disabled"
+    if code in {"provider_unavailable", "worker_unavailable", "no_eligible_model"}:
+        return "configured_but_unavailable"
+    if report.get("http", {}).get("success") and report.get("outcome") == "pass":
+        return "available"
+    if report.get("http", {}).get("status") is not None and code != "unauthorized":
+        return "failing_during_execution"
+    return "not_established"
 
 
 def _validate_stt_response(response, status):
@@ -1172,6 +1202,7 @@ def main(argv=None):
     except (OSError, QualificationError) as exc:
         report = _failure_report(args, exc)
     _expect_api_error(report, args.expect_error)
+    report["capability_state"] = _capability_state(report)
     debug_evidence_error = False
     if args.debug:
         debug_path = _collect_debug_evidence(
@@ -1212,6 +1243,7 @@ def main(argv=None):
     http_text = str(status) if status is not None else "N/A"
     elapsed_text = f"{elapsed}s" if elapsed is not None else "N/A"
     summary = f"{report['outcome'].upper()} {args.operation}: HTTP {http_text}; elapsed={elapsed_text}"
+    summary += f"; capability={report['capability_state']}"
     if report.get("expected_api_error", {}).get("matched"):
         summary = (
             f"PASS {args.operation}: expected API error {args.expect_error}; "

@@ -176,9 +176,14 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '503': &id010
-          description: Provider not ready
+          description: Enabled worker/provider unavailable, or this speech capability is disabled. Disabled STT/TTS returns capability_disabled; an enabled but unavailable provider returns provider_unavailable or not_ready.
           headers:
             X-Request-ID: *requestIdHeader
+            X-Speech-Capability-State:
+              description: Optional diagnostic state for an explicitly selected provider; disabled or unavailable. The existing provider_unavailable code is retained for explicitly selected disabled Groq STT.
+              schema:
+                type: string
+                enum: [disabled, unavailable]
           content:
             application/json:
               schema:
@@ -327,7 +332,19 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-        '503': *id010
+        '503':
+          description: Transformation disabled, provider unavailable, or Gateway shutting down.
+          headers:
+            X-Request-ID: *requestIdHeader
+            X-Speech-Capability-State:
+              description: Disabled when text transformation is disabled in Gateway configuration; unavailable when the Gateway is stopping.
+              schema:
+                type: string
+                enum: [disabled, unavailable]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '504': *id011
   /v1/models/warmup:
     post:

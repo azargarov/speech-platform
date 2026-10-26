@@ -134,7 +134,27 @@ def check_owner(container, service):
         raise DeployError(f"{service} container uses an unexpected Compose file")
 
 
-def project_containers():
+def parse_components(raw):
+    parts = raw.split(",")
+    if any(not part.strip() for part in parts):
+        raise DeployError(
+            "components must be a unique comma-separated selection including gateway"
+        )
+    components = tuple(part.strip() for part in parts)
+    if (
+        not components
+        or components[0] != "gateway"
+        or len(components) != len(set(components))
+        or not set(components) <= set(SERVICES)
+    ):
+        raise DeployError(
+            "components must be a unique comma-separated selection including gateway"
+        )
+    return components
+
+
+def project_containers(components=None):
+    selected = set(components or SERVICES)
     rows = parse_json_lines(
         compose_run(["ps", "--all", "--format", "json"]).stdout.strip()
     )
@@ -152,12 +172,13 @@ def project_containers():
         seen.add(service)
         container = inspect_container(container_id)
         check_owner(container, service)
-        containers.append((service, container))
+        if service in selected:
+            containers.append((service, container))
     return containers
 
 
-def retain():
-    containers = project_containers()
+def retain(components=None):
+    containers = project_containers(components)
     for service, container in containers:
         image_id = container.get("Image")
         if not isinstance(image_id, str) or not image_id.startswith("sha256:"):
@@ -177,10 +198,12 @@ def retain():
         print("No existing SpeechPlatform containers to retain")
 
 
-def built_images():
+def built_images(components=None):
     rev = revision()
     identities = {}
-    for service, (name, role, variant) in SERVICES.items():
+    selected = components or tuple(SERVICES)
+    for service in selected:
+        name, role, variant = SERVICES[service]
         reference = f"{name}:{rev}"
         images = parse_json_lines(docker(["image", "inspect", reference]).stdout)
         if len(images) != 1:
@@ -205,16 +228,19 @@ def built_images():
     return identities
 
 
-def verify():
-    for service, (reference, image_id) in built_images().items():
+def verify(components=None):
+    for service, (reference, image_id) in built_images(components).items():
         print(f"Verified {service}: {reference} {image_id}")
 
 
-def cuda_probe():
+def cuda_probe(components=None):
+    selected = components or tuple(SERVICES)
     values = preflight.load_env(ROOT)
-    preflight.validate_environment(values, ROOT)
-    identities = built_images()
+    preflight.validate_environment(values, ROOT, components=selected)
+    identities = built_images(selected)
     for service in ("stt", "tts"):
+        if service not in selected:
+            continue
         reference, _ = identities[service]
         device = values[service.upper() + "_GPU_DEVICE"]
         name = f"speech-platform-cuda-probe-{service}-{uuid.uuid4().hex[:12]}"
@@ -267,8 +293,9 @@ def cuda_probe():
             raise DeployError(failure)
 
 
-def running():
-    identities = built_images()
+def running(components=None):
+    selected = components or tuple(SERVICES)
+    identities = built_images(selected)
     for service, (reference, image_id) in identities.items():
         raw = compose_run(["ps", "--quiet", service]).stdout.strip()
         ids = [line for line in raw.splitlines() if line]
@@ -317,8 +344,10 @@ def main(argv=None):
         "action", choices=("source", "retain", "verify", "cuda", "running", "status")
     )
     parser.add_argument("service", nargs="?", choices=tuple(SERVICES))
+    parser.add_argument("--components", default=",".join(SERVICES))
     args = parser.parse_args(argv)
     try:
+        components = parse_components(args.components)
         if args.action == "source":
             source_check()
         elif args.action == "status":
@@ -327,10 +356,10 @@ def main(argv=None):
             raise DeployError("service selection is supported only for status")
         else:
             {
-                "retain": retain,
-                "verify": verify,
-                "cuda": cuda_probe,
-                "running": running,
+                "retain": lambda: retain(components),
+                "verify": lambda: verify(components),
+                "cuda": lambda: cuda_probe(components),
+                "running": lambda: running(components),
             }[args.action]()
     except (
         DeployError,

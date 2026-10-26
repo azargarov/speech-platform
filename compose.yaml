@@ -25,11 +25,6 @@ services:
         source: ./configs/prompts
         target: /configs/prompts
         read_only: true
-    depends_on:
-      stt:
-        condition: service_healthy
-      tts:
-        condition: service_healthy
     networks: [publish, stt_private, tts_private]
     restart: unless-stopped
     read_only: true
@@ -46,6 +41,7 @@ services:
       retries: 3
       start_period: 20s
   stt:
+    profiles: [stt]
     image: speech-platform-stt-cuda:${SOURCE_REVISION:-local}
     platform: linux/amd64
     build:
@@ -97,6 +93,7 @@ services:
               device_ids: ["${STT_GPU_DEVICE:-0}"]
               capabilities: [gpu]
   tts:
+    profiles: [tts]
     image: speech-platform-tts:${SOURCE_REVISION:-local}
     build:
       context: .

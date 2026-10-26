@@ -16,7 +16,8 @@ provenance; it does not describe the current VoxCPM2 deployment.
   Installation explicitly uses the `default` Docker context and requires its
   endpoint to be local Unix. Deployment overrides belong in `.env`, not a prior
   shell. The Compose project is fixed to `speech-platform`.
-- NVIDIA GPU/compatible driver and NVIDIA Container Toolkit for STT/TTS. Host
+- NVIDIA GPU/compatible driver and NVIDIA Container Toolkit when STT or TTS is
+  selected. Gateway-only and cloud-text-only installations do not probe CUDA. Host
   `nvidia-smi` is necessary but insufficient: installation runs a disposable,
   network-disabled CUDA driver/device probe in each selected worker image before
   service creation. A free-VRAM check is an observation, not a reservation or a
@@ -80,7 +81,45 @@ next step. Summary counts end with READY TO INSTALL or NOT READY TO INSTALL;
 blocking failures return nonzero. Dirty source is WARN during inspection and FAIL
 during install. Installation requires reviewed changes committed first.
 
-Installation always builds and updates the complete three-service stack.
+Installation defaults to the complete three-service stack. `COMPONENTS` scopes
+which services are rebuilt, retained for rollback, recreated and checked after
+start. Gateway must always be selected. `capabilities.stt` and
+`capabilities.tts` independently control which local operations Gateway serves;
+omitted flags retain the historical enabled default. For an enabled worker that
+is not selected, preflight requires the existing worker to be uniquely owned by
+this Compose project, running and healthy, attached to its private network, and
+using a compatible SpeechPlatform worker image. Preflight also checks that the
+Gateway URL targets the canonical worker service. If that worker is absent or
+incompatible, include it in the deployment selection or repair it before
+updating Gateway. A disabled worker is not required. A selected worker is
+checked against its pinned model, GPU and image prerequisites even when its
+Gateway capability is disabled.
+
+Use these independent deployment selections:
+
+```sh
+make install COMPONENTS=gateway PYTHON=.venv/bin/python
+make install COMPONENTS=gateway,stt PYTHON=.venv/bin/python
+make install COMPONENTS=gateway,tts PYTHON=.venv/bin/python
+make install COMPONENTS=gateway,stt,tts PYTHON=.venv/bin/python
+```
+
+Capability settings are independent of those commands: set either capability
+to `true` or `false` according to the functions Gateway should expose. Enabled
+worker URLs and positive timeouts are required; disabled worker URLs, timeouts,
+artifacts, GPU configuration and health checks are omitted from validation.
+Existing configs with no `capabilities` mapping remain full-stack. STT and TTS
+use independent Compose profiles. Gateway has no Compose worker dependencies;
+selected workers are started and health-checked before Gateway. For example,
+`COMPONENTS=gateway` updates only Gateway while requiring any enabled, unselected
+workers to remain healthy and compatible.
+
+`text_transform.enabled`, its enabled models and `selection.allow_cloud` already
+select local-only, cloud-only or mixed text inference. Local models require the
+configured shared Ollama endpoint/model check; cloud credentials remain
+optional, and missing credentials make only that provider unavailable. CLI
+cloud consent and Gateway routing policy remain required for cloud requests.
+
 Inspection, logs and stop may select one service:
 
 ```sh
@@ -91,11 +130,12 @@ make stop SERVICE=tts PYTHON=.venv/bin/python
 ```
 
 Before service replacement, install checks the clean Git source, read-only
-preflight, fixed Compose ownership, and retains current container image IDs under
-revision-specific local rollback tags. It builds all services through Compose,
-checks source/role/platform labels, runs network-disabled CUDA visibility probes
-for STT and TTS, then calls `compose up --no-build --pull never`. Compose waits
-for health; bounded readiness requests then check all three services. Installation
+preflight, fixed Compose ownership, and retains selected container image IDs under
+revision-specific local rollback tags. It builds only selected services through
+Compose, checks source/role/platform labels, and runs network-disabled CUDA
+visibility probes only for selected workers. Workers start first when selected;
+Gateway then starts with `compose up --no-build --pull never`. Bounded readiness
+requests check Gateway and only selected workers. Installation
 never rotates `.env`, downloads models or makes cloud inference requests.
 `GATEWAY_EXPECTED_IMAGE_ID` and `GATEWAY_EXPECTED_SOURCE_REVISION` are obsolete;
 preflight rejects them with a migration message. Remove those reviewed lines from
@@ -112,15 +152,13 @@ is ready. TTS readiness becomes unavailable for a known permanent artifact or
 runtime failure, and recovery is retried after repairing the cause and issuing
 new work. Readiness probes do not load models.
 
-STT and TTS are currently mandatory deployment components: both worker URLs
-are required by Gateway configuration, both Compose services are part of the
-default install, and Gateway `/readyz` requires both workers. To support a
-disabled STT or TTS capability, the minimum change is to add an explicit
-validated enable flag and optional worker URL in Gateway configuration, make
-the corresponding Compose service/profile and worker-specific preflight checks
-conditional, and have Gateway readiness require only enabled workers. Request
-routes would need to return a stable unavailable/disabled error when their
-worker is disabled. This work does not change their lifecycle.
+An operator who enables only cloud STT does not need the local STT worker;
+Groq remains independently credential-gated and explicitly consented. Disabled
+STT/TTS routes still require the configured bearer token before returning
+`capability_disabled`. Qualification reports include `capability_state`:
+`available`, `disabled`, `configured_but_unavailable`,
+`failing_during_execution`, or `not_established` when a request did not establish
+an operation result. This work does not change worker lifecycle.
 
 Gateway speech queues are independent and FIFO: STT has one active local
 Faster-Whisper request plus three waiting requests; TTS has one active plus one
@@ -229,10 +267,10 @@ image IDs as local `speech-platform-rollback-<service>:<image-id>` tags.
 Use exact local image objects and a private configuration snapshot. Do not select
 a rollback by source revision alone.
 
-1. Record the target Gateway, STT and TTS image IDs from the trusted pre-upgrade
-   record. Confirm each image exists and inspect its service-role and source
-   labels. Do not use a tag until `docker image inspect` has confirmed its full
-   image ID.
+1. Record the target Gateway image and each worker selected in the deployment
+   from the trusted pre-upgrade record. Confirm each image exists and inspect
+   its service-role and source labels. Do not use a tag until `docker image
+   inspect` has confirmed its full image ID.
 2. Snapshot the active `.env`, the configured Gateway YAML and any configured
    private secrets file under a new `private/deployment-backups/<rollback-id>/`
    directory. Keep the directory mode `0700`; keep `.env` and secret files
@@ -240,9 +278,10 @@ a rollback by source revision alone.
    Leave active `.env`, credentials and source files unchanged. The old
    pre-D02 `.env` backup contains obsolete image-pin entries and fails current
    preflight; use a validated snapshot of the active configuration instead.
-3. Give the three exact image IDs a common local rollback tag, then inspect each
+3. Give each selected exact image ID a local rollback tag, then inspect each
    tag and confirm it resolves to its recorded full image ID and correct role.
-   For example, replace the placeholders with recorded IDs and one unique tag:
+   The following full-stack example uses one common tag; for a partial
+   deployment create aliases only for Gateway and its selected workers:
 
    ```sh
    ROLLBACK_TAG=rollback-<unique-id>
@@ -254,11 +293,11 @@ a rollback by source revision alone.
      "speech-platform-tts:$ROLLBACK_TAG"
    ```
 
-4. Render the complete project with `SOURCE_REVISION=$ROLLBACK_TAG`,
+4. Render the project with `SOURCE_REVISION=$ROLLBACK_TAG`,
    `GATEWAY_IMAGE=speech-platform-gateway:$ROLLBACK_TAG`, the snapshot `.env`,
    `compose.yaml` and the existing Ollama overlay when configured. Confirm the
-   project is `speech-platform`, the only services are Gateway/STT/TTS, each
-   image reference is the verified rollback alias, worker/model/config mounts
+   project is `speech-platform`, each selected image reference is the verified
+   rollback alias, worker/model/config mounts
    are read-only, and Ollama remains an external network. Run each selected
    image's `--check-config` command in a temporary `--network none` container
    before replacing services.
@@ -272,23 +311,38 @@ a rollback by source revision alone.
      --env-file private/deployment-backups/<rollback-id>/.env \
      -f compose.yaml \
      -f deployments/compose/compose.ollama.yaml \
-     up -d --no-build --pull never --wait --wait-timeout 240 \
-     gateway stt tts
+     up -d --no-build --pull never --wait --wait-timeout 240 stt tts
+   SOURCE_REVISION="$ROLLBACK_TAG" \
+   GATEWAY_IMAGE="speech-platform-gateway:$ROLLBACK_TAG" \
+   docker --context default compose \
+     --project-name speech-platform \
+     --env-file private/deployment-backups/<rollback-id>/.env \
+     -f compose.yaml \
+     -f deployments/compose/compose.ollama.yaml \
+     up -d --no-build --pull never --wait --wait-timeout 240 gateway
    ```
 
+   The example restores the full stack. For a partial deployment, preserve the
+   snapshot's Gateway capability flags and omit unselected worker names. Restore
+   only the exact images retained for that deployment; if an enabled worker is
+   omitted, verify it remains running and healthy before restoring Gateway.
    Omit the Ollama overlay only when the selected Gateway config does not use
-   local Ollama. This command changes only the three named SpeechPlatform
-   services. It does not build, pull, run `down`, remove volumes or alter the
-   external Ollama network.
-6. Verify health/readiness, container image IDs and labels, authenticated
-   Gateway API behavior, and bounded local STT and TTS smoke tests. Check that
+   local Ollama. The command changes only named SpeechPlatform services. It
+   does not build, pull, run `down`, remove volumes or alter external Ollama.
+6. Verify health/readiness, selected container image IDs and labels,
+   authenticated Gateway API behavior, and smoke tests for selected local
+   workers. Check that
    Ollama and unrelated container IDs/start times are unchanged.
 
 To restore the intended release, check out its clean committed revision and run
-`make preflight`, `make install`, and `make status` with the active validated
-`.env`. Installation rebuilds the three images from that revision, retains the
-currently running exact image IDs, and replaces only SpeechPlatform services.
-Repeat health, image/source, API and local STT/TTS checks. If rollback or
+`make preflight COMPONENTS=...`, `make install COMPONENTS=...`, and `make status`
+with the active validated `.env`. The default component selection rebuilds the
+full stack; a partial update can select Gateway alone while retaining enabled
+workers, provided preflight verifies those existing workers are compatible and
+healthy.
+Installation retains the selected current exact image IDs and replaces only
+selected SpeechPlatform services. Repeat health, image/source, API and enabled
+local worker checks. If rollback or
 restoration is incomplete, inspect `make status` and service-scoped `make logs`,
 preserve the recorded exact IDs/config snapshot, and restore from a validated
 clean revision. Do not use `down`, prune Docker resources, or alter shared

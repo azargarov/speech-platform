@@ -35,6 +35,8 @@ TTS_MANIFEST_SHA256 = "04d6e05b69b22568030ac21f494e406ffdf2d06efeeab43cfdb4c21ba
 OLLAMA_DEFAULT_NETWORK = "speech-platform_ollama_private"
 OLLAMA_DEFAULT_CONTAINER = "ollama"
 DOCKER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+WORKER_IMAGE_ROLES = {"stt": "stt-worker", "tts": "tts-worker"}
+WORKER_PORTS = {"stt": 8081, "tts": 8082}
 ALLOWED_ENV = {
     "COMPOSE_PROJECT_NAME",
     "SPEECH_BIND_IP",
@@ -249,16 +251,116 @@ def uses_local_ollama(document):
     return False
 
 
-def validate_environment(values, root=ROOT):
-    required = {
-        "MODEL_STORE",
-        "MODEL_MANIFEST_SHA256",
-        "TTS_MODEL_MANIFEST_SHA256",
-        "SPEECH_BIND_IP",
-        "SPEECH_PORT",
-        "STT_GPU_DEVICE",
-        "TTS_GPU_DEVICE",
+def parse_components(raw):
+    parts = raw.split(",")
+    if any(not part.strip() for part in parts):
+        raise PreflightError(
+            "components must be a unique comma-separated selection including gateway"
+        )
+    components = tuple(part.strip() for part in parts)
+    allowed = {"gateway", "stt", "tts"}
+    if (
+        not components
+        or components[0] != "gateway"
+        or len(components) != len(set(components))
+        or not set(components) <= allowed
+    ):
+        raise PreflightError(
+            "components must be a unique comma-separated selection including gateway"
+        )
+    return components
+
+
+def existing_worker_compatible(worker, gateway_document, root, command):
+    """Require a healthy, owned worker compatible with an unchanged Gateway config."""
+    if worker not in WORKER_IMAGE_ROLES:
+        raise PreflightError("unknown worker")
+    service_role = WORKER_IMAGE_ROLES[worker]
+    address = gateway_document.get(f"{worker}_url", "")
+    parsed = urlparse(str(address))
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != worker
+        or parsed.port != WORKER_PORTS[worker]
+        or parsed.username
+        or parsed.password
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise PreflightError(
+            f"Gateway {worker}_url does not target the canonical {worker} service"
+        )
+
+    ids = command(
+        [
+            "docker",
+            "ps",
+            "--all",
+            "--quiet",
+            "--filter",
+            "label=com.docker.compose.project=speech-platform",
+            "--filter",
+            f"label=com.docker.compose.service={worker}",
+        ]
+    ).splitlines()
+    ids = [item.strip() for item in ids if item.strip()]
+    if len(ids) != 1:
+        raise PreflightError("no unique deployed worker container exists")
+    containers = json.loads(command(["docker", "inspect", ids[0]]))
+    if not isinstance(containers, list) or len(containers) != 1:
+        raise PreflightError("deployed worker container identity is invalid")
+    container = containers[0]
+    labels = (container.get("Config") or {}).get("Labels") or {}
+    config_files = {
+        str(Path(item).resolve())
+        for item in labels.get("com.docker.compose.project.config_files", "").split(",")
+        if item
     }
+    expected_compose = str((root / "compose.yaml").resolve())
+    state = container.get("State") or {}
+    networks = (container.get("NetworkSettings") or {}).get("Networks") or {}
+    network = networks.get(f"speech-platform_{worker}_private") or {}
+    if (
+        labels.get("com.docker.compose.project") != "speech-platform"
+        or labels.get("com.docker.compose.service") != worker
+        or labels.get("com.docker.compose.project.working_dir") != str(root.resolve())
+        or expected_compose not in config_files
+        or state.get("Running") is not True
+        or (state.get("Health") or {}).get("Status") != "healthy"
+        or not network.get("IPAddress")
+    ):
+        raise PreflightError(
+            "worker is not running, healthy, owned by this checkout, or attached to its private network"
+        )
+
+    images = json.loads(command(["docker", "image", "inspect", container["Image"]]))
+    if not isinstance(images, list) or len(images) != 1:
+        raise PreflightError("deployed worker image identity is unavailable")
+    image = images[0]
+    image_labels = (image.get("Config") or {}).get("Labels") or {}
+    revision = image_labels.get("org.opencontainers.image.revision", "")
+    if (
+        image.get("Os") != "linux"
+        or image.get("Architecture") != "amd64"
+        or image_labels.get("com.speech-platform.service") != worker
+        or image_labels.get("com.speech-platform.service-role") != service_role
+        or image_labels.get("com.speech-platform.runtime-variant") != "cuda"
+        or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", revision)
+    ):
+        raise PreflightError("deployed worker image role or runtime is incompatible")
+    return True
+
+
+def validate_environment(values, root=ROOT, components=None):
+    selected = set(components or ("gateway", "stt", "tts"))
+    required = {"SPEECH_BIND_IP", "SPEECH_PORT"}
+    if "stt" in selected:
+        required.update({"MODEL_STORE", "MODEL_MANIFEST_SHA256", "STT_GPU_DEVICE"})
+    if "tts" in selected:
+        required.update({"TTS_MODEL_MANIFEST_SHA256", "TTS_GPU_DEVICE"})
+        if not values.get("TTS_MODEL_STORE"):
+            required.add("MODEL_STORE")
     missing = required - values.keys()
     if missing:
         raise PreflightError(
@@ -278,27 +380,33 @@ def validate_environment(values, root=ROOT):
         raise PreflightError(
             "COMPOSE_PROJECT_NAME is fixed to speech-platform; remove the override from .env"
         )
-    if values["MODEL_MANIFEST_SHA256"] != STT_MANIFEST_SHA256:
+    if "stt" in selected and values["MODEL_MANIFEST_SHA256"] != STT_MANIFEST_SHA256:
         raise PreflightError("MODEL_MANIFEST_SHA256 must match the pinned STT model")
-    if values["TTS_MODEL_MANIFEST_SHA256"] != TTS_MANIFEST_SHA256:
+    if "tts" in selected and values["TTS_MODEL_MANIFEST_SHA256"] != TTS_MANIFEST_SHA256:
         raise PreflightError(
             "TTS_MODEL_MANIFEST_SHA256 must match the pinned VoxCPM2 artifact"
         )
-    if not Path(values["MODEL_STORE"]).is_absolute() or (
-        values.get("TTS_MODEL_STORE")
-        and not Path(values["TTS_MODEL_STORE"]).is_absolute()
-    ):
+    model_paths = []
+    if "stt" in selected:
+        model_paths.append(values["MODEL_STORE"])
+    if "tts" in selected:
+        model_paths.append(values.get("TTS_MODEL_STORE") or values["MODEL_STORE"])
+    if any(not Path(path).is_absolute() for path in model_paths):
         raise PreflightError("model store paths must be absolute host paths")
     try:
         port = int(values["SPEECH_PORT"])
-        gpu = int(values["STT_GPU_DEVICE"])
-        tts_gpu = int(values["TTS_GPU_DEVICE"])
+        gpu = int(values.get("STT_GPU_DEVICE", "0"))
+        tts_gpu = int(values.get("TTS_GPU_DEVICE", "0"))
         ip = str(ipaddress.IPv4Address(values["SPEECH_BIND_IP"]))
     except ValueError as exc:
         raise PreflightError(
             "SPEECH_PORT, GPU indices or SPEECH_BIND_IP are invalid"
         ) from exc
-    if not 1 <= port <= 65535 or gpu < 0 or tts_gpu < 0:
+    if (
+        not 1 <= port <= 65535
+        or ("stt" in selected and gpu < 0)
+        or ("tts" in selected and tts_gpu < 0)
+    ):
         raise PreflightError(
             "SPEECH_PORT or a GPU device index is outside its valid range"
         )
@@ -312,10 +420,12 @@ def validate_environment(values, root=ROOT):
             raise PreflightError(
                 "non-loopback API use requires an https SPEECH_API_URL"
             )
-    for key, fallback in (
-        ("MODEL_READ_GID", "988"),
-        ("TTS_MODEL_READ_GID", values.get("MODEL_READ_GID", "988")),
-    ):
+    gids = []
+    if "stt" in selected:
+        gids.append(("MODEL_READ_GID", "988"))
+    if "tts" in selected:
+        gids.append(("TTS_MODEL_READ_GID", values.get("MODEL_READ_GID", "988")))
+    for key, fallback in gids:
         raw = values.get(key, fallback)
         if not raw.isdecimal() or not 1 <= int(raw) <= 2147483647:
             raise PreflightError(f"{key} must be in 1..2147483647")
@@ -630,6 +740,7 @@ def run_checks(
     *,
     root=ROOT,
     service=None,
+    components=None,
     model=True,
     compose_config=True,
     require_clean=False,
@@ -639,7 +750,11 @@ def run_checks(
     """Read-only checks for host, config, providers and model metadata."""
     root = Path(root).resolve()
     report = Report()
-    selected = {service} if service else {"gateway", "stt", "tts"}
+    selected = (
+        set(parse_components(components))
+        if components
+        else ({service} if service else {"gateway", "stt", "tts"})
+    )
     if not selected <= {"gateway", "stt", "tts"}:
         raise ValueError("unknown service")
 
@@ -708,7 +823,7 @@ def run_checks(
         check(
             "Deployment",
             "Deployment values",
-            lambda: validate_environment(values, root),
+            lambda: validate_environment(values, root, components=selected),
             "Correct required paths, token, ports, GPU indices, manifest pins and limits in .env.",
         )
         if values is not None
@@ -933,6 +1048,52 @@ def run_checks(
                 "Correct the Gateway YAML mapping and rerun Gateway --check-config.",
             )
 
+    if gateway_document is not None and "gateway" in selected:
+        capability_config = gateway_document.get("capabilities") or {}
+        if not isinstance(capability_config, dict):
+            report.add(
+                "Deployment",
+                "FAIL",
+                "Gateway worker capabilities",
+                "Set capabilities.stt and capabilities.tts to booleans.",
+            )
+        else:
+            for worker in ("stt", "tts"):
+                enabled = capability_config.get(worker, True)
+                if not isinstance(enabled, bool):
+                    report.add(
+                        "Deployment",
+                        "FAIL",
+                        f"Gateway {worker.upper()} capability",
+                        f"Set capabilities.{worker} to a boolean.",
+                    )
+                    continue
+                if not enabled:
+                    report.add(
+                        "Deployment",
+                        "SKIP",
+                        f"Existing {worker.upper()} worker",
+                        f"Gateway capability {worker.upper()} is disabled.",
+                    )
+                elif components is not None and worker not in selected:
+                    check(
+                        "Deployment",
+                        f"Existing {worker.upper()} worker compatibility",
+                        lambda worker=worker: existing_worker_compatible(
+                            worker, gateway_document, root, command
+                        ),
+                        f"Start or repair the owned, healthy {worker.upper()} service, or include it in the update with make install COMPONENTS=gateway,{worker}.",
+                    )
+                else:
+                    report.add(
+                        "Deployment",
+                        "PASS",
+                        f"Gateway {worker.upper()} capability",
+                        "Worker will be included in this deployment selection."
+                        if worker in selected
+                        else "No component selection was requested.",
+                    )
+
     local_ollama = False
     if gateway_document is not None and "gateway" in selected:
         cloud = check(
@@ -1049,6 +1210,10 @@ def run_checks(
         "-f",
         str(root / "compose.yaml"),
     ]
+    if "stt" in selected:
+        compose_files += ["--profile", "stt"]
+    if "tts" in selected:
+        compose_files += ["--profile", "tts"]
     if gateway_document is not None and local_ollama is True:
         compose_files += ["-f", str(root / "deployments/compose/compose.ollama.yaml")]
     if compose_config and gateway_document is not None:
@@ -1287,7 +1452,7 @@ def run_checks(
             )
             continue
         store = (
-            values.get("TTS_MODEL_STORE", values["MODEL_STORE"])
+            values.get("TTS_MODEL_STORE") or values.get("MODEL_STORE", "")
             if worker == "tts"
             else values["MODEL_STORE"]
         )
@@ -1311,9 +1476,20 @@ def main():
     parser = argparse.ArgumentParser(
         description="Read-only SpeechPlatform installation preflight"
     )
-    parser.add_argument("--service", choices=("gateway", "stt", "tts"))
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--service",
+        choices=("gateway", "stt", "tts"),
+        help="legacy single-service validation",
+    )
+    selection.add_argument(
+        "--components", help="comma-separated deployment scope including gateway"
+    )
     args = parser.parse_args()
-    report = run_checks(service=args.service)
+    try:
+        report = run_checks(service=args.service, components=args.components)
+    except PreflightError as exc:
+        parser.error(str(exc))
     report.display()
     return 2 if report.failed else 0
 

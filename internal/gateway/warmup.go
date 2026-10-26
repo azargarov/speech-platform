@@ -113,7 +113,7 @@ func (c *warmupCoordinator) execute(ctx context.Context, cancel context.CancelFu
 	c.mu.Unlock()
 }
 
-func serveWarmup(w http.ResponseWriter, r *http.Request, token string, coordinator *warmupCoordinator, slots chan struct{}, stt *STTProxy, tts *TTSProxy, text http.Handler, timeout time.Duration, root context.Context) {
+func serveWarmup(w http.ResponseWriter, r *http.Request, token string, coordinator *warmupCoordinator, slots chan struct{}, stt *STTProxy, tts *TTSProxy, text http.Handler, timeout time.Duration, root context.Context, sttEnabled, ttsEnabled bool) {
 	if r.Method != http.MethodPost {
 		transport.JSON(w, http.StatusMethodNotAllowed, transport.Error{Code: "method_not_allowed", Message: "POST is required"})
 		return
@@ -187,9 +187,9 @@ func serveWarmup(w http.ResponseWriter, r *http.Request, token string, coordinat
 	for _, operation := range request.Operations {
 		switch operation {
 		case "stt":
-			canAttempt = canAttempt || stt != nil && stt.Client != nil
+			canAttempt = canAttempt || !sttEnabled || stt != nil && stt.Client != nil
 		case "tts":
-			canAttempt = canAttempt || tts != nil && tts.Client != nil
+			canAttempt = canAttempt || !ttsEnabled || tts != nil && tts.Client != nil
 		case "text_transform":
 			_, ok := text.(interface {
 				Warmup(context.Context) (string, string)
@@ -215,6 +215,10 @@ func serveWarmup(w http.ResponseWriter, r *http.Request, token string, coordinat
 
 	results := make([]warmupResult, 0, len(request.Operations))
 	for _, operation := range request.Operations {
+		if operation == "stt" && !sttEnabled || operation == "tts" && !ttsEnabled {
+			results = append(results, warmupResult{Operation: operation, Status: "unavailable", Code: "capability_disabled"})
+			continue
+		}
 		// Timer notification can lag its deadline. Do not admit another operation
 		// merely because the request context has not published its error yet.
 		deadline, bounded := ctx.Deadline()

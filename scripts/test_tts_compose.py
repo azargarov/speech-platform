@@ -32,12 +32,12 @@ class CanonicalTTSComposeTests(unittest.TestCase):
             tts["deploy"]["resources"]["reservations"]["devices"][0]["device_ids"][0],
         )
         self.assertIn("tts_private", services["gateway"]["networks"])
-        self.assertEqual(
-            services["gateway"]["depends_on"]["tts"]["condition"], "service_healthy"
-        )
+        self.assertNotIn("depends_on", services["gateway"])
+        self.assertEqual(tts["profiles"], ["tts"])
 
     def test_stt_gpu_and_model_profile_remain_separate(self):
         stt = self.compose["services"]["stt"]
+        self.assertEqual(stt["profiles"], ["stt"])
         self.assertIn(
             "STT_GPU_DEVICE",
             stt["deploy"]["resources"]["reservations"]["devices"][0]["device_ids"][0],

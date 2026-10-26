@@ -522,7 +522,7 @@ func TestWarmupDeadlineMarksLaterOperationNotAttempted(t *testing.T) {
 			r := httptest.NewRequest(http.MethodPost, "/v1/models/warmup", strings.NewReader(`{"operations":["stt","tts"]}`))
 			r.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
-			serveWarmup(w, r, "", coordinator, make(chan struct{}, 4), stt, tts, nil, 2*time.Hour, context.Background())
+			serveWarmup(w, r, "", coordinator, make(chan struct{}, 4), stt, tts, nil, 2*time.Hour, context.Background(), true, true)
 			got := decodeWarmup(t, w)
 			if w.Code != http.StatusOK || len(got.Results) != 2 || got.Complete || got.Results[0].Status != firstStatus || got.Results[1].Status != "not_attempted" || got.Results[1].Code != "deadline_exceeded" {
 				t.Fatalf("status=%d result=%+v", w.Code, got)
