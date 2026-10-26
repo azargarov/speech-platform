@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
@@ -257,6 +258,14 @@ def _stage():
         "provider": None,
         "metadata": {},
         "error": None,
+        "diagnostics": {
+            "client_request_id": str(uuid.uuid4()),
+            "server_request_id": None,
+            "failure_stage": None,
+            "response_headers": {},
+            "troubleshooting": None,
+            "gateway_logs": "not_available_via_public_api",
+        },
     }
 
 
@@ -298,6 +307,24 @@ def _record_error(stage, error, status=None):
         if isinstance(error, (RoundtripError, qualify.QualificationError))
         else "operation failed",
     }
+    stage["diagnostics"].update(
+        {
+            "failure_stage": getattr(error, "failure_stage", None)
+            or "response_validation",
+            "response_headers": getattr(error, "response_headers", {}),
+            "server_request_id": next(
+                (
+                    getattr(error, "response_headers", {}).get(k)
+                    for k in ("x-request-id", "x-correlation-id", "traceparent")
+                    if getattr(error, "response_headers", {}).get(k)
+                ),
+                None,
+            ),
+            "troubleshooting": qualify._troubleshooting(
+                stage["error"]["classification"], stage["error"]["api_code"]
+            ),
+        }
+    )
 
 
 def _progress(message):
@@ -348,6 +375,10 @@ def _run_case(fixture, target, origin, token, args, position, total):
             ensure_ascii=False,
         ).encode("utf-8")
         _progress(f"{prefix}: TTS starting")
+        if args.debug:
+            _progress(
+                f"{prefix}: TTS request_id={case['tts']['diagnostics']['client_request_id']}"
+            )
         tts_status, headers, audio = qualify._request(
             origin + "/v1/tts/speech",
             token,
@@ -357,6 +388,15 @@ def _run_case(fixture, target, origin, token, args, position, total):
             MAX_TTS_BYTES,
         )
         case["tts"]["http_status"] = tts_status
+        case["tts"]["diagnostics"]["response_headers"] = qualify._safe_headers(headers)
+        case["tts"]["diagnostics"]["server_request_id"] = next(
+            (
+                headers.get(k)
+                for k in ("X-Request-ID", "X-Correlation-ID", "Traceparent")
+                if headers.get(k)
+            ),
+            None,
+        )
         case["tts"]["elapsed_seconds"] = round(time.monotonic() - started, 3)
         if tts_status != 200:
             raise RoundtripError(
@@ -371,6 +411,10 @@ def _run_case(fixture, target, origin, token, args, position, total):
         target = _publish_audio(target, audio, regenerate=args.regenerate)
         case["audio"].update({"sha256": hashlib.sha256(audio).hexdigest(), "wav": wav})
         _progress(f"{prefix}: TTS complete ({case['tts']['elapsed_seconds']:.3f}s)")
+        if args.debug:
+            _progress(
+                f"{prefix}: TTS response_headers={case['tts']['diagnostics']['response_headers']}"
+            )
     except (RoundtripError, qualify.QualificationError, OSError) as exc:
         if case["tts"]["elapsed_seconds"] is None:
             case["tts"]["elapsed_seconds"] = round(time.monotonic() - started, 3)
@@ -407,6 +451,10 @@ def _run_case(fixture, target, origin, token, args, position, total):
             target, fixture["language"], fixture["language"]
         )
         _progress(f"{prefix}: STT starting")
+        if args.debug:
+            _progress(
+                f"{prefix}: STT request_id={case['stt']['diagnostics']['client_request_id']}"
+            )
         stt_status, headers, raw = qualify._request(
             origin + "/v1/stt/transcriptions",
             token,
@@ -417,6 +465,15 @@ def _run_case(fixture, target, origin, token, args, position, total):
             {"X-STT-Provider": "local", "X-Allow-Cloud-Audio": "false"},
         )
         case["stt"]["http_status"] = stt_status
+        case["stt"]["diagnostics"]["response_headers"] = qualify._safe_headers(headers)
+        case["stt"]["diagnostics"]["server_request_id"] = next(
+            (
+                headers.get(k)
+                for k in ("X-Request-ID", "X-Correlation-ID", "Traceparent")
+                if headers.get(k)
+            ),
+            None,
+        )
         case["stt"]["elapsed_seconds"] = round(time.monotonic() - started, 3)
         if stt_status != 200:
             raise RoundtripError(
@@ -451,6 +508,10 @@ def _run_case(fixture, target, origin, token, args, position, total):
             f"{prefix}: STT complete ({case['stt']['elapsed_seconds']:.3f}s); "
             f"WER={case['metrics']['wer']:.4f} CER={case['metrics']['cer']:.4f}"
         )
+        if args.debug:
+            _progress(
+                f"{prefix}: STT response_headers={case['stt']['diagnostics']['response_headers']}"
+            )
     except (RoundtripError, qualify.QualificationError, OSError) as exc:
         if case["stt"]["elapsed_seconds"] is None:
             case["stt"]["elapsed_seconds"] = round(time.monotonic() - started, 3)
@@ -490,6 +551,23 @@ def _parser():
         default="quality",
     )
     parser.add_argument("--timeout", type=float, default=600)
+    parser.add_argument(
+        "--gateway-url",
+        help="target Gateway origin; non-loopback targets require HTTPS",
+    )
+    parser.add_argument(
+        "--api-token-file",
+        type=Path,
+        help="private token file under private/ (mode 0600)",
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", help="show safe request diagnostics"
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="show diagnostics and save bounded local logs under private/",
+    )
     return parser
 
 
@@ -514,6 +592,8 @@ def run(args):
             },
         },
         "request": {
+            "target": None,
+            "auth_mode": "configured",
             "tts_mode": args.tts_mode,
             "tts_audio_processing": "none",
             "stt_provider": "local",
@@ -550,7 +630,14 @@ def run(args):
             regenerate=args.regenerate,
             report_path=args.report,
         )
-        origin, token = qualify._origin(qualify.load_env())
+        origin, token = qualify._origin(
+            qualify.load_env(), args.gateway_url, args.api_token_file
+        )
+        report["request"]["target"] = origin
+        if args.verbose:
+            _progress(
+                f"target={origin}; timeout={args.timeout:g}s; auth=configured; cloud_audio=false"
+            )
         stop = False
         total = len(fixtures)
         _progress(f"roundtrip: {total} cases; TTS={args.tts_mode}; STT provider=local")
@@ -603,6 +690,11 @@ def run(args):
                 else "round-trip interrupted before case execution"
             ),
         }
+        report["diagnostics"] = {
+            "failure_stage": "interrupted",
+            "troubleshooting": "The sequence stopped without retry; inspect completed artifacts before rerunning.",
+            "gateway_logs": "not_available_via_public_api",
+        }
     except (RoundtripError, qualify.QualificationError, OSError) as exc:
         report["error"] = {
             "classification": getattr(exc, "classification", "local_validation"),
@@ -611,6 +703,22 @@ def run(args):
             "message": str(exc)
             if isinstance(exc, (RoundtripError, qualify.QualificationError))
             else "input or configuration could not be read",
+        }
+        report["diagnostics"] = {
+            "failure_stage": getattr(exc, "failure_stage", None) or "preflight",
+            "server_request_id": next(
+                (
+                    getattr(exc, "response_headers", {}).get(k)
+                    for k in ("x-request-id", "x-correlation-id", "traceparent")
+                    if getattr(exc, "response_headers", {}).get(k)
+                ),
+                None,
+            ),
+            "response_headers": getattr(exc, "response_headers", {}),
+            "troubleshooting": qualify._troubleshooting(
+                report["error"]["classification"], report["error"]["api_code"]
+            ),
+            "gateway_logs": "not_available_via_public_api",
         }
     report["finished_at"] = datetime.now(timezone.utc).isoformat()
     return report
@@ -629,6 +737,17 @@ def main(argv=None):
         except qualify.QualificationError:
             report_writable = False
     report = run(args)
+    if args.debug:
+        evidence = qualify._collect_debug_evidence(
+            report,
+            args,
+            report.get("request", {}).get("target") or args.gateway_url or "",
+            time.monotonic() - started,
+        )
+        if evidence is None:
+            _progress("debug evidence could not be saved under private/")
+            return EXIT_OUTPUT
+        _progress(f"debug evidence saved: {evidence}")
     if report_writable:
         try:
             qualify._write_output(
@@ -658,7 +777,7 @@ def main(argv=None):
             + (
                 "; "
                 + next(
-                    f"error={stage['error']['classification']}: {stage['error']['message']}"
+                    f"error={stage['error']['classification']} api_code={stage['error']['api_code'] or 'N/A'} stage={stage['diagnostics']['failure_stage']}: {stage['error']['message']}"
                     for stage in (case["tts"], case["stt"])
                     if stage["error"]
                 )
@@ -674,7 +793,11 @@ def main(argv=None):
         f"failures={sum(case['technical_status'] != 'PASS' for case in report['cases'])}; "
         f"metrics_measured={measured}; total_elapsed={time.monotonic() - started:.3f}s; "
         f"human_review={report['human_review_status']}"
-        + (f"; error={error['classification']}; {error['message']}" if error else "")
+        + (
+            f"; error={error['classification']} api_code={error.get('api_code') or 'N/A'} stage={(report.get('diagnostics') or {}).get('failure_stage') or 'N/A'}; {error['message']}"
+            if error
+            else ""
+        )
     )
     if passed:
         return 0

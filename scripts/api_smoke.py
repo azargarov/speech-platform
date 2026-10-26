@@ -63,7 +63,15 @@ def _request(url, token, body, content_type, *, timeout, max_bytes=MAX_TTS_BYTES
         raise SmokeError("Gateway request did not complete") from exc
 
 
-def _multipart(audio, source_language, output_language):
+def _multipart(
+    audio,
+    source_language,
+    output_language,
+    model=None,
+    *,
+    timestamps=False,
+    stream=False,
+):
     if not audio.is_file():
         raise SmokeError("provide an existing local audio file")
     if audio.stat().st_size > MAX_STT_BYTES:
@@ -87,10 +95,17 @@ def _multipart(audio, source_language, output_language):
         f"Content-Type: {media}\r\n\r\n".encode()
     )
     body.extend(audio.read_bytes())
-    for field, value in (
+    fields = [
         ("source_language", source_language),
         ("output_language", output_language),
-    ):
+    ]
+    if model is not None:
+        fields.append(("model", model))
+    if timestamps:
+        fields.append(("timestamps", "true"))
+    if stream:
+        fields.append(("stream", "true"))
+    for field, value in fields:
         body.extend(
             f'\r\n--{boundary}\r\nContent-Disposition: form-data; name="{field}"\r\n\r\n{value}'.encode()
         )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -60,6 +61,22 @@ def validate_args(args):
         )
     ):
         return
+    if action == "logs" and len(rest) == 5:
+        since, amount, tail_flag, tail, service = rest
+        match = (
+            re.fullmatch(r"([1-9][0-9]*)(s|m)", amount) if since == "--since" else None
+        )
+        seconds = (
+            int(match.group(1)) * (60 if match.group(2) == "m" else 1) if match else 0
+        )
+        if (
+            match
+            and 1 <= seconds <= 300
+            and tail_flag == "--tail"
+            and tail == "100"
+            and service in SERVICES
+        ):
+            return
     ready = {
         ("exec", "-T", "gateway", "/healthcheck", "http://127.0.0.1:8080/readyz"),
         (

@@ -70,6 +70,20 @@ class ComposeInvocationTests(unittest.TestCase):
             self.assertNotIn(key, env)
         self.assertEqual(env["SOURCE_REVISION"], "a" * 40)
 
+    def test_log_collection_arguments_are_limited_to_known_services_and_five_minutes(
+        self,
+    ):
+        for service in compose.SERVICES:
+            compose.validate_args(["logs", "--since", "300s", "--tail", "100", service])
+        for args in (
+            ["logs", "--since", "301s", "--tail", "100", "gateway"],
+            ["logs", "--since", "5m", "--tail", "101", "gateway"],
+            ["logs", "--since", "5m", "--tail", "100", "ollama"],
+            ["logs", "--since", "0s", "--tail", "100", "gateway"],
+        ):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                compose.validate_args(args)
+
     def test_ollama_overlay_is_selected_only_for_local_ollama(self):
         for enabled in (False, True):
             with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as temp:

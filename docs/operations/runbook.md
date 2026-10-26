@@ -109,3 +109,7 @@ It validates retained local image IDs and a private configuration snapshot,
 uses Compose with `--no-build --pull never`, and scopes changes to Gateway, STT
 and TTS. The older procedure of checking out a prior source revision and
 rebuilding it is not an exact-image rollback.
+
+See the [qualification capability matrix](qualification-capabilities.md) for
+the public Gateway operations supported by the CLI, contract/runtime gaps and
+diagnostic evidence boundaries.

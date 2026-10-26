@@ -208,6 +208,10 @@ class RoundtripTests(unittest.TestCase):
             report["public_api_metadata"]["stt"]["requested_provider"], "local"
         )
         self.assertEqual(case["stt"]["provider"], "local")
+        self.assertTrue(case["stt"]["diagnostics"]["client_request_id"])
+        self.assertEqual(
+            case["stt"]["diagnostics"]["gateway_logs"], "not_available_via_public_api"
+        )
         self.assertEqual(case["metrics"]["wer"], 0)
         self.assertEqual(case["metrics"]["cer"], 0)
         self.assertEqual(case["transcription"], "hello world")

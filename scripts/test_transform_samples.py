@@ -131,6 +131,9 @@ class TransformSamplesTests(unittest.TestCase):
         self.assertEqual((case_dir / "raw.txt").read_text(), source)
         self.assertEqual(report["cases"][0]["operations"][1]["model"], "local-qwen")
         self.assertEqual(report["cases"][0]["operations"][1]["prompt_sha256"], "a" * 64)
+        diagnostic = report["cases"][0]["operations"][1]["diagnostics"]
+        self.assertTrue(diagnostic["client_request_id"])
+        self.assertEqual(diagnostic["gateway_logs"], "not_available_via_public_api")
         self.assertIn("local_only=true", stderr.getvalue())
         self.assertNotIn(source, stderr.getvalue())
         self.assertNotIn(self.env["SPEECH_API_TOKEN"], stderr.getvalue())
@@ -210,6 +213,7 @@ class TransformSamplesTests(unittest.TestCase):
         self.assertFalse(
             (self.root / "samples/transformed/en-rude/written.txt").exists()
         )
+        self.assertEqual(failed["diagnostics"]["failure_stage"], "response_validation")
 
     def test_failed_stt_skips_transformations_and_reports_missing_outputs(self):
         def request(*_args, **_kwargs):

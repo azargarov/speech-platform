@@ -9,6 +9,7 @@ import os
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 from scripts import qualify
@@ -202,6 +203,14 @@ def _operation(operation, output, *, target_language=None):
         "elapsed_seconds": None,
         "error_classification": None,
         "api_code": None,
+        "diagnostics": {
+            "client_request_id": str(uuid.uuid4()),
+            "server_request_id": None,
+            "failure_stage": None,
+            "response_headers": {},
+            "troubleshooting": None,
+            "gateway_logs": "not_available_via_public_api",
+        },
     }
 
 
@@ -288,6 +297,7 @@ def _transform(raw_text, mode, target_language, token, origin, timeout):
         response["model"],
         response["transformed_text"],
         headers.get("X-Speech-Prompt-SHA256"),
+        qualify._safe_headers(headers),
     )
 
 
@@ -314,6 +324,25 @@ def _record_failure(result, error):
         error, "classification", "local_validation"
     )
     result["api_code"] = getattr(error, "api_code", None)
+    headers = getattr(error, "response_headers", {})
+    result["diagnostics"].update(
+        {
+            "failure_stage": getattr(error, "failure_stage", None)
+            or "response_validation",
+            "response_headers": headers,
+            "server_request_id": next(
+                (
+                    headers.get(k)
+                    for k in ("x-request-id", "x-correlation-id", "traceparent")
+                    if headers.get(k)
+                ),
+                None,
+            ),
+            "troubleshooting": qualify._troubleshooting(
+                result["error_classification"], result["api_code"]
+            ),
+        }
+    )
 
 
 def run(args):
@@ -327,6 +356,11 @@ def run(args):
             "text_local_only": True,
             "text_cloud_authorized": False,
             "text_provider_expected": TEXT_PROVIDER,
+        },
+        "target": None,
+        "diagnostics": {
+            "gateway_logs": "not_available_via_public_api",
+            "request_correlation": "server correlation headers recorded only when returned",
         },
         "cases": [],
         "operations_attempted": 0,
@@ -349,7 +383,12 @@ def run(args):
                 )
         targets = _prepare_outputs(fixtures, regenerate=args.regenerate)
         env = qualify.load_env()
-        origin, token = qualify._origin(env)
+        origin, token = qualify._origin(env, args.gateway_url, args.api_token_file)
+        report["target"] = origin
+        if args.verbose:
+            _progress(
+                f"target={origin}; timeout={args.timeout:g}s; STT=local; cloud_audio=false; text_local_only=true"
+            )
         _progress(
             f"batch: {len(fixtures)} cases; 1 STT + 9 local-only transformations per case"
         )
@@ -368,11 +407,30 @@ def run(args):
             report["operations_attempted"] += 1
             started_op = time.monotonic()
             _progress(f"{fixture['case_id']}: STT starting (provider=local)")
+            if args.debug:
+                _progress(
+                    f"{fixture['case_id']}: STT request_id={stt_result['diagnostics']['client_request_id']}"
+                )
             try:
                 status, headers, data = _transcribe(
                     fixture, token, origin, args.timeout
                 )
                 stt_result["http_status"] = status
+                stt_result["diagnostics"]["response_headers"] = qualify._safe_headers(
+                    headers
+                )
+                stt_result["diagnostics"]["server_request_id"] = next(
+                    (
+                        headers.get(k)
+                        for k in ("X-Request-ID", "X-Correlation-ID", "Traceparent")
+                        if headers.get(k)
+                    ),
+                    None,
+                )
+                if args.debug:
+                    _progress(
+                        f"{fixture['case_id']}: STT response_headers={stt_result['diagnostics']['response_headers']}"
+                    )
                 stt_result["elapsed_seconds"] = round(time.monotonic() - started_op, 3)
                 if status != 200:
                     raise BatchError(
@@ -423,7 +481,7 @@ def run(args):
                 _record_failure(stt_result, exc)
                 report["operations_failed"] += 1
                 _progress(
-                    f"{fixture['case_id']}: STT failed ({stt_result['error_classification']}; {stt_result['elapsed_seconds']:.3f}s)"
+                    f"{fixture['case_id']}: STT failed ({stt_result['error_classification']}; api_code={stt_result['api_code'] or 'N/A'}; {stt_result['elapsed_seconds']:.3f}s)"
                 )
                 if _should_stop(exc):
                     report["error"] = {
@@ -464,21 +522,47 @@ def run(args):
                     _progress(
                         f"{fixture['case_id']}: {mode} → {target_label} starting (local_only=true)"
                     )
+                    if args.debug:
+                        _progress(
+                            f"{fixture['case_id']}: {mode} request_id={result['diagnostics']['client_request_id']}"
+                        )
                     try:
-                        status, provider, model, transformed, prompt_sha256 = (
-                            _transform(
-                                raw_text,
-                                mode,
-                                target_language,
-                                token,
-                                origin,
-                                args.timeout,
-                            )
+                        (
+                            status,
+                            provider,
+                            model,
+                            transformed,
+                            prompt_sha256,
+                            safe_headers,
+                        ) = _transform(
+                            raw_text,
+                            mode,
+                            target_language,
+                            token,
+                            origin,
+                            args.timeout,
                         )
                         result["http_status"] = status
                         result["provider"] = provider
                         result["model"] = model
                         result["prompt_sha256"] = prompt_sha256
+                        result["diagnostics"]["response_headers"] = safe_headers
+                        result["diagnostics"]["server_request_id"] = next(
+                            (
+                                safe_headers.get(k.lower())
+                                for k in (
+                                    "X-Request-ID",
+                                    "X-Correlation-ID",
+                                    "Traceparent",
+                                )
+                                if safe_headers.get(k.lower())
+                            ),
+                            None,
+                        )
+                        if args.debug:
+                            _progress(
+                                f"{fixture['case_id']}: {mode} response_headers={safe_headers}"
+                            )
                         result["elapsed_seconds"] = round(
                             time.monotonic() - started_op, 3
                         )
@@ -516,7 +600,7 @@ def run(args):
                         _record_failure(result, exc)
                         report["operations_failed"] += 1
                         _progress(
-                            f"{fixture['case_id']}: {mode} → {target_label} failed ({result['error_classification']}; {result['elapsed_seconds']:.3f}s)"
+                            f"{fixture['case_id']}: {mode} → {target_label} failed ({result['error_classification']}; api_code={result['api_code'] or 'N/A'}; {result['elapsed_seconds']:.3f}s)"
                         )
                         if _should_stop(exc):
                             report["error"] = {
@@ -534,9 +618,28 @@ def run(args):
         report["error"] = {
             "classification": getattr(exc, "classification", "local_validation"),
             "api_code": getattr(exc, "api_code", None),
+            "http_status": getattr(exc, "status", None),
+            "message": str(exc)
+            if isinstance(exc, (BatchError, qualify.QualificationError))
+            else "input or configuration could not be read",
         }
+        report["diagnostics"].update(
+            {
+                "failure_stage": getattr(exc, "failure_stage", None) or "preflight",
+                "response_headers": getattr(exc, "response_headers", {}),
+                "troubleshooting": qualify._troubleshooting(
+                    report["error"]["classification"], report["error"]["api_code"]
+                ),
+            }
+        )
     except KeyboardInterrupt:
         report["error"] = {"classification": "interrupted"}
+        report["diagnostics"].update(
+            {
+                "failure_stage": "interrupted",
+                "troubleshooting": "The sequence stopped without retry; inspect completed outputs before rerunning.",
+            }
+        )
         _progress("batch interrupted")
 
     for fixture in fixtures:
@@ -568,6 +671,23 @@ def _parser():
         "--regenerate", action="store_true", help="atomically replace expected outputs"
     )
     parser.add_argument("--timeout", type=float, default=600)
+    parser.add_argument(
+        "--gateway-url",
+        help="target Gateway origin; non-loopback targets require HTTPS",
+    )
+    parser.add_argument(
+        "--api-token-file",
+        type=Path,
+        help="private token file under private/ (mode 0600)",
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", help="show safe request progress"
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="show diagnostics and save bounded local logs under private/",
+    )
     return parser
 
 
@@ -577,6 +697,17 @@ def main(argv=None):
     if not math.isfinite(args.timeout) or args.timeout <= 0 or args.timeout > 3600:
         parser.error("--timeout must be greater than 0 and at most 3600 seconds")
     report = run(args)
+    if args.debug:
+        evidence = qualify._collect_debug_evidence(
+            report,
+            args,
+            report.get("target") or args.gateway_url or "",
+            report.get("elapsed_seconds") or 1,
+        )
+        if evidence is None:
+            _progress("debug evidence could not be saved under private/")
+            return EXIT_OUTPUT
+        _progress(f"debug evidence saved: {evidence}")
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report["outcome"] == "pass":
         return 0
