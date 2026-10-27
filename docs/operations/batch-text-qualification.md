@@ -50,3 +50,20 @@ make verify PYTHON=.venv/bin/python
 
 Live use requires the configured Gateway URL and API token in the existing
 private configuration. This tool makes no direct calls to workers or Ollama.
+
+## Manual text-fixture matrix
+
+`test-transformation.sh` runs the nine checked-in text fixtures through
+Written, Polite and Diplomatic modes using `local-qwen` (27 requests). To
+include `groq-qwen` and `groq-gpt-oss` as well (81 requests total, including 54
+cloud requests), pass the explicit cloud opt-in:
+
+```bash
+./test-transformation.sh
+./test-transformation.sh --allow-cloud
+```
+
+It uses `scripts.qualify` for every request and stores reports/evidence under
+`samples/out/`, which is Git-ignored. Generated text is printed to the
+terminal; handle terminal output and artifacts as sensitive. This is a
+technical matrix runner, not a semantic quality verdict.

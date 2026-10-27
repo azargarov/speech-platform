@@ -71,6 +71,7 @@ id_ecdsa*
 *.egg-info/
 /models/
 /samples/transformed/
+/samples/out/
 **/models--*/
 *.swp
 *.swo
