@@ -29,7 +29,8 @@ type Options struct {
 	LocalOnly      bool    `json:"local_only"`
 }
 type Request struct {
-	Text string `json:"text"`
+	Text         string  `json:"text"`
+	SystemPrompt *string `json:"system_prompt,omitempty"`
 	Options
 }
 type Response struct {
@@ -401,6 +402,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid_request")
 		return
 	}
+	if value, ok := rawFields["system_prompt"]; ok && strings.TrimSpace(string(value)) == "null" {
+		writeErr(w, 400, "invalid_prompt")
+		return
+	}
 	var extra any
 	if dec.Decode(&extra) != io.EOF {
 		writeErr(w, 400, "invalid_request")
@@ -409,6 +414,15 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !utf8.ValidString(req.Text) || strings.TrimSpace(req.Text) == "" {
 		writeErr(w, 400, "invalid_request")
 		return
+	}
+	if req.SystemPrompt != nil {
+		custom, valid := requestPrompt(*req.SystemPrompt)
+		if !valid {
+			writeErr(w, 400, "invalid_prompt")
+			return
+		}
+		prompt = custom
+		w.Header().Set("X-Speech-Prompt-SHA256", prompt.sha256)
 	}
 	if len([]byte(req.Text)) > s.cfg.MaxInputBytes {
 		writeErr(w, 413, "request_too_large")
@@ -689,7 +703,7 @@ func oneOf(v string, choices ...string) bool {
 	return false
 }
 func writeErr(w http.ResponseWriter, code int, kind string) {
-	msg := map[string]string{"unauthorized": "valid bearer token required", "unsupported_media_type": "application/json is required", "text_transform_unavailable": "text transformation is unavailable", "provider_unavailable": "selected text provider is unavailable", "no_eligible_model": "no eligible model is configured", "invalid_request": "request contains invalid or unsupported fields", "invalid_options": "request options are invalid", "request_too_large": "request size limit exceeded", "context_limit_exceeded": "input exceeds configured context limits", "unknown_model": "model is not configured", "model_disabled": "model is disabled", "cloud_not_allowed": "cloud inference is not permitted", "overloaded": "text transformation capacity is full", "transformation_refused": "provider refused the request", "deadline_exceeded": "text transformation deadline exceeded", "provider_request_rejected": "provider rejected the request", "provider_protocol_error": "provider protocol failed", "invalid_provider_response": "provider returned an invalid response", "text_transform_failed": "text transformation failed"}[kind]
+	msg := map[string]string{"unauthorized": "valid bearer token required", "unsupported_media_type": "application/json is required", "text_transform_unavailable": "text transformation is unavailable", "provider_unavailable": "selected text provider is unavailable", "no_eligible_model": "no eligible model is configured", "invalid_request": "request contains invalid or unsupported fields", "invalid_prompt": "system_prompt must be non-empty UTF-8 text no larger than 65536 bytes", "invalid_options": "request options are invalid", "request_too_large": "request size limit exceeded", "context_limit_exceeded": "input exceeds configured context limits", "unknown_model": "model is not configured", "model_disabled": "model is disabled", "cloud_not_allowed": "cloud inference is not permitted", "overloaded": "text transformation capacity is full", "transformation_refused": "provider refused the request", "deadline_exceeded": "text transformation deadline exceeded", "provider_request_rejected": "provider rejected the request", "provider_protocol_error": "provider protocol failed", "invalid_provider_response": "provider returned an invalid response", "text_transform_failed": "text transformation failed"}[kind]
 	if msg == "" {
 		msg = "request failed"
 	}

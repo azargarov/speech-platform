@@ -22,6 +22,7 @@ from scripts import diagnostics
 from scripts.preflight import ROOT, load_env
 
 MAX_JSON_BYTES = 2 * 1024 * 1024
+MAX_SYSTEM_PROMPT_BYTES = 64 * 1024
 MAX_TTS_REQUEST_BYTES = 65536
 EXIT_REQUEST = 1
 EXIT_INPUT = 2
@@ -107,6 +108,29 @@ def _origin(values, gateway_url=None, token_file=None, *, require_token=True):
             "authentication", "SPEECH_API_TOKEN is missing or too short"
         )
     return origin, token if len(token) >= 32 else None
+
+
+def _system_prompt(path):
+    if path is None:
+        return None
+    try:
+        raw = path.read_bytes()
+        if len(raw) > MAX_SYSTEM_PROMPT_BYTES:
+            raise QualificationError(
+                "local_validation", "system prompt exceeds 65536 bytes"
+            )
+        prompt = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise QualificationError(
+            "local_validation", "system prompt is not valid UTF-8"
+        ) from None
+    except OSError:
+        raise QualificationError(
+            "local_validation", "system prompt file could not be read"
+        ) from None
+    if not prompt.strip():
+        raise QualificationError("local_validation", "system prompt file is empty")
+    return prompt
 
 
 def _output_path(path):
@@ -628,6 +652,7 @@ def _execute(args):
         }
     elif op == "transform":
         text = _input_text(args)
+        system_prompt = _system_prompt(args.prompt_file)
         if args.mode == "raw" and args.format != "normal":
             raise QualificationError(
                 "local_validation", "raw mode requires normal formatting"
@@ -649,6 +674,8 @@ def _execute(args):
         }
         if args.model is not None:
             payload["model"] = args.model
+        if system_prompt is not None:
+            payload["system_prompt"] = system_prompt
         body, content_type = (
             json.dumps(payload, ensure_ascii=False).encode(),
             "application/json",
@@ -1008,6 +1035,11 @@ def _parser():
         "--target-language", choices=("none", "en", "sv", "ru"), default="none"
     )
     transform.add_argument("--model")
+    transform.add_argument(
+        "--prompt-file",
+        type=Path,
+        help="trusted operator-controlled UTF-8 system prompt for this request only",
+    )
     transform.add_argument(
         "--allow-cloud",
         action="store_true",

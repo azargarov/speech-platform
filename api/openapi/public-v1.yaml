@@ -447,6 +447,12 @@ components:
           minLength: 1
           maxLength: 10000
           description: UTF-8 input; configured byte and context limits also apply.
+        system_prompt:
+          type: string
+          minLength: 1
+          maxLength: 65536
+          x-maxBytes: 65536
+          description: Optional request-local replacement for the configured transformation prompt. UTF-8, non-whitespace, at most 65536 bytes; never persisted or logged by Gateway.
         mode:
           type: string
           enum: [raw, written, polite, diplomatic]

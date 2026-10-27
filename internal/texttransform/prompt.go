@@ -32,6 +32,17 @@ func loadPrompt(path string) (*promptSnapshot, error) {
 	if strings.TrimSpace(text) == "" {
 		return nil, fmt.Errorf("prompt file is empty, invalid UTF-8, unreadable, or exceeds %d bytes", maxPromptFileBytes)
 	}
+	return snapshotPrompt(text), nil
+}
+
+func requestPrompt(text string) (*promptSnapshot, bool) {
+	if !utf8.ValidString(text) || strings.TrimSpace(text) == "" || len([]byte(text)) > maxPromptFileBytes {
+		return nil, false
+	}
+	return snapshotPrompt(text), true
+}
+
+func snapshotPrompt(text string) *promptSnapshot {
 	hash := sha256.Sum256([]byte(text))
-	return &promptSnapshot{text: text, sha256: fmt.Sprintf("%x", hash)}, nil
+	return &promptSnapshot{text: text, sha256: fmt.Sprintf("%x", hash)}
 }

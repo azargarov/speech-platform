@@ -115,6 +115,63 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(payload["target_language"], "none")
         self.assertNotIn("private synthetic words", str(seen))
 
+    def test_prompt_file_is_sent_for_one_request_and_not_saved_in_report(self):
+        prompt_file = self.root / "operator-prompt.txt"
+        prompt = "Synthetic alternate prompt.\n"
+        prompt_file.write_text(prompt, encoding="utf-8")
+        report_path = self.root / "private" / "override-report.json"
+        response = {
+            "original_text": "source",
+            "transformed_text": "output",
+            "options": {
+                "mode": "written",
+                "format": "normal",
+                "target_language": "none",
+                "model": None,
+                "local_only": True,
+            },
+            "model": "local-qwen",
+            "provider": "host-ollama",
+            "generated": True,
+            "fallback_occurred": False,
+        }
+        status, seen = self.invoke(
+            [
+                "transform",
+                "--text",
+                "source",
+                "--prompt-file",
+                str(prompt_file),
+                "--report",
+                str(report_path),
+            ],
+            json.dumps(response).encode(),
+        )
+        payload = json.loads(seen["request"].data)
+        report_text = report_path.read_text()
+        self.assertEqual(status, 0)
+        self.assertEqual(payload["system_prompt"], prompt)
+        self.assertEqual(
+            json.loads(report_text)["response"]["metadata"]["prompt_sha256"],
+            "a" * 64,
+        )
+        self.assertNotIn(prompt, report_text)
+
+    def test_prompt_file_rejects_missing_empty_invalid_utf8_and_oversized(self):
+        cases = {
+            "missing": None,
+            "empty": b" \n",
+            "invalid_utf8": b"\xff",
+            "oversized": b"x" * (qualify.MAX_SYSTEM_PROMPT_BYTES + 1),
+        }
+        for name, content in cases.items():
+            with self.subTest(name=name):
+                path = self.root / f"{name}.txt"
+                if content is not None:
+                    path.write_bytes(content)
+                with self.assertRaises(qualify.QualificationError):
+                    qualify._system_prompt(path)
+
     def test_successful_transform_prints_complete_output_and_preserves_report_evidence(
         self,
     ):

@@ -79,6 +79,22 @@ logs do not include generated text. Provider failure logs include the upstream
 HTTP status and only bounded, sanitized error code/type tokens when supplied;
 provider response bodies and raw error messages are not logged.
 
+For a one-request prompt experiment, pass an operator-controlled UTF-8 file:
+
+```sh
+.venv/bin/python -m scripts.qualify transform \
+  --text-file samples/text/ru-rude.txt \
+  --mode diplomatic \
+  --model local-qwen \
+  --prompt-file samples/prompts/diplomatic-v2.txt
+```
+
+The file must contain non-empty text and be no larger than 64 KiB. The Gateway
+uses it only for that authenticated request, without changing the configured
+prompt; the response fingerprint is recorded in report metadata. Prompt
+contents are sent to the Gateway and should be treated as trusted,
+operator-controlled input. The CLI does not copy them into reports or logs.
+
 STT accepts the optional `--model` alias for local-provider selection. Groq STT
 uses the configured server model and rejects explicit model values, so the CLI
 rejects `--provider groq --model ...` before sending a request.

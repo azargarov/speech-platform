@@ -120,6 +120,114 @@ type snapshotGenerator struct {
 	release chan struct{}
 }
 
+type promptCaptureGenerator struct {
+	mu      sync.Mutex
+	prompts []string
+}
+
+func (g *promptCaptureGenerator) Generate(_ context.Context, _ config.TextProvider, _ config.TextModel, _, prompt, _, _ string) (string, error) {
+	g.mu.Lock()
+	g.prompts = append(g.prompts, prompt)
+	g.mu.Unlock()
+	return "generated", nil
+}
+
+func TestRequestPromptOverrideIsLocalAndFingerprinted(t *testing.T) {
+	g := &promptCaptureGenerator{}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	s, err := New(context.Background(), ptr(testConfig()), "", g, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	defaultHash := s.PromptSHA256()
+	custom := "request-only prompt"
+	status, _ := call(t, s, `{"text":"synthetic","mode":"written","model":"local-model","local_only":true,"system_prompt":"request-only prompt"}`, false)
+	if status != http.StatusOK {
+		t.Fatalf("override status=%d", status)
+	}
+	hash := sha256.Sum256([]byte(custom))
+	if got := s.PromptSHA256(); got != defaultHash {
+		t.Fatalf("configured prompt changed after override: got %s want %s", got, defaultHash)
+	}
+	g.mu.Lock()
+	if len(g.prompts) != 1 || g.prompts[0] != custom {
+		g.mu.Unlock()
+		t.Fatalf("provider prompt = %#v", g.prompts)
+	}
+	g.mu.Unlock()
+	// Verify the response header against the override hash in a separate request.
+	request := httptest.NewRequest(http.MethodPost, "/v1/text/transformations", strings.NewReader(`{"text":"synthetic","mode":"written","model":"local-model","local_only":true,"system_prompt":"request-only prompt"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	s.ServeHTTP(response, request)
+	if got := response.Header().Get("X-Speech-Prompt-SHA256"); got != fmt.Sprintf("%x", hash) {
+		t.Fatalf("effective prompt fingerprint=%q, want %x", got, hash)
+	}
+	if strings.Contains(logs.String(), custom) {
+		t.Fatal("custom prompt was written to Gateway logs")
+	}
+}
+
+func TestRequestPromptOverrideValidationAndConcurrentIsolation(t *testing.T) {
+	for _, tc := range []struct {
+		name, prompt string
+	}{
+		{name: "empty", prompt: ""},
+		{name: "whitespace", prompt: "   \n"},
+		{name: "oversized", prompt: strings.Repeat("x", maxPromptFileBytes+1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]any{"text": "synthetic", "mode": "written", "model": "local-model", "local_only": true, "system_prompt": tc.prompt})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := testConfig()
+			cfg.MaxRequestBytes = 128 * 1024
+			service, err := New(context.Background(), &cfg, "", &promptCaptureGenerator{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer service.Close()
+			status, response := call(t, service, string(body), false)
+			if status != http.StatusBadRequest || !strings.Contains(string(response), `"invalid_prompt"`) {
+				t.Fatalf("status=%d body=%s", status, response)
+			}
+		})
+	}
+
+	g := &promptCaptureGenerator{}
+	s, err := New(context.Background(), ptr(testConfig()), "", g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	// Production admission is intentionally single-request; enlarge the test
+	// semaphore to exercise request-local prompt isolation under simultaneous handlers.
+	s.slots = make(chan struct{}, 2)
+	const count = 2
+	var wg sync.WaitGroup
+	for _, prompt := range []string{"prompt alpha", "prompt beta"} {
+		prompt := prompt
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			body, _ := json.Marshal(map[string]any{"text": "synthetic", "mode": "written", "model": "local-model", "local_only": true, "system_prompt": prompt})
+			status, response := call(t, s, string(body), false)
+			if status != http.StatusOK {
+				t.Errorf("status=%d body=%s", status, response)
+			}
+		}()
+	}
+	wg.Wait()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.prompts) != count || !reflect.DeepEqual(map[string]bool{g.prompts[0]: true, g.prompts[1]: true}, map[string]bool{"prompt alpha": true, "prompt beta": true}) {
+		t.Fatalf("concurrent requests mixed prompts: %#v", g.prompts)
+	}
+}
+
 func (g *snapshotGenerator) Generate(_ context.Context, _ config.TextProvider, _ config.TextModel, _, prompt, _, _ string) (string, error) {
 	g.mu.Lock()
 	g.prompts = append(g.prompts, prompt)
@@ -510,7 +618,7 @@ func TestLocalOnlyAndCloudPolicyPreventCloudCalls(t *testing.T) {
 	g := &fakeGenerator{}
 	s, _ := New(context.Background(), &cfg, "", g)
 	defer s.Close()
-	status, _ := call(t, s, `{"text":"rewrite","mode":"written","model":"cloud-model"}`, false)
+	status, _ := call(t, s, `{"text":"rewrite","mode":"written","model":"cloud-model","system_prompt":"request-only prompt"}`, false)
 	if status != 403 || len(g.calls) != 0 {
 		t.Fatalf("status=%d calls=%v", status, g.calls)
 	}
@@ -581,6 +689,18 @@ func TestBearerBeforeDisabledCheck(t *testing.T) {
 	status, _ = call(t, s, `{"text":"rewrite","mode":"written"}`, true)
 	if status != 503 {
 		t.Fatalf("status=%d", status)
+	}
+	g := &fakeGenerator{output: "generated"}
+	s2, _ := New(context.Background(), ptr(testConfig()), "01234567890123456789012345678901", g)
+	defer s2.Close()
+	body := `{"text":"rewrite","mode":"written","model":"local-model","local_only":true,"system_prompt":"request-only prompt"}`
+	status, _ = call(t, s2, body, false)
+	if status != http.StatusUnauthorized || len(g.calls) != 0 {
+		t.Fatalf("unauthenticated override status=%d calls=%v", status, g.calls)
+	}
+	status, _ = call(t, s2, body, true)
+	if status != http.StatusOK || !reflect.DeepEqual(g.calls, []string{"local-model"}) {
+		t.Fatalf("authenticated override status=%d calls=%v", status, g.calls)
 	}
 }
 func TestRejectDuplicateKeysAndLoneSurrogates(t *testing.T) {
