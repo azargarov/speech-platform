@@ -25,10 +25,11 @@ func (g *gatewayFakeGenerator) Generate(_ context.Context, _ config.TextProvider
 }
 
 func TestTextTransformationRunsThroughPublicGatewayRouteWithFakeProvider(t *testing.T) {
-	cfg, err := config.Load("../../configs/gateway-text.example.yaml")
+	cfg, err := config.Load("../../configs/gateway.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.TextTransform.Selection.AllowCloud = false
 	const token = "01234567890123456789012345678901"
 	generator := &gatewayFakeGenerator{}
 	service, err := texttransform.New(context.Background(), cfg.TextTransform, token, generator)

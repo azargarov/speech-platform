@@ -35,7 +35,7 @@ type fakeGenerator struct {
 }
 
 func TestProductionPromptDefinesModeAndPreservationRules(t *testing.T) {
-	configured, err := config.Load("../../configs/gateway-text.example.yaml")
+	configured, err := config.Load("../../configs/gateway.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +367,7 @@ func TestTransformationModesFormatsAndLanguagesReachFakeProvider(t *testing.T) {
 
 func TestExplicitSelectionUsesEachConfiguredModelWithoutFallback(t *testing.T) {
 	t.Setenv("GROQ_API_KEY", "offline-fake-credential")
-	cfg, err := config.Load("../../configs/gateway-text.example.yaml")
+	cfg, err := config.Load("../../configs/gateway.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -763,7 +763,7 @@ func TestContextBoundaryAndMultilingualInputAreNotTruncated(t *testing.T) {
 }
 
 func TestExampleLocalSerializedInputBudget(t *testing.T) {
-	cfg, err := config.Load("../../configs/gateway-text.example.yaml")
+	cfg, err := config.Load("../../configs/gateway.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -795,7 +795,7 @@ func TestEightKContextAcceptsLongDictationRejectedAtFourK(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := testConfig()
 			cfg.Models = cfg.Models[:1]
-			productionConfig, err := config.Load("../../configs/gateway-text.example.yaml")
+			productionConfig, err := config.Load("../../configs/gateway.yaml")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1218,7 +1218,7 @@ func TestAcceptedGroqModelsSerializeConfiguredReasoningOptions(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg, err := config.Load("../../configs/gateway-text.example.yaml")
+	cfg, err := config.Load("../../configs/gateway.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}

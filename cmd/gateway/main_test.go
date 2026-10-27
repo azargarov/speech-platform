@@ -16,7 +16,7 @@ import (
 
 func TestSIGHUPReloadsPromptWithoutRestart(t *testing.T) {
 	t.Setenv("SPEECH_API_TOKEN", "offline-test-token-0123456789abcdef")
-	cfg, err := config.Load("../../configs/gateway-text.example.yaml")
+	cfg, err := config.Load("../../configs/gateway.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}

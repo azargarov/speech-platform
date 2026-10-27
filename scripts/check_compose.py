@@ -84,6 +84,18 @@ def validate(
     ]
     if len(prompt_mounts) != 1 or prompt_mounts[0].get("read_only") is not True:
         raise ValueError("Gateway prompt directory must be mounted read-only")
+    config_mounts = [
+        volume
+        for volume in gateway.get("volumes", [])
+        if volume.get("target") == "/config/gateway.yaml"
+    ]
+    canonical_config = Path(__file__).resolve().parents[1] / "configs/gateway.yaml"
+    if (
+        len(config_mounts) != 1
+        or config_mounts[0].get("read_only") is not True
+        or Path(config_mounts[0].get("source", "")).resolve() != canonical_config
+    ):
+        raise ValueError("Gateway must mount canonical configs/gateway.yaml read-only")
     gateway_networks = {gateway_network, "stt_private", "tts_private"}
     if require_optional_profiles:
         gateway_networks.add("gateway_egress")

@@ -178,20 +178,29 @@ unless the operator enables it and each request supplies cloud-audio consent.
 These request limits do not reserve GPU memory or guarantee STT/TTS/Ollama coexistence; use
 sequential warmups and observe available resources on constrained GPUs.
 
-## Optional local text transformation and Ollama
+## Gateway configuration and text transformation
 
-Default Gateway config disables LLM use and requires no Ollama/cloud service.
-Copy `configs/gateway-text.example.yaml` into ignored `private/`, adapt its
-listener to `0.0.0.0` and worker URLs to `http://stt:8081` / `http://tts:8082`, then
-set `GATEWAY_CONFIG=private/<name>.yaml` in `.env`. Paths are canonicalized; root
-Compose also uses a bind-mount object so relative names cannot become named volumes.
-The example's `text_transform.prompt_file` is relative to the Gateway config
-file and points to `../configs/prompts/text-transformation-system.txt`. Compose
-mounts `configs/prompts/` read-only at `/configs/prompts/` in the Gateway.
-Custom prompt files must remain in that mounted directory and the config path
-must resolve to the corresponding mounted file.
+`configs/gateway.yaml` is the canonical, version-controlled Gateway runtime
+configuration used by the supported root Compose installer. Do not select a
+Gateway config through `.env` or copy runtime configuration into `private/`.
+`.env` contains operator-specific deployment values and `SPEECH_API_TOKEN`; the
+initializer creates it with restrictive permissions. A legacy `GATEWAY_CONFIG`
+entry in an existing `.env` is ignored by the installer.
 
-An enabled local model requires the externally owned running Ollama container,
+The canonical config enables local text transformation and permits cloud
+routing. Requests remain authenticated, and the qualification CLI is local-only
+unless an operator explicitly supplies `--allow-cloud`. Groq credentials remain
+in `private/cloud.env` (mode `0600`) or another protected private env file
+selected by `GATEWAY_SECRETS_FILE`; never put credentials in YAML or Git.
+
+The `text_transform.prompt_file` is relative to `configs/gateway.yaml` and
+resolves to `configs/prompts/text-transformation-system.txt`. Compose mounts that
+directory read-only at `/configs/prompts/` in Gateway. For a one-request prompt
+experiment, use the qualification CLI's `--prompt-file`; it does not alter the
+canonical prompt or Gateway-wide state. See the
+[qualification CLI guide](qualification-cli.md#gateway-qualification-cli).
+
+The enabled local model requires the externally owned running Ollama container,
 its existing internal bridge network and alias `ollama`, endpoint
 `http://ollama:11434/api/generate`, and the exact configured model already present.
 The Ollama owner prepares these prerequisites explicitly. SpeechPlatform only
@@ -201,8 +210,9 @@ Preflight inspects the existing Ollama container/network and queries
 unreachable required local provider is FAIL. It does not test Gateway container
 DNS before installation; service health checks establish runtime connectivity.
 
-Cloud stays opt-in through `selection.allow_cloud: true`. No credentials are
-required while false, and cold/unavailable local models do not change routing.
+Cloud routing is permitted by `selection.allow_cloud: true`, but still requires
+per-request consent. Missing credentials make the selected cloud provider
+unavailable; Gateway does not substitute another provider.
 For enabled cloud models, use an HTTPS endpoint and an `api_key_env` identifier;
 put the matching KEY=value entries in `private/cloud.env` (0600), or set
 `GATEWAY_SECRETS_FILE` to another private file. Do not quote values, use whitespace,

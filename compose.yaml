@@ -18,6 +18,7 @@ services:
         required: false
     volumes:
       - type: bind
+        # Installer pins this to configs/gateway.yaml; retained for exact rollback snapshots.
         source: ${GATEWAY_CONFIG:-./configs/gateway.yaml}
         target: /config/gateway.yaml
         read_only: true

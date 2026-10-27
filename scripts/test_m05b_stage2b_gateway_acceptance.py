@@ -21,8 +21,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG_SOURCE = ROOT / "configs/gateway-text.example.yaml"
-PRIVATE_EVIDENCE = ROOT / "private/m05b/stage2b/offline-gateway-acceptance.json"
+CONFIG_SOURCE = ROOT / "configs/gateway.yaml"
 TOKEN = "offline-acceptance-token-0123456789"
 CLOUD_KEY = "offline-fake-cloud-key"
 
@@ -251,13 +250,11 @@ class GatewayAcceptanceTest(unittest.TestCase):
             server.server_close()
         for thread in cls.threads:
             thread.join(timeout=3)
-        PRIVATE_EVIDENCE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        PRIVATE_EVIDENCE.parent.chmod(0o700)
-        temp = PRIVATE_EVIDENCE.with_suffix(".tmp")
+        evidence_path = Path(cls.workdir.name) / "offline-gateway-acceptance.json"
+        temp = evidence_path.with_suffix(".tmp")
         temp.write_text(json.dumps(cls.evidence, indent=2) + "\n")
         temp.chmod(0o600)
-        os.replace(temp, PRIVATE_EVIDENCE)
-        PRIVATE_EVIDENCE.chmod(0o600)
+        os.replace(temp, evidence_path)
         cls.workdir.cleanup()
 
     @contextlib.contextmanager

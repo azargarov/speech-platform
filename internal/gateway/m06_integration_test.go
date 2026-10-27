@@ -80,7 +80,7 @@ func TestM06WarmupAndInferenceIntegrationAcrossAllBackends(t *testing.T) {
 	}))
 	defer ttsWorker.Close()
 
-	cfg, err := config.Load("../../configs/gateway-text.example.yaml")
+	cfg, err := config.Load("../../configs/gateway.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestM06WarmupAndInferenceIntegrationAcrossAllBackends(t *testing.T) {
 		}
 		prompt, hasPrompt := request["prompt"]
 		if hasPrompt {
-			if prompt == "" || request["keep_alive"] != float64(0) {
+			if prompt == "" || request["keep_alive"] != "5s" {
 				t.Errorf("unexpected normal transformation prompt: %#v", prompt)
 			}
 			appendEvent("inference:text_transform")

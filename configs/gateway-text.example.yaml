@@ -1,3 +1,5 @@
+# Historical full-config example retained for reference; the supported
+# installation uses configs/gateway.yaml as its canonical Gateway config.
 listen_host: 127.0.0.1
 listen_port: 8080
 stt_url: http://127.0.0.1:8081

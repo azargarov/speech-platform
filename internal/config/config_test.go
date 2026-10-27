@@ -162,16 +162,16 @@ func TestValidHost(t *testing.T) {
 	}
 }
 
-func TestTextTransformExampleAndStrictNestedConfig(t *testing.T) {
+func TestCanonicalTextTransformAndStrictNestedConfig(t *testing.T) {
 	t.Setenv("SPEECH_LISTEN_PORT", "")
 	t.Setenv("SPEECH_API_TOKEN", "offline-test-token-0123456789abcdef")
 	t.Setenv("GROQ_API_KEY", "")
-	raw, err := os.ReadFile("../../configs/gateway-text.example.yaml")
+	raw, err := os.ReadFile("../../configs/gateway.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	valid := string(raw)
-	configured, err := Load("../../configs/gateway-text.example.yaml")
+	configured, err := Load("../../configs/gateway.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,14 +190,14 @@ func TestTextTransformExampleAndStrictNestedConfig(t *testing.T) {
 	}
 	for name, body := range map[string]string{
 		"valid":                     valid,
-		"unknown nested field":      strings.Replace(valid, "      enabled: true", "      enabled: true\n      surprise: true", 1),
+		"unknown nested field":      strings.Replace(valid, "    enabled: true", "    enabled: true\n    surprise: true", 1),
 		"duplicate nested key":      strings.Replace(valid, "  enabled: true", "  enabled: true\n  enabled: true", 1),
 		"required enabled":          strings.Replace(valid, "  enabled: true\n", "", 1),
 		"required prompt file":      strings.Replace(valid, "  prompt_file: ../configs/prompts/text-transformation-system.txt\n", "", 1),
 		"cloud requires https":      strings.Replace(valid, "https://api.groq.com", "http://api.groq.com", 1),
 		"invalid output budget":     strings.Replace(valid, "num_predict: 1024", "num_predict: 8192", 1),
-		"invalid warmup keep alive": strings.Replace(valid, "warmup_keep_alive: 60s", "warmup_keep_alive: 0s", 1),
-		"unknown parameter block":   strings.Replace(valid, "        ollama:", "        unknown:", 1),
+		"invalid warmup keep alive": strings.Replace(valid, "  request_timeout: 240s\n", "  request_timeout: 240s\n  warmup_keep_alive: 0s\n", 1),
+		"unknown parameter block":   strings.Replace(valid, "      ollama:", "      unknown:", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := t.TempDir() + "/config.yaml"
@@ -215,10 +215,11 @@ func TestTextTransformExampleAndStrictNestedConfig(t *testing.T) {
 func TestCloudCredentialsAreResolvedOnlyForPermittedEnabledModels(t *testing.T) {
 	t.Setenv("SPEECH_API_TOKEN", "offline-test-token-0123456789abcdef")
 	t.Setenv("GROQ_API_KEY", "secret-test-value")
-	c, err := Load("../../configs/gateway-text.example.yaml")
+	c, err := Load("../../configs/gateway.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.TextTransform.Selection.AllowCloud = false
 	if got := c.TextTransform.ResolveCredentials(); len(got) != 0 {
 		t.Fatalf("cloud forbidden but credentials resolved: %#v", got)
 	}

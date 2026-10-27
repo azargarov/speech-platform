@@ -20,7 +20,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG_FILE = ROOT / "configs/gateway-text.example.yaml"
+CONFIG_FILE = ROOT / "configs/gateway.yaml"
 SYNTHETIC_OUTPUT = "Synthetic offline transformation result."
 
 

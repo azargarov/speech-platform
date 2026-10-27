@@ -257,7 +257,7 @@ class PreflightTests(unittest.TestCase):
             root / "configs/stt-product-deployment.yaml",
         )
         shutil.copy(preflight.ROOT / "configs/tts.yaml", root / "configs/tts.yaml")
-        config = root / "private/deployment/gateway.yaml"
+        config = root / "configs/gateway.yaml"
         gateway_config = {
             "capabilities": {"stt": False, "tts": False},
         }
@@ -499,7 +499,7 @@ class PreflightTests(unittest.TestCase):
     def test_missing_enabled_optional_cloud_credentials_warn_without_blocking(self):
         with tempfile.TemporaryDirectory() as temp:
             root, _ = self.fixture(temp)
-            config_path = root / "private/deployment/gateway.yaml"
+            config_path = root / "configs/gateway.yaml"
             config_path.write_text(
                 "groq_stt:\n  enabled: true\n  api_key_env: GROQ_STT_API_KEY\n"
             )
@@ -549,7 +549,7 @@ class PreflightTests(unittest.TestCase):
     ):
         with tempfile.TemporaryDirectory() as temp:
             root, calls = self.fixture(temp, fail_model=True)
-            config_path = root / "private/deployment/gateway.yaml"
+            config_path = root / "configs/gateway.yaml"
             config_path.write_text("capabilities:\n  stt: false\n  tts: false\n")
             env_path = root / ".env"
             values = preflight.load_env(root)
@@ -590,7 +590,7 @@ class PreflightTests(unittest.TestCase):
     def test_scoped_worker_preflight_requires_matching_gateway_capability(self):
         with tempfile.TemporaryDirectory() as temp:
             root, _ = self.fixture(temp)
-            config_path = root / "private/deployment/gateway.yaml"
+            config_path = root / "configs/gateway.yaml"
             config_path.write_text("capabilities:\n  stt: true\n  tts: false\n")
             report = preflight.run_checks(root=root, components="gateway,stt")
         self.assertFalse(report.failed, report.entries)
@@ -610,7 +610,7 @@ class PreflightTests(unittest.TestCase):
     def test_tts_only_preflight_requires_only_tts_artifacts(self):
         with tempfile.TemporaryDirectory() as temp:
             root, _ = self.fixture(temp, fail_model=True)
-            config_path = root / "private/deployment/gateway.yaml"
+            config_path = root / "configs/gateway.yaml"
             config_path.write_text("capabilities:\n  stt: false\n  tts: true\n")
             env_path = root / ".env"
             values = preflight.load_env(root)
@@ -639,7 +639,7 @@ class PreflightTests(unittest.TestCase):
     def test_gateway_only_update_accepts_enabled_healthy_unselected_workers(self):
         with tempfile.TemporaryDirectory() as temp:
             root, calls = self.fixture(temp, existing_workers=("stt", "tts"))
-            config_path = root / "private/deployment/gateway.yaml"
+            config_path = root / "configs/gateway.yaml"
             config_path.write_text(
                 "capabilities:\n  stt: true\n  tts: true\n"
                 "stt_url: http://stt:8081\ntts_url: http://tts:8082\n"
@@ -663,7 +663,7 @@ class PreflightTests(unittest.TestCase):
             root, calls = self.fixture(
                 temp, existing_workers=("tts",), stale_workers=("tts",)
             )
-            config_path = root / "private/deployment/gateway.yaml"
+            config_path = root / "configs/gateway.yaml"
             config_path.write_text(
                 "capabilities:\n  stt: false\n  tts: true\ntts_url: http://tts:8082\n"
             )
@@ -678,7 +678,7 @@ class PreflightTests(unittest.TestCase):
             root, calls = self.fixture(
                 temp, existing_workers=("stt",), stopped_workers=("stt",)
             )
-            config_path = root / "private/deployment/gateway.yaml"
+            config_path = root / "configs/gateway.yaml"
             config_path.write_text(
                 "capabilities:\n  stt: true\n  tts: false\nstt_url: http://stt:8081\n"
             )
@@ -695,7 +695,7 @@ class PreflightTests(unittest.TestCase):
                 existing_workers=("stt",),
                 extra_running_workers={"stt": 1},
             )
-            config_path = root / "private/deployment/gateway.yaml"
+            config_path = root / "configs/gateway.yaml"
             config_path.write_text(
                 "capabilities:\n  stt: true\n  tts: false\nstt_url: http://stt:8081\n"
             )
@@ -712,7 +712,7 @@ class PreflightTests(unittest.TestCase):
             root, _ = self.fixture(
                 temp, existing_workers=("stt",), wrong_owner_workers=("stt",)
             )
-            config_path = root / "private/deployment/gateway.yaml"
+            config_path = root / "configs/gateway.yaml"
             config_path.write_text(
                 "capabilities:\n  stt: true\n  tts: false\nstt_url: http://stt:8081\n"
             )
@@ -729,7 +729,7 @@ class PreflightTests(unittest.TestCase):
             root, _ = self.fixture(
                 temp, existing_workers=("stt",), wrong_network_workers=("stt",)
             )
-            config_path = root / "private/deployment/gateway.yaml"
+            config_path = root / "configs/gateway.yaml"
             config_path.write_text(
                 "capabilities:\n  stt: true\n  tts: false\nstt_url: http://stt:8081\n"
             )
@@ -744,7 +744,7 @@ class PreflightTests(unittest.TestCase):
     def test_gateway_only_update_fails_actionably_when_enabled_worker_is_missing(self):
         with tempfile.TemporaryDirectory() as temp:
             root, _ = self.fixture(temp)
-            config_path = root / "private/deployment/gateway.yaml"
+            config_path = root / "configs/gateway.yaml"
             config_path.write_text(
                 "capabilities:\n  stt: true\n  tts: false\nstt_url: http://stt:8081\n"
             )
@@ -768,7 +768,7 @@ class PreflightTests(unittest.TestCase):
             root, _ = self.fixture(
                 temp, existing_workers=("stt",), unhealthy_workers=("stt",)
             )
-            config_path = root / "private/deployment/gateway.yaml"
+            config_path = root / "configs/gateway.yaml"
             config_path.write_text(
                 "capabilities:\n  stt: true\n  tts: false\nstt_url: http://stt:8081\n"
             )
@@ -783,7 +783,7 @@ class PreflightTests(unittest.TestCase):
     def test_gateway_only_update_rejects_a_noncanonical_worker_endpoint(self):
         with tempfile.TemporaryDirectory() as temp:
             root, _ = self.fixture(temp, existing_workers=("stt",))
-            config_path = root / "private/deployment/gateway.yaml"
+            config_path = root / "configs/gateway.yaml"
             config_path.write_text(
                 "capabilities:\n  stt: true\n  tts: false\n"
                 "stt_url: http://127.0.0.1:8081\n"
@@ -799,7 +799,7 @@ class PreflightTests(unittest.TestCase):
     def test_partial_update_checks_enabled_unselected_worker_only(self):
         with tempfile.TemporaryDirectory() as temp:
             root, _ = self.fixture(temp, existing_workers=("tts",))
-            config_path = root / "private/deployment/gateway.yaml"
+            config_path = root / "configs/gateway.yaml"
             config_path.write_text(
                 "capabilities:\n  stt: true\n  tts: true\n"
                 "stt_url: http://stt:8081\ntts_url: http://tts:8082\n"
@@ -830,7 +830,7 @@ class PreflightTests(unittest.TestCase):
     ):
         with tempfile.TemporaryDirectory() as temp:
             root, _ = self.fixture(temp, existing_workers=("stt",))
-            config_path = root / "private/deployment/gateway.yaml"
+            config_path = root / "configs/gateway.yaml"
             config_path.write_text(
                 "capabilities:\n  stt: true\n  tts: true\n"
                 "stt_url: http://stt:8081\ntts_url: http://tts:8082\n"
@@ -897,6 +897,9 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(env["COMPOSE_PROJECT_NAME"], "speech-platform")
         self.assertEqual(env["SOURCE_REVISION"], "a" * 40)
         self.assertEqual(env["SPEECH_PORT"], values["SPEECH_PORT"])
+        self.assertEqual(config, root / "configs/gateway.yaml")
+        self.assertEqual(env["GATEWAY_CONFIG"], str(config))
+        self.assertNotEqual(env["GATEWAY_CONFIG"], values["GATEWAY_CONFIG"])
         self.assertNotIn("COMPOSE_FILE", env)
         self.assertNotIn("DOCKER_CONTEXT", env)
         self.assertNotIn("DOCKER_HOST", env)

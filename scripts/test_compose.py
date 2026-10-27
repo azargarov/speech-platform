@@ -1,6 +1,7 @@
 """Regression checks for Compose Gateway publication and worker isolation."""
 
 import unittest
+from pathlib import Path
 
 from scripts.check_compose import validate, validate_cuda_deployment
 
@@ -29,7 +30,16 @@ def rendered(port=8080, bind="127.0.0.1", require_optional_profiles=False):
             "gateway": {
                 "environment": {"SPEECH_LISTEN_PORT": str(port)},
                 "ports": [{"host_ip": bind, "published": "8080", "target": port}],
-                "volumes": [{"target": "/configs/prompts", "read_only": True}],
+                "volumes": [
+                    {"target": "/configs/prompts", "read_only": True},
+                    {
+                        "target": "/config/gateway.yaml",
+                        "source": str(
+                            Path(__file__).resolve().parents[1] / "configs/gateway.yaml"
+                        ),
+                        "read_only": True,
+                    },
+                ],
                 "read_only": True,
                 "user": "65532:65532",
                 "cap_drop": ["ALL"],
@@ -63,6 +73,15 @@ def worker(network):
 class ComposeConfig(unittest.TestCase):
     def test_default_configuration_and_loopback_binding(self):
         validate(rendered(), 8080, "127.0.0.1")
+
+    def test_gateway_must_mount_canonical_config_read_only(self):
+        config = rendered()
+        mount = config["services"]["gateway"]["volumes"][1]
+        mount["source"] = str(
+            Path(__file__).resolve().parents[1] / "private/gateway.yaml"
+        )
+        with self.assertRaisesRegex(ValueError, "canonical configs/gateway.yaml"):
+            validate(config, 8080, "127.0.0.1")
 
     def test_port_override(self):
         validate(rendered(8765), 8765, "127.0.0.1")

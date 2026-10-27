@@ -246,7 +246,7 @@ func TestPublicTextTransformWarmupDoesNotExposeOrAcceptUserContent(t *testing.T)
 		_, _ = w.Write([]byte(`{"response":"synthetic generated content","done":true}`))
 	}))
 	defer provider.Close()
-	cfg, err := config.Load("../../configs/gateway-text.example.yaml")
+	cfg, err := config.Load("../../configs/gateway.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}

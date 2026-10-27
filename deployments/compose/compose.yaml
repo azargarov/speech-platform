@@ -12,7 +12,7 @@ services:
     ports:
       - "${SPEECH_BIND_IP:-127.0.0.1}:${SPEECH_PORT:-8080}:${SPEECH_LISTEN_PORT:-8080}"
     volumes:
-      - ${GATEWAY_CONFIG:-../../configs/gateway.yaml}:/config/gateway.yaml:ro
+      - ../../configs/gateway.yaml:/config/gateway.yaml:ro
       - ../../configs/prompts:/configs/prompts:ro
     networks: [gateway_publish, stt_private, tts_private]
     environment:

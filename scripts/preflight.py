@@ -61,6 +61,7 @@ ALLOWED_ENV = {
     "TTS_PIDS_LIMIT",
     "TTS_STOP_GRACE_PERIOD",
     "SPEECH_API_URL",
+    # Accepted only so existing .env files remain parseable; selection is ignored.
     "GATEWAY_CONFIG",
     "GATEWAY_EXPECTED_IMAGE_ID",
     "GATEWAY_EXPECTED_SOURCE_REVISION",
@@ -136,29 +137,32 @@ def load_env(root=ROOT):
     return values
 
 
-def gateway_config_path(root, values):
-    configured = Path(values.get("GATEWAY_CONFIG", "configs/gateway.yaml"))
-    source = configured if configured.is_absolute() else root / configured
+def gateway_config_path(root, _values=None):
+    # Keep parsing legacy .env files, but never let GATEWAY_CONFIG select a
+    # different runtime configuration.
+    source = root / "configs/gateway.yaml"
     repository = root.resolve()
     try:
         relative = source.absolute().relative_to(repository)
     except ValueError as exc:
-        raise PreflightError("GATEWAY_CONFIG must be inside the repository") from exc
+        raise PreflightError(
+            "canonical Gateway config must be inside the repository"
+        ) from exc
     if ".." in relative.parts:
-        raise PreflightError("GATEWAY_CONFIG must not use parent-directory traversal")
+        raise PreflightError("canonical Gateway config path is invalid")
     try:
         resolved = source.resolve(strict=True)
     except OSError as exc:
-        raise PreflightError("configured Gateway config file was not found") from exc
+        raise PreflightError("canonical Gateway config file was not found") from exc
     if not resolved.is_relative_to(repository) or not resolved.is_file():
         raise PreflightError(
-            "GATEWAY_CONFIG must identify a file inside the repository"
+            "canonical Gateway config must be a file inside the repository"
         )
     current = repository
     for part in relative.parts:
         current /= part
         if current.is_symlink():
-            raise PreflightError("GATEWAY_CONFIG must not traverse symlinks")
+            raise PreflightError("canonical Gateway config must not traverse symlinks")
     return resolved
 
 
@@ -491,6 +495,8 @@ def _base_environment(values):
     for key in controlled:
         env.pop(key, None)
     env.update(values)
+    # Discard the legacy value; _compose_environment supplies the canonical path.
+    env.pop("GATEWAY_CONFIG", None)
     env["COMPOSE_PROJECT_NAME"] = "speech-platform"
     return env
 
@@ -499,6 +505,8 @@ def _compose_environment(values, revision, config_path, root=ROOT):
     """Build isolated Compose interpolation env; ambient deployment values lose."""
     env = _base_environment(values)
     env["SOURCE_REVISION"] = revision
+    # Normal installer and qualification commands always use the canonical file.
+    # The Compose variable remains for the documented exact-image rollback path.
     env["GATEWAY_CONFIG"] = str(config_path)
     secret_path = gateway_secrets_path(root, values)
     env["GATEWAY_SECRETS_FILE"] = str(secret_path)
@@ -1033,9 +1041,9 @@ def run_checks(
 
     config_path = check(
         "Deployment",
-        "Gateway config path",
+        "Canonical Gateway config path",
         lambda: gateway_config_path(root, values),
-        "Set GATEWAY_CONFIG to a regular file inside this checkout without symlinks.",
+        "Restore configs/gateway.yaml as a regular file inside this checkout without symlinks.",
     )
     gateway_document = None
     if config_path:

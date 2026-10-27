@@ -6,14 +6,14 @@ SpeechPlatform is a local-first platform for speech processing through an authen
 
 - **STT:** local Faster-Whisper transcription in Russian, English and Swedish, with automatic or selected language handling.
 - **TTS:** local VoxCPM2 plain-text speech synthesis and a bounded SSML subset; WAV output.
-- **Text transformation and translation:** optional, separately configured Gateway capability. Translation uses the text transformation endpoint. Generated text requires user review.
-- **Optional cloud integration:** Groq STT requires configuration and per-request audio consent. Cloud text providers require explicit Gateway configuration and authorization.
+- **Text transformation and translation:** enabled in the canonical Gateway configuration. Translation uses the text transformation endpoint. Generated text requires user review.
+- **Optional cloud integration:** Groq STT is disabled by default and requires per-request audio consent when enabled. Configured cloud text models require explicit per-request cloud consent and available credentials.
 
 Speech translation and text translation are distinct. STT can translate speech only when the selected model supports it; the deployed `large-v3-turbo` configuration does not support cross-language translation. To translate existing text, use `/v1/text/transformations` with `target_language`.
 
 ## Architecture
 
-Clients call the Gateway, which authenticates public requests and routes them to separate STT and TTS workers. Text transformation is disabled in the default Gateway configuration. It can be enabled with a private configuration and an existing local Ollama service, or with explicitly configured cloud providers. SpeechPlatform does not manage the lifecycle of shared Ollama.
+Clients call the Gateway, which authenticates public requests and routes them to separate STT and TTS workers. The canonical tracked `configs/gateway.yaml` enables text transformation with local Ollama and configured cloud models; cloud use remains subject to Gateway policy and explicit per-request consent. Operator-specific deployment values and the API token live in protected `.env`, while provider keys remain in protected private environment files. SpeechPlatform does not manage the lifecycle of shared Ollama.
 
 The standard deployment path is Make + Docker Compose. Model files are provisioned separately, mounted read-only by workers, and are not downloaded at runtime. The Gateway serves HTTP; use its loopback binding for local access. For remote access, put a TLS reverse proxy in front of it and restrict direct access to the Gateway port.
 

@@ -118,22 +118,21 @@ sent unchanged, for example:
 .venv/bin/python -m scripts.qualify transform --text 'Synthetic text.' --model groq-qwen --allow-cloud
 ```
 
-Read-only inspection of the effective Gateway configuration on 2026-10-25
-found ordered selection with `allow_cloud=false` and these enabled aliases:
+The canonical [`configs/gateway.yaml`](../../configs/gateway.yaml) defines
+ordered selection with `allow_cloud=true` and these enabled aliases:
 
 | Alias | Configured provider locality | Current cloud policy |
 | --- | --- | --- |
 | `local-qwen` | Local | Eligible under current policy |
-| `groq-qwen` | Cloud | Denied while `allow_cloud=false` |
-| `groq-gpt-oss` | Cloud | Denied while `allow_cloud=false` |
+| `groq-qwen` | Cloud | Eligible only when the request explicitly allows cloud |
+| `groq-gpt-oss` | Cloud | Eligible only when the request explicitly allows cloud |
 
-The tracked [`gateway-text.example.yaml`](../../configs/gateway-text.example.yaml)
-contains the same aliases. `--allow-cloud` sets `local_only=false`; the Gateway
-still enforces its own cloud policy, model availability and alias validity.
-Without the flag, an explicit cloud alias is sent with `local_only=true` and
-the Gateway rejects it. Unknown or disabled aliases are likewise left for the
-Gateway to reject. Batch qualification has no `--model` option: it omits the
-field and reports the actual model returned by the Gateway.
+`--allow-cloud` sets `local_only=false`; the Gateway still enforces its own
+cloud policy, model availability and alias validity. Without the flag, an
+explicit cloud alias is sent with `local_only=true` and the Gateway rejects it.
+Unknown or disabled aliases are likewise left for the Gateway to reject. Batch
+qualification has no `--model` option: it omits the field and reports the actual
+model returned by the Gateway.
 
 CLI language, transformation mode/format, TTS mode/language, and audio
 input-format/processing choices are checked against the corresponding public
