@@ -38,8 +38,27 @@ target-language settings. Save the ten text outputs per case under the ignored
 
 ## Status
 
-Implementation authorized and in progress. Live qualification, user validation
-and closeout are pending separate authorization.
+Implementation is complete. The authorized live provider qualification was
+executed on 2026-10-26 and is recorded in [verification.md](verification.md).
+Operator validation and milestone closeout remain pending; this evaluation
+does not close M07B2.
+
+## Authorized comprehensive live quality qualification — 2026-10-26
+
+The operator authorized a bounded live comparison of `local-qwen`,
+`groq-qwen`, and `groq-gpt-oss` using the running installation. The evaluation
+covers the existing nine `samples/text` fixtures, the mandatory English
+Diplomatic regression, English/Swedish/Russian mode and format cases, all six
+translation directions, and focused long, ambiguous, and technical inputs.
+It uses `scripts.qualify` only. Groq text inference is explicitly authorized;
+cloud STT is excluded. No configuration, prompt, inference parameter,
+infrastructure, or service lifecycle changes are in scope. Exact inputs,
+outputs, individual CLI reports, evidence, and reviews are retained under
+`private/m07-quality-20261026/`.
+
+Live output quality is evaluated separately from HTTP/CLI success. A
+successful request is not a semantic pass. Operator review and closeout remain
+separate gates.
 
 ## Deferred follow-up
 

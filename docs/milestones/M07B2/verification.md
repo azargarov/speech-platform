@@ -439,3 +439,192 @@ These checks do not establish target deployment or live request acceptance.
 Preflight, installation, post-deployment checks, and the four final manual
 acceptance requests remain pending. M07 remains in progress; no milestone
 closeout is recorded here.
+
+## M07 comprehensive transformation and translation qualification — 2026-10-26
+
+### OBSERVED — baseline and scope
+
+Executed against the running SpeechPlatform installation. Before and after the
+run, `make status PYTHON=.venv/bin/python` reported Gateway, STT, and TTS
+running and healthy. `scripts.qualify ready` returned HTTP 200 before and
+after. Container IDs and image IDs were unchanged:
+
+| Service | Source revision | Image ID | Container ID (prefix) |
+| --- | --- | --- | --- |
+| Gateway | `9c8d42dc02e26ea2f506210f5258797d291c1a46` | `sha256:7599e55d05167e0e0c52703eeb93b050dc9ece2afca494b45e7b703e3e95a9df` | `20c1856adf63` |
+| STT | `25e65921040a4c6a4f310b54387bda9ee790aa84` | `sha256:e7e0ddb9617d161c6c2c809faa5c59050996c3d602a8065af7c117aa2cbf84b6` | `9c044acc3c89` |
+| TTS | `25e65921040a4c6a4f310b54387bda9ee790aa84` | `sha256:3f641ec0fb91db760122dbab60b8c14fe87acfc24a7e5fb006ab9164c25f925e` | `5f634e191e37` |
+
+The effective mounted Gateway configuration had text transformation enabled,
+ordered selection, `allow_cloud=true`, and all three requested model aliases
+enabled. The Gateway returned prompt fingerprint
+`75c2b419ea92029b2b391e55a9e2eaae894c37630d03d12f2b1a353ed547530c` on all
+186 qualification requests. This matches the prompt file after the Gateway's
+hash normalization (remove one final LF, then one CR). No prompt or
+configuration reload was performed.
+
+The OpenAPI contract in `api/openapi/public-v1.yaml` supports modes `raw`,
+`written`, `polite`, `diplomatic`; formats `normal`, `concise`, `structured`;
+and target languages `none`, `en`, `sv`, `ru`. Raw permits Normal only. The
+existing prompt is `configs/prompts/text-transformation-system.txt`; M05B
+acceptance requires polite/diplomatic modes to preserve material meaning and
+speaker attribution, concise to preserve material facts, and structured not to
+add content (`docs/milestones/M05B/plan.md`, section 7). Existing M07 text
+fixtures were copied without modification to the private run directory.
+
+Configured models and settings were read without exposing credentials:
+
+| Alias / reported provider | Configured inference model | Unchanged salient parameters |
+| --- | --- | --- |
+| `local-qwen` / `host-ollama` | `qwen3.5:9b-q4_K_M` | context 8192; `num_predict=1024`; temperature 0; top_p 1; seed 20261022; think false |
+| `groq-qwen` / `groq` | `qwen/qwen3.8-27b` | context 8192; max completion 1024; temperature 0; top_p 1; seed 20261022; reasoning effort none |
+| `groq-gpt-oss` / `groq` | `openai/gpt-oss-120b` | context 8192; max completion 1024; temperature 0; top_p 1; seed 20261022; reasoning effort low |
+
+The Gateway response reports logical model aliases and provider IDs; it does
+not independently attest the provider's internally served model revision.
+Configured IDs above are configuration observations, not provider attestation.
+All model requests pinned an explicit alias and passed `--allow-cloud`; no
+fallback or provider substitution was observed. No cloud STT was run.
+
+### OBSERVED — request matrix and technical outcomes
+
+Executed 186 single-request `scripts.qualify transform` calls: 183 generated
+requests (61 per alias) and three provider-independent exact Raw passthroughs.
+The generated set includes the complete Written/Polite/Diplomatic ×
+Normal/Concise/Structured matrix for one representative input in each source
+language; the nine existing M07 text fixtures in Written/Normal; the required
+English Diplomatic regression; all six translation directions across all
+three styles with Concise/Structured represented; and focused long, ambiguous,
+and technical cases. The fixture baseline overlaps six requests with the full
+mode/format matrix; it is not double-counted. Inputs and the exact run plan are
+in `private/m07-quality-20261026/`.
+
+| Model | HTTP-valid generated responses | Client latency median / p95 | Same-language output kept source language | Translation retained explicit recipient responsibility |
+| --- | ---: | ---: | ---: | ---: |
+| `local-qwen` | 61/61 | 1.276 s / 9.643 s | 27/42 | 18/18 |
+| `groq-qwen` | 60/61 | 0.228 s / 0.594 s | 40/41 successful outputs | 7/18 |
+| `groq-gpt-oss` | 61/61 | 0.553 s / 0.985 s | 42/42 | 11/18 |
+
+Latency is client elapsed time through Gateway, not provider processing time;
+p95 uses the nearest-rank percentile.
+The single Groq Qwen failure was the Swedish short ambiguous case:
+
+- Gateway: HTTP 503 `text_transform_failed`, client elapsed 0.094 s.
+- Correlated request ID: `7451144f-60a7-4cb7-b1ce-56c83ec2b18a`.
+- Gateway provider log: upstream HTTP 429, code `rate_limit_exceeded`, type
+  `tokens`, `suppressed=true`, provider attempt 24 ms.
+- No retry or fallback occurred; the explicitly selected model remained
+  unavailable.
+
+All 186 reports have a Gateway request ID and the same active prompt
+fingerprint. All 182 successful generated responses report the selected alias
+and expected provider; none report fallback. All three Raw outputs matched
+their input files byte-for-byte (3/3). Every successful translation output
+used its requested target language (54/54), but this does not establish
+semantic or native-level translation quality. The exact full generated text
+was searched against Gateway Docker logs from the run window; no complete
+output string was found. This scan does not rule out partial-string matches.
+The correlated provider log fields are saved in
+`private/m07-quality-20261026/evidence/gateway-rate-limit-correlated.json`.
+
+Codex reviewed all 182 successful generated outputs and applied explicit
+invariant checks. This is not native-speaker review. Counts below are
+criterion-specific, not an aggregate semantic score.
+
+### INTERPRETATION — semantic fidelity, style, and formatting
+
+For the required English regression, a strict PASS requires all six invariants:
+recipient responsibility, repeated configuration change, outage, exactly two
+prior warnings, prior consultation, and the 5 PM deadline. PARTIAL means the
+actor or count is ambiguous; unsupported material additions and omissions are
+FAIL.
+
+| Model | PASS | PARTIAL | FAIL | Key failure |
+| --- | ---: | ---: | ---: | --- |
+| `local-qwen` | 3/9 | 2/9 | 4/9 | Diplomatic Normal/Concise remove the actor; Structured changes speaker/actor framing. Written Concise says “disabled” and drops the exact prior-warning count. |
+| `groq-qwen` | 2/9 | 0/9 | 7/9 | Most Polite/Diplomatic outputs say the configuration “was altered” without naming who did it; Structured Written invents a “third instance.” |
+| `groq-gpt-oss` | 2/9 | 4/9 | 3/9 | Diplomatic outputs omit the actor; Diplomatic Normal changes first-person “I/me” into “we/us” and omits the warning count. |
+
+All three Diplomatic Normal outputs fail the required responsibility invariant.
+For example, Local Qwen says “The configuration has been altered once more,”
+Groq Qwen says “The configuration has been altered,” and GPT-OSS says “We
+understand that the configuration was altered again.” Their complete outputs
+are preserved in `reports/regression-review.json` and the corresponding
+private evidence files. These are material failures despite HTTP 200.
+
+Same-language source retention was a major model-specific regression: Local
+Qwen switched 15/42 successful Swedish or Russian `target_language=none`
+outputs to English; Groq Qwen switched 1/41 successful outputs; GPT-OSS
+switched 0/42. Examples include Local Qwen returning “This is completely
+worthless” for a Swedish source and English prose for Russian informal and
+polite sources. The Groq Qwen switch was the Diplomatic Concise Swedish rude
+fixture. Exact inputs and outputs are preserved in
+`reports/failure-analysis.json` and the evidence directory.
+
+For the six translation directions, the direct recipient-as-actor invariant
+was retained in Local Qwen 18/18 outputs, Groq Qwen 7/18, and GPT-OSS 11/18.
+The other outputs generally converted direct blame into passive
+“configuration was damaged/changed” wording. The figures do not imply overall
+translation PASS: Codex review also found uneven tone/register, and no
+independent native-speaker review was conducted. One English-to-Swedish
+Diplomatic Structured GPT-OSS output added a recommendation to improve the
+process; a Russian-to-Swedish output added a request to prevent future
+incidents. A Swedish Written output used “ett skandal,” an en/ett agreement
+error. Target-language correctness is therefore not a fluency pass.
+
+Formatting evidence is also mixed:
+
+- The Concise outputs were shorter than their matched Normal outputs in 10/10
+  Local Qwen pairs, 9/10 Groq Qwen pairs, and 10/10 GPT-OSS pairs. Shorter
+  output did not guarantee preservation: several concise regression outputs
+  omit actor or warning count.
+- A simple visible-organization marker was found in 5/16 Local Qwen, 1/16
+  Groq Qwen, and 13/16 GPT-OSS Structured outputs. This is a shape heuristic,
+  not a semantic pass. Groq Qwen frequently returned a prose paragraph for
+  Structured; some Local Qwen Structured outputs wrapped a single paragraph
+  in JSON.
+- Polite and Diplomatic calls returned complete independent text; they did not
+  require a preceding Written call. Semantic/style adherence still varied.
+
+The long technical case mostly retained its times, counts, budget, uncertainty,
+and sequence. GPT-OSS Structured added an unsupported year (2023) and said the
+errors ceased “immediately.” GPT-OSS also replaced ASCII hyphens with Unicode
+non-breaking hyphens in identifiers such as `ledger-api`, `X-Region`, `sp-77`,
+and `N-204`, so exact identifier checks fail and copying identifiers can
+change them. The full exact-token failures are listed in
+`reports/failure-analysis.json`. The Russian command/path case also verified
+the self-correction “yesterday—more precisely today”; model wording varied in
+how it preserved that correction.
+
+### Model comparison and recommendation
+
+- **Local Qwen** was available for every request and preserved direct
+  responsibility best in the sampled translations, but its 15/42 Swedish and
+  Russian same-language switches make it unsuitable as a general multilingual
+  selection on this evidence.
+- **Groq Qwen** was fastest in this small sample, but had one upstream token
+  rate-limit failure, the most frequent translation responsibility omissions,
+  and the weakest Structured organization signal.
+- **Groq GPT-OSS** had the strongest same-language retention and Structured
+  organization signal in these samples, but still omitted actors in Diplomatic
+  and translation outputs, altered exact technical identifiers, and added
+  unsupported facts/recommendations.
+
+No model is recommended as a general winner or for unattended generated text.
+The results suggest a shared mode/prompt interaction for Diplomatic actor
+omission (hypothesis), model-specific language retention/format behavior, and
+provider rate limiting for the one Groq Qwen technical failure. They do not
+show that a prompt edit alone would correct Local Qwen language switches or
+GPT-OSS identifier normalization. The smallest next step is operator and
+native-speaker review of the saved failures, followed—if approved—by a focused
+acceptance-gated prompt experiment on explicit actor preservation and
+no-translation language retention. No prompt, code, model, or configuration
+changes were made in this evaluation.
+
+### NOT ESTABLISHED
+
+Independent native-speaker quality, broad generalization beyond this finite
+synthetic corpus, provider-side model revision attestation, and whether a
+future prompt revision would fix any defect remain unestablished. No model was
+accepted, no milestone was closed, and no deployment or service restart was
+performed.
