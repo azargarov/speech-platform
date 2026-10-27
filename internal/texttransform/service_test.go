@@ -1224,7 +1224,8 @@ func TestAcceptedGroqModelsSerializeConfiguredReasoningOptions(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		id, upstream, reasoning string
-	}{{"groq-qwen", "qwen/qwen3.8-27b", "none"}, {"groq-gpt-oss", "openai/gpt-oss-120b", "low"}} {
+		maxCompletionTokens     float64
+	}{{"groq-qwen", "qwen/qwen3.8-27b", "none", 512}, {"groq-gpt-oss", "openai/gpt-oss-120b", "low", 1024}} {
 		t.Run(tc.id, func(t *testing.T) {
 			var provider config.TextProvider
 			var model config.TextModel
@@ -1243,7 +1244,7 @@ func TestAcceptedGroqModelsSerializeConfiguredReasoningOptions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got["model"] != tc.upstream || got["stream"] != false || got["reasoning_effort"] != tc.reasoning || got["include_reasoning"] != false || got["max_completion_tokens"] != float64(1024) || got["max_tokens"] != nil {
+			if got["model"] != tc.upstream || got["stream"] != false || got["reasoning_effort"] != tc.reasoning || got["include_reasoning"] != false || got["max_completion_tokens"] != tc.maxCompletionTokens || got["max_tokens"] != nil {
 				t.Fatalf("serialized request=%#v", got)
 			}
 		})
