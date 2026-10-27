@@ -75,7 +75,7 @@ text_transform:
     prompt_overhead_tokens: 512
     parameters:
       openai_compatible:
-        max_completion_tokens: 1024
+        max_completion_tokens: 512
         temperature: 0
         top_p: 1
         seed: 20261022
