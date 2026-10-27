@@ -109,16 +109,18 @@ def _origin(values, gateway_url=None, token_file=None, *, require_token=True):
     return origin, token if len(token) >= 32 else None
 
 
-def _output_path(path, *, private=False):
+def _output_path(path):
     target = path.expanduser().absolute()
-    if not target.parent.is_dir():
+    try:
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
         raise QualificationError(
-            "local_validation", f"output directory does not exist: {target.parent}"
-        )
+            "local_validation", "could not create output directory"
+        ) from None
+    if not target.parent.is_dir():
+        raise QualificationError("local_validation", "output parent is not a directory")
     if target.exists() or target.is_symlink():
         raise QualificationError("local_validation", "output file already exists")
-    if private:
-        return _private_path(target)
     return target.resolve(strict=False)
 
 
@@ -130,28 +132,20 @@ def _private_path(path):
             "local_validation", "private output directory must not be a symlink"
         )
     private = private_root.resolve()
-    canonical = target.resolve(strict=False)
-    if not canonical.is_relative_to(private):
+    if not target.resolve(strict=False).is_relative_to(private):
         raise QualificationError(
-            "local_validation",
-            "report and evidence paths must be under private/",
+            "local_validation", "output path must be under private/"
         )
-    if target.exists() or target.is_symlink():
-        raise QualificationError("local_validation", "output file already exists")
-    return canonical
+    return _output_path(target)
 
 
 def _validate_output_paths(args):
     paths = (
-        (getattr(args, "report", None), True),
-        (getattr(args, "evidence", None), True),
-        (getattr(args, "output", None), False),
+        getattr(args, "report", None),
+        getattr(args, "evidence", None),
+        getattr(args, "output", None),
     )
-    canonical = [
-        _output_path(path, private=private)
-        for path, private in paths
-        if path is not None
-    ]
+    canonical = [_output_path(path) for path in paths if path is not None]
     if len(set(canonical)) != len(canonical):
         raise QualificationError(
             "local_validation",
@@ -159,9 +153,9 @@ def _validate_output_paths(args):
         )
 
 
-def _write_output(path, data, *, private=False):
+def _write_output(path, data):
     try:
-        target = _output_path(path, private=private)
+        target = _output_path(path)
     except QualificationError as exc:
         raise QualificationError("output_error", str(exc)) from None
     try:
@@ -925,7 +919,6 @@ def _execute(args):
             _write_output(
                 args.evidence,
                 json.dumps(evidence_content, ensure_ascii=False).encode(),
-                private=True,
             )
         if op == "transform" and report["outcome"] == "pass":
             print(transformed, flush=True)
@@ -1069,12 +1062,14 @@ def _parser():
             "--timeout", type=float, default=600, help="client wait timeout in seconds"
         )
         command.add_argument(
-            "--report", type=Path, help="exclusive-create JSON report under private/"
+            "--report",
+            type=Path,
+            help="exclusive-create JSON report (private/ recommended for sensitive data)",
         )
         command.add_argument(
             "--evidence",
             type=Path,
-            help="explicitly retain request/response text under private/",
+            help="explicitly retain request/response text (private/ recommended)",
         )
         command.add_argument(
             "--expect-error",
@@ -1196,7 +1191,7 @@ def main(argv=None):
     report_writable = args.report is not None
     if report_writable:
         try:
-            _output_path(args.report, private=True)
+            _output_path(args.report)
         except QualificationError:
             report_writable = False
     try:
@@ -1227,16 +1222,15 @@ def main(argv=None):
             _write_output(
                 args.report,
                 json.dumps(report, ensure_ascii=False, indent=2).encode(),
-                private=True,
             )
         except (OSError, QualificationError) as exc:
             message = (
                 str(exc)
                 if isinstance(exc, QualificationError)
-                else "could not write private report"
+                else "could not write report"
             )
             print(
-                f"FAIL {args.operation}: private report write failed: {message}; any previously written artifact remains",
+                f"FAIL {args.operation}: report write failed: {message}; any previously written artifact remains",
                 file=sys.stderr,
             )
             return EXIT_OUTPUT

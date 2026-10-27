@@ -109,11 +109,17 @@ instance; `--auth-mode missing --expect-error unauthorized` is the negative
 missing-header probe. A deliberately invalid token can be supplied through a
 private token file, but the CLI never fabricates one.
 
-Single-operation JSON reports use `--report private/<path>.json`; text/audio
-payloads are excluded unless `--evidence` is explicitly requested, which stays
-under `private/`. Batch transformed text outputs remain generated, Git-ignored
-evaluation artifacts with restrictive file permissions. Round-trip detailed
-reports also remain under `private/`.
+Single-operation JSON reports can be written to any explicit filesystem path
+with `--report`; `--evidence` can likewise explicitly retain request/response
+text at any path. `private/` remains the recommended location for sensitive
+qualification data. Relative paths are resolved from the current working
+directory, missing parent directories are created with restrictive permissions,
+and files are created exclusively with mode 0600; existing files are never
+overwritten. The CLI does not add outputs to `.gitignore` or manage Git. Output
+outside `private/` may be included in commits if it is tracked or added, so
+review its contents and repository status before committing. Batch transformed
+text outputs remain generated evaluation artifacts. Round-trip detailed reports
+remain under `private/`.
 
 ## Current provider and live qualification status
 

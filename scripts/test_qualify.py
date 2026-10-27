@@ -959,22 +959,24 @@ class QualificationTests(unittest.TestCase):
         opened.assert_not_called()
         self.assertEqual(output.read_bytes(), b"keep")
 
-    def test_tts_missing_output_parent_fails_before_request(self):
+    def test_tts_creates_missing_output_parent_with_restrictive_permissions(self):
         output = self.root / "missing" / "speech.wav"
         stdout = io.StringIO()
         with (
             patch.object(qualify, "ROOT", self.root),
             patch.object(qualify, "load_env", return_value=self.env),
-            patch.object(qualify, "urlopen") as opened,
+            patch.object(
+                qualify, "urlopen", return_value=Response(wav_bytes())
+            ) as opened,
             contextlib.redirect_stdout(stdout),
         ):
             status = qualify.main(
                 ["tts", "--text", "synthetic", "--output", str(output)]
             )
-        self.assertEqual(status, qualify.EXIT_INPUT)
-        self.assertIn("output directory does not exist:", stdout.getvalue())
-        self.assertIn("HTTP N/A; elapsed=N/A", stdout.getvalue())
-        opened.assert_not_called()
+        self.assertEqual(status, 0)
+        self.assertEqual(stat.S_IMODE(output.parent.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+        opened.assert_called_once()
 
     def test_tts_permission_failure_has_safe_actionable_error_and_output_exit(self):
         output = self.root / "forbidden.wav"
@@ -995,9 +997,90 @@ class QualificationTests(unittest.TestCase):
         self.assertNotIn("private words", stdout.getvalue())
         self.assertNotIn(TOKEN, stdout.getvalue())
 
-    def test_report_and_evidence_remain_restricted_to_private(self):
+    def test_transform_report_and_evidence_accept_relative_and_absolute_paths(self):
+        outside_temp = tempfile.TemporaryDirectory()
+        outside = Path(outside_temp.name)
+        fixture = self.root / "samples" / "text" / "ru-rude.txt"
+        fixture.parent.mkdir(parents=True)
+        fixture.write_text("synthetic Russian fixture", encoding="utf-8")
+        body = json.dumps(
+            {
+                "original_text": "synthetic Russian fixture",
+                "transformed_text": "A transformed sentence.",
+                "options": {
+                    "mode": "diplomatic",
+                    "format": "normal",
+                    "target_language": "none",
+                    "model": "local-qwen",
+                    "local_only": True,
+                },
+                "provider": "host-ollama",
+                "model": "local-qwen",
+                "generated": True,
+                "fallback_occurred": False,
+            }
+        ).encode()
+        cases = (
+            (Path("private/nested/report.json"), Path("private/nested/evidence.json")),
+            (Path("samples/out/report.json"), Path("samples/out/evidence.json")),
+            (outside / "nested/report.json", outside / "nested/evidence.json"),
+        )
+        original_cwd = Path.cwd()
+        try:
+            os.chdir(self.root)
+            for report_path, evidence_path in cases:
+                with self.subTest(report=str(report_path)):
+                    stdout = io.StringIO()
+                    with (
+                        patch.object(qualify, "ROOT", self.root),
+                        patch.object(qualify, "load_env", return_value=self.env),
+                        patch.object(qualify, "urlopen", return_value=Response(body)),
+                        contextlib.redirect_stdout(stdout),
+                    ):
+                        status = qualify.main(
+                            [
+                                "transform",
+                                "--text-file",
+                                "samples/text/ru-rude.txt",
+                                "--mode",
+                                "diplomatic",
+                                "--model",
+                                "local-qwen",
+                                "--report",
+                                str(report_path),
+                                "--evidence",
+                                str(evidence_path),
+                            ]
+                        )
+                    actual_report = report_path.absolute()
+                    actual_evidence = evidence_path.absolute()
+                    self.assertEqual(status, 0)
+                    self.assertEqual(stat.S_IMODE(actual_report.stat().st_mode), 0o600)
+                    self.assertEqual(
+                        stat.S_IMODE(actual_evidence.stat().st_mode), 0o600
+                    )
+                    report = json.loads(actual_report.read_text())
+                    evidence = json.loads(actual_evidence.read_text())
+                    self.assertEqual(report["schema_version"], "1.0")
+                    self.assertEqual(
+                        report["request"]["parameters"]["mode"], "diplomatic"
+                    )
+                    self.assertEqual(
+                        report["request"]["parameters"]["model"], "local-qwen"
+                    )
+                    self.assertEqual(
+                        evidence["transformed_text"], "A transformed sentence."
+                    )
+                    self.assertIn("A transformed sentence.", stdout.getvalue())
+        finally:
+            os.chdir(original_cwd)
+            outside_temp.cleanup()
+
+    def test_existing_report_or_evidence_is_rejected_before_request(self):
         for option in ("--report", "--evidence"):
             with self.subTest(option=option):
+                existing = self.root / "existing.json"
+                existing.write_text("keep")
                 stdout = io.StringIO()
                 with (
                     patch.object(qualify, "ROOT", self.root),
@@ -1006,18 +1089,31 @@ class QualificationTests(unittest.TestCase):
                     contextlib.redirect_stdout(stdout),
                 ):
                     status = qualify.main(
-                        [
-                            "tts",
-                            "--text",
-                            "synthetic",
-                            option,
-                            str(self.root / "outside.json"),
-                        ]
+                        ["transform", "--text", "synthetic", option, str(existing)]
                     )
                 self.assertEqual(status, qualify.EXIT_INPUT)
-                self.assertIn("under private/", stdout.getvalue())
-                self.assertIn("HTTP N/A; elapsed=N/A", stdout.getvalue())
+                self.assertIn("already exists", stdout.getvalue())
+                self.assertEqual(existing.read_text(), "keep")
                 opened.assert_not_called()
+
+    def test_report_and_evidence_reject_directory_and_unwritable_destinations(self):
+        directory_target = self.root / "existing-directory"
+        directory_target.mkdir()
+        with self.assertRaises(qualify.QualificationError):
+            qualify._output_path(directory_target)
+
+        report = self.root / "private" / "unwritable.json"
+        with (
+            patch.object(qualify, "ROOT", self.root),
+            patch.object(qualify, "load_env", return_value=self.env),
+            patch.object(qualify, "urlopen", return_value=Response(b"{}")),
+            patch.object(qualify.os, "open", side_effect=PermissionError),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            status = qualify.main(["health", "--report", str(report)])
+        self.assertEqual(status, qualify.EXIT_OUTPUT)
+        self.assertFalse(report.exists())
 
     def test_wav_rejects_truncation_and_incomplete_final_frame(self):
         valid = wav_bytes()
@@ -1220,7 +1316,7 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(raised.exception.api_code, "cloud_disabled")
         self.assertNotIn("secret text", str(raised.exception))
 
-    def test_json_report_is_private_exclusive_and_content_free(self):
+    def test_json_report_is_exclusive_and_content_free(self):
         report_path = self.root / "private" / "report.json"
         body = json.dumps(
             {

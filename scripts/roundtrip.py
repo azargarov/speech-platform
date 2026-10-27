@@ -173,7 +173,7 @@ def _output_targets(fixtures, output_dir: Path, *, regenerate: bool, report_path
     if len(set(canonical)) != len(canonical):
         raise RoundtripError("local_validation", "generated audio paths collide")
     if report_path:
-        report = qualify._output_path(report_path, private=True)
+        report = qualify._private_path(report_path)
         if report in set(canonical):
             raise RoundtripError(
                 "local_validation", "report path collides with generated audio"
@@ -733,7 +733,7 @@ def main(argv=None):
     report_writable = args.report is not None
     if report_writable:
         try:
-            qualify._output_path(args.report, private=True)
+            qualify._private_path(args.report)
         except qualify.QualificationError:
             report_writable = False
     report = run(args)
@@ -753,7 +753,6 @@ def main(argv=None):
             qualify._write_output(
                 args.report,
                 json.dumps(report, ensure_ascii=False, indent=2).encode(),
-                private=True,
             )
         except (OSError, qualify.QualificationError) as exc:
             message = (
