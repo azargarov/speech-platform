@@ -13,7 +13,7 @@ the current syntax.
 | `POST /v1/stt/transcriptions` (`transcribe`) | `--audio`; `--source-language`; `--output-language`; `--model` local alias; `--timestamps`; `--stream`; `--provider local|groq`; `--allow-cloud-audio`; configured/none/missing auth; target and timeout | `scripts.qualify stt`; round-trip pins local; batch pins local | Provider and consent headers are explicit. Groq requires explicit audio consent. Groq uses server-configured model; explicit model is rejected. `timestamps=true` is sent for an expected-error probe but Gateway documents it unsupported. `stream=true` is sent as a probe and rejected; only false is supported. Deprecated `language` is represented by `--source-language`; audio media type is selected from the file extension. API error codes, HTTP status, safe response headers and stage are retained. |
 | `POST /v1/tts/speech` (`synthesize`) | text or SSML; `--voice default`; `--language`; `--mode`; `--input-format`; `--audio-processing`; timeout; arbitrary exclusive WAV output | `scripts.qualify tts`; round-trip TTS stage | Public contract has no provider/model selection and only the `default` voice. WAV format and duration are checked. Gateway does not return a public model/provider identity. API errors and timeout are retained. |
 | `GET /v1/tts/voices` (`listVoices`) | Authenticated GET | `scripts.qualify voices` | Validates catalog response fields and records public IDs/languages/capabilities. Worker unavailability remains a Gateway 503. |
-| `POST /v1/text/transformations` (`transformText`) | text/file/stdin; `--mode raw|written|polite|diplomatic`; `--format normal|concise|structured`; `--target-language none|en|sv|ru`; optional arbitrary configured `--model`; local-only default or explicit `--allow-cloud`; timeout; configured/none/missing auth | `scripts.qualify transform`; `scripts.transform_samples`; round-trip does not call this operation | Raw requires Normal. Unset model is omitted; an explicit alias is passed through. CLI cloud consent does not override Gateway policy. Prompt fingerprint and response provider/model/fallback metadata are retained. Invalid aliases, `cloud_not_allowed`, auth failures, validation and provider responses can be recorded with `--expect-error CODE`. No public text-model catalog exists. |
+| `POST /v1/text/transformations` (`transformText`) | text/file/stdin; `--mode raw|written|polite|diplomatic`; `--format normal|concise|structured`; `--target-language none|en|sv|ru`; optional configured `--model`; local-only CLI default or explicit `--allow-cloud`; request-local `system_prompt` via `--prompt-file`; timeout; configured/none/missing auth | `scripts.qualify transform`; `scripts.transform_samples`; round-trip does not call this operation | Raw requires Normal. Unset model is omitted; an explicit alias is passed through and never falls back. With no explicit model, configured ordered selection may try another eligible provider after failure. CLI cloud consent does not override Gateway policy. Prompt fingerprint and response provider/model/fallback metadata are retained. Invalid aliases, `cloud_not_allowed`, auth failures, validation and provider responses can be recorded with `--expect-error CODE`. No public text-model catalog exists. |
 | `POST /v1/models/warmup` (`warmupModels`) | Repeat `--operation stt|tts|text_transform`; configured authentication; timeout | `scripts.qualify warmup` | Response schema, per-operation status and `complete` are recorded. This changes model residency; it is opt-in and is never run by ordinary verification. Partial warmup is a technical failure with per-operation result codes. |
 
 OpenAPI applies bearer security to all listed routes. Production Gateway
@@ -121,25 +121,37 @@ review its contents and repository status before committing. Batch transformed
 text outputs remain generated evaluation artifacts. Round-trip detailed reports
 remain under `private/`.
 
-## Current provider and live qualification status
+## Canonical providers and qualification evidence
 
-Read-only configuration inspection on 2026-10-26 found text aliases
-`local-qwen`, `groq-qwen`, and `groq-gpt-oss`; configured STT provider choices
-are `local` and optional `groq`. TTS has no API provider selector. The active
-Gateway policy has text cloud disabled and Groq STT disabled. A private
-`private/groq_api` credential file does not by itself configure the Gateway;
-the active configured cloud secret file and policy must be enabled through an
-approved deployment path. No CLI path bypasses those settings.
+The tracked [`configs/gateway.yaml`](../../configs/gateway.yaml) is the
+canonical Gateway configuration for the root Compose installation. It enables
+text transformation with ordered selection and `allow_cloud: true`. Its text
+aliases are `local-qwen` (`qwen3.5:9b-q4_K_M`, Ollama), `groq-qwen`
+(`qwen/qwen3.8-27b`, Groq; `max_completion_tokens: 512`), and `groq-gpt-oss`
+(`openai/gpt-oss-120b`, Groq; `max_completion_tokens: 1024`). Groq credentials
+are optional for Gateway startup and are supplied through the protected file
+selected by `GATEWAY_SECRETS_FILE` (default `private/cloud.env`). Missing
+credentials make the selected cloud provider unavailable; they do not authorize
+fallback for an explicitly selected model. For an unspecified model, ordered
+selection can use a later eligible model after a provider failure, but only if
+the request permits cloud and Gateway policy allows it.
 
-Local STT, TTS and local-Qwen transformation have observed live HTTP 200 results
-recorded in the M07B2 verification record and 2026-10-26 deployment report.
-They establish technical operation only for those requests. On 2026-10-26,
-cloud text policy returned HTTP 403 `cloud_not_allowed`, and disabled Groq STT
-returned HTTP 503 `provider_unavailable`; no cloud inference was attempted.
-Groq inference with valid credentials remains NOT ESTABLISHED. Initial model
-metadata preflight failures were resolved by running in the operator's already
-assigned model-reader group. The supported install then completed for revision
-`4ec5878`. These records do not qualify the full provider matrix.
+Groq STT remains disabled in canonical configuration and requires both operator
+enablement and per-request `X-Allow-Cloud-Audio: true`. It uses
+`GROQ_STT_API_KEY`, independently of text-cloud policy. TTS has no API-level
+provider/model selector; current deployment uses the configured local worker.
+The public API does not expose text-model/provider health or a model catalog.
+
+Live results below describe dated, bounded qualification runs, not the current
+runtime state. The 2026-10-26 M07B2 run sent 186 text requests to the then-running
+installation; its exact revision, model outcomes and quality review are in the
+[M07B2 verification record](../milestones/M07B2/verification.md). It observed
+one Groq Qwen upstream rate-limit failure and material semantic, language
+retention and formatting defects across the samples. It did not establish a
+general model winner, broad linguistic quality, or safe unattended use. HTTP
+success is technical evidence only. Historical live cloud-policy probes and
+older active-config observations in milestone records are snapshots of those
+installations and must not be read as the current tracked configuration.
 
 ## Remaining verified limits
 
@@ -149,6 +161,9 @@ assigned model-reader group. The supported install then completed for revision
   deployment configuration.
 - The API has no text-model catalog, provider health, or public log/correlation
   endpoint. Text aliases must be supplied from trusted deployment config.
+- `TextTransformRequest.model` is marked nullable in OpenAPI, but Gateway rejects
+  an explicit JSON `null`; omit the property to use configured selection. The
+  qualification CLI and batch tool already do this.
 - Request parameters and response schemas are guarded by deterministic
   OpenAPI drift tests. Gateway-specific routes without public operations are
   recorded separately in this matrix.

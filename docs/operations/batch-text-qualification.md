@@ -1,5 +1,8 @@
 # Batch STT and text-transformation qualification
 
+The command inventory is in the [CLI reference](../cli/reference.md); this
+document describes the batch operation's fixture flow and quality interpretation.
+
 The batch CLI exercises existing WAV fixtures through the public Gateway. It
 transcribes each WAV once using local STT with cloud audio consent disabled,
 then sends that exact transcription to Written, Polite and Diplomatic modes.

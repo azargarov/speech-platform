@@ -1,5 +1,7 @@
 # Gateway qualification CLI
 
+The complete command inventory and concise syntax is in the [CLI reference](../cli/reference.md). This guide retains qualification-specific procedures, safety notes, report interpretation and evidence handling.
+
 The full route/field/provider/limitation matrix is in the
 [qualification capability matrix](qualification-capabilities.md).
 
@@ -121,18 +123,27 @@ sent unchanged, for example:
 The canonical [`configs/gateway.yaml`](../../configs/gateway.yaml) defines
 ordered selection with `allow_cloud=true` and these enabled aliases:
 
-| Alias | Configured provider locality | Current cloud policy |
-| --- | --- | --- |
-| `local-qwen` | Local | Eligible under current policy |
-| `groq-qwen` | Cloud | Eligible only when the request explicitly allows cloud |
-| `groq-gpt-oss` | Cloud | Eligible only when the request explicitly allows cloud |
+| Alias | Provider | Configured model | Completion budget |
+| --- | --- | --- | ---: |
+| `local-qwen` | Local Ollama | `qwen3.5:9b-q4_K_M` | `num_predict: 1024` |
+| `groq-qwen` | Groq | `qwen/qwen3.8-27b` | `max_completion_tokens: 512` |
+| `groq-gpt-oss` | Groq | `openai/gpt-oss-120b` | `max_completion_tokens: 1024` |
 
 `--allow-cloud` sets `local_only=false`; the Gateway still enforces its own
-cloud policy, model availability and alias validity. Without the flag, an
-explicit cloud alias is sent with `local_only=true` and the Gateway rejects it.
-Unknown or disabled aliases are likewise left for the Gateway to reject. Batch
+cloud policy, model availability and alias validity. Without the flag, the CLI
+sets `local_only=true`, so an explicit cloud alias is rejected. In the canonical
+configuration, Gateway policy permits cloud routing (`allow_cloud=true`), but
+credentials must also be available. With no explicit model, ordered selection
+starts with local models and may try later eligible models after provider
+failure. An explicit model selection never falls back. The response reports the
+actual provider/model and whether a later candidate was used. Batch
 qualification has no `--model` option: it omits the field and reports the actual
 model returned by the Gateway.
+
+This CLI default differs from the public API default: Gateway treats an omitted
+`local_only` property as `false`. Direct API clients should explicitly send
+`local_only: true` whenever a request must remain local. The API field controls
+eligibility; it is not a separate consent mechanism.
 
 CLI language, transformation mode/format, TTS mode/language, and audio
 input-format/processing choices are checked against the corresponding public
@@ -153,8 +164,8 @@ unavailable. Local routes and readiness remain usable.
 
 Text-cloud routing also requires `text_transform.selection.allow_cloud: true`.
 This is a Gateway startup setting; prompt SIGHUP reload does not change it.
-Even with that setting enabled, ordinary qualification remains local-only.
-Select a cloud alias explicitly and pass `--allow-cloud` for text, or select
+The canonical configuration sets it to true, while ordinary qualification
+remains local-only. Select a cloud alias explicitly and pass `--allow-cloud` for text, or select
 `--provider groq --allow-cloud-audio` for STT. Both controls are per request.
 To diagnose one capability, run its existing single-request command with an
 operator-approved synthetic or otherwise authorized input. For example, with
@@ -168,16 +179,18 @@ provider lacking usable credentials. A successful response records provider
 provenance. A remote Gateway does not disclose whether an unavailable provider
 is disabled or enabled without credentials; inspect its local config and safe
 startup warning to distinguish those states.
-The default model selection policy should remain local-first/local-only unless
-an operator intentionally changes it. Groq TTS is not provided. The current
+The CLI's local-only default prevents cloud use unless an operator explicitly
+adds `--allow-cloud`; API clients control `local_only` directly. Groq TTS is not provided. The current
 batch STT/text tool and TTS → STT round-trip tool remain local-only. The
 single-request TTS command accepts `--input-format text|ssml`; SSML must satisfy
 the Gateway's supported subset and configured limits.
 
-After enabling a Gateway startup policy, use the repository deployment path.
-There is no supported Gateway-only deployment target: `make install` builds
-and updates Gateway, STT and TTS together. Review its impact and recovery
-prerequisites before running it on a shared host.
+The installer supports independent component selection. For example,
+`make install COMPONENTS=gateway PYTHON=.venv/bin/python` updates only Gateway;
+enabled workers omitted from the selection must already be healthy and
+compatible. Full-stack installation remains the default. See the
+[installation guide](installation.md#configure-check-and-install) for
+preflight and lifecycle details.
 
 ### Provider comparison
 
@@ -214,7 +227,7 @@ existing shape. TTS responses currently do not expose a public model/provider
 identity by contract; the CLI records WAV metadata/content type and records a
 provider or model header only if an actual response includes one.
 
-TTS WAV is inspected in memory and discarded unless `--output` is given. WAV output may use any relative or absolute filesystem path, including `~/...`; the parent directory must already exist and be writable. The CLI does not create directories or overwrite files. It uses exclusive creation with mode `0600` and removes a partial file if writing fails when cleanup is possible. A permission failure discovered at file creation happens after the Gateway request, so synthesis may complete without a saved WAV. Choose a destination appropriate for generated audio and its sensitivity. `--report` and `--evidence` remain restricted to an existing path under `private/`.
+TTS WAV is inspected in memory and discarded unless `--output` is given. WAV output may use any relative or absolute filesystem path, including `~/...`; the parent directory must already exist and be writable. The CLI does not create directories or overwrite files. It uses exclusive creation with mode `0600` and removes a partial file if writing fails when cleanup is possible. A permission failure discovered at file creation happens after the Gateway request, so synthesis may complete without a saved WAV. Choose a destination appropriate for generated audio and its sensitivity. `--report` and `--evidence` accept explicit relative or absolute paths, create missing parent directories, use mode `0600` and exclusive creation, and never overwrite an existing file. `private/` is recommended for sensitive outputs; files outside it may be included in Git if added.
 
 All requested output destinations are canonicalized and checked for collisions before an API request. Output creation or writing failures return exit code 3. If a WAV or evidence artifact was successfully written before a later evidence/report write fails, the CLI does not remove that completed artifact; inspect and remove it manually if needed. A partial file from a failed write is removed when possible; if cleanup itself fails, the error states that a partial file may remain.
 

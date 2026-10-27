@@ -474,6 +474,7 @@ components:
         local_only:
           type: boolean
           default: false
+          description: When true, restricts this request to local providers. The current API default is false; set true to guarantee local-only routing. Cloud models are eligible only when Gateway selection policy also allows them.
       description: When mode is raw, format must be normal. Validation is enforced by the Gateway.
     TextTransformOptions:
       type: object

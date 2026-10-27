@@ -5,6 +5,9 @@ read-only `scripts/preflight.py`. `make install`, `status`, `logs`, and `stop` u
 Make and Docker Compose. Focused helpers sanitize Compose invocation, retain
 existing image IDs, verify built-image labels and run CUDA visibility probes.
 Make and Docker Compose are the supported deployment path.
+The [CLI reference](../cli/reference.md) summarizes supported setup, validation
+and component-selection commands; this guide owns detailed prerequisites,
+preflight, deployment and recovery procedures.
 The historical VoiceService installer has been retired. The descriptor
 `releases/voiceservice-v0.1.2.yaml` remains as historical model and image
 provenance; it does not describe the current VoxCPM2 deployment.
@@ -210,9 +213,14 @@ Preflight inspects the existing Ollama container/network and queries
 unreachable required local provider is FAIL. It does not test Gateway container
 DNS before installation; service health checks establish runtime connectivity.
 
-Cloud routing is permitted by `selection.allow_cloud: true`, but still requires
-per-request consent. Missing credentials make the selected cloud provider
-unavailable; Gateway does not substitute another provider.
+Cloud routing requires `selection.allow_cloud: true` and a request that permits
+cloud eligibility. The qualification CLI is local-only unless `--allow-cloud`
+is supplied. In the public API, `local_only` currently defaults to `false`; set
+it to `true` to require local routing. With an explicitly selected model, a
+provider error does not fall back to another alias. With no model selected, the
+configured ordered policy may try a later eligible alias after a provider
+failure; the response records whether that happened. Missing credentials make
+the corresponding cloud provider unavailable.
 For enabled cloud models, use an HTTPS endpoint and an `api_key_env` identifier;
 put the matching KEY=value entries in `private/cloud.env` (0600), or set
 `GATEWAY_SECRETS_FILE` to another private file. Do not quote values, use whitespace,

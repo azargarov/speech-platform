@@ -1,5 +1,8 @@
 # TTS-to-STT round-trip qualification
 
+See the [CLI reference](../cli/reference.md) for the broader command inventory;
+this guide covers round-trip inputs, reports and interpretation.
+
 The round-trip runner synthesizes each text fixture through the authenticated public Gateway TTS route, then transcribes that WAV through the public STT route with provider `local` and cloud-audio consent disabled:
 
 ```sh

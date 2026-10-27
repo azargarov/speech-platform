@@ -23,9 +23,12 @@ buffered. Full queues return 429, and request deadline exhaustion returns 504.
 Public STT is local-only by default. Optional Groq STT requires operator
 configuration and per-request `X-Allow-Cloud-Audio: true`; text transformation
 cloud authorization does not grant audio authorization. See the [Groq STT
-operations note](groq-stt.md). Text transformation retains its configured provider ordering, explicit model,
-`local_only`, and `allow_cloud` rules. Cloud remains opt-in and a cold or
-warming local model does not by itself trigger cloud fallback.
+operations note](groq-stt.md). Text transformation retains its configured
+provider ordering, explicit model, `local_only`, and `allow_cloud` rules. Cloud
+is eligible only when both request and Gateway policy permit it. For an
+unspecified model, an eligible later provider may be tried after an earlier
+provider fails; explicitly selected models never fall back. A cold or warming
+local model does not independently change the request's cloud authorization.
 
 Preflight validates host NVIDIA prerequisites and observes free VRAM headroom;
 installation also runs a bounded, network-disabled CUDA visibility probe inside
